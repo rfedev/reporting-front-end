@@ -1,0 +1,363 @@
+"""Custom NodeGraphQt nodes for queries and table lists."""
+
+from typing import List, Optional, Tuple
+from PySide6 import QtCore, QtGui, QtWidgets
+from NodeGraphQt import BaseNode
+from NodeGraphQt.constants import NodeEnum
+from NodeGraphQt.qgraphics.node_base import NodeItem
+from NodeGraphQt.qgraphics.pipe import PipeItem
+
+# Visual Palette
+COLOR_GREEN = (35, 115, 70, 255)         # Input table box & noodle
+COLOR_BLUE = (45, 80, 130, 255)          # Query node box & noodle
+COLOR_DARK_ORANGE = (180, 85, 20, 255)   # Output table box & noodle
+COLOR_DARK_PURPLE = (110, 45, 130, 255)  # Output CSV box & noodle
+
+
+class TableBoxItem(NodeItem):
+    """Custom graphics item for TableBoxNode with arrow expand/collapse and native text rendering."""
+
+    def __init__(self, name="Table Box", parent=None):
+        super().__init__(name, parent)
+        self.collapsed = False
+        self.table_lines: List[str] = []
+        self.table_box_type: str = "Input Tables"
+        self.custom_title: Optional[str] = None
+
+        # Arrow icon in node header
+        self._arrow_item = QtWidgets.QGraphicsSimpleTextItem("▼", self)
+        self._arrow_item.setBrush(QtGui.QBrush(QtGui.QColor(220, 220, 220)))
+        font = QtGui.QFont("sans-serif", 9, QtGui.QFont.Bold)
+        self._arrow_item.setFont(font)
+
+    def set_custom_title(self, title: str):
+        self.custom_title = title
+        if self._text_item:
+            self._text_item.setPlainText(title)
+        self.draw_node()
+
+    def set_table_lines(self, lines: List[str]):
+        self.table_lines = list(lines)
+        self.draw_node()
+
+    def _align_label_horizontal(self, h_offset, v_offset):
+        if self.custom_title and self._text_item:
+            self._text_item.setPlainText(self.custom_title)
+        rect = self.boundingRect()
+        text_rect = self._text_item.boundingRect()
+
+        has_in = any(p.isVisible() for p in self.inputs)
+        left_x = rect.left() + (22 if has_in else 12)
+        y = rect.y() + v_offset + 3
+
+        self._text_item.setPos(left_x, y)
+        self._arrow_item.setPos(left_x + text_rect.width() + 6, y + 1)
+
+    def _calc_size_horizontal(self):
+        text_w = self._text_item.boundingRect().width() + self._arrow_item.boundingRect().width() + 24
+        text_h = self._text_item.boundingRect().height()
+
+        fm = QtGui.QFontMetrics(QtGui.QFont("monospace", 10))
+        lines_w = max([fm.horizontalAdvance(line) for line in self.table_lines] or [60])
+        body_w = lines_w + 24
+
+        has_in = any(p.isVisible() for p in self.inputs)
+        has_out = any(p.isVisible() for p in self.outputs)
+        port_pad = (20.0 if has_in else 10.0) + (20.0 if has_out else 10.0)
+
+        total_w = max(text_w, body_w) + port_pad
+        if self.collapsed:
+            total_h = text_h + 16.0
+        else:
+            line_h = fm.lineSpacing()
+            count = len(self.table_lines) if self.table_lines else 1
+            total_h = text_h + 12.0 + (count * line_h) + 12.0
+
+        return max(total_w, 130.0), max(total_h, 42.0)
+
+    def _paint_horizontal(self, painter, option, widget):
+        super()._paint_horizontal(painter, option, widget)
+        if self.collapsed:
+            return
+
+        painter.save()
+        rect = self.boundingRect()
+        text_rect = self._text_item.boundingRect()
+
+        has_in = any(p.isVisible() for p in self.inputs)
+        left_x = rect.left() + (22.0 if has_in else 12.0)
+        y = rect.top() + text_rect.height() + 10.0
+
+        font = QtGui.QFont("monospace", 10)
+        painter.setFont(font)
+        fm = QtGui.QFontMetrics(font)
+        line_h = fm.lineSpacing()
+
+        painter.setPen(QtGui.QColor(235, 235, 235))
+        display_lines = self.table_lines if self.table_lines else ["• (None)"]
+        for line in display_lines:
+            painter.drawText(QtCore.QPointF(left_x, y + fm.ascent()), line)
+            y += line_h
+
+        painter.restore()
+
+    def mousePressEvent(self, event):
+        arrow_rect = self._arrow_item.boundingRect().translated(self._arrow_item.pos()).adjusted(-6, -6, 6, 6)
+        if arrow_rect.contains(event.pos()):
+            self.toggle_collapse()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def toggle_collapse(self):
+        self.collapsed = not self.collapsed
+        self._arrow_item.setText("▶" if self.collapsed else "▼")
+        self.draw_node()
+
+
+class QueryNode(BaseNode):
+    """Node representing an individual SQL query file."""
+
+    __identifier__ = "reporting.nodes"
+    NODE_NAME = "Query"
+
+    def __init__(self):
+        super().__init__()
+        # Input execution port (connect from prior queries) - Blue
+        self.add_input("run_in", multi_input=True, display_name=True, color=(COLOR_BLUE[0], COLOR_BLUE[1], COLOR_BLUE[2]))
+        # Input tables port (connect from input TableBox) - Green
+        self.add_input("tables_in", multi_input=True, display_name=True, color=(COLOR_GREEN[0], COLOR_GREEN[1], COLOR_GREEN[2]))
+
+        # Output execution port (connect to subsequent queries) - Blue
+        self.add_output("run_out", multi_output=True, display_name=True, color=(COLOR_BLUE[0], COLOR_BLUE[1], COLOR_BLUE[2]))
+        # Output tables port (connect to output TableBox) - Dark Orange
+        self.add_output("tables_out", multi_output=True, display_name=True, color=(COLOR_DARK_ORANGE[0], COLOR_DARK_ORANGE[1], COLOR_DARK_ORANGE[2]))
+        # Output CSV port (connect to output CSV TableBox) - Dark Purple
+        self.add_output("csv_out", multi_output=True, display_name=True, color=(COLOR_DARK_PURPLE[0], COLOR_DARK_PURPLE[1], COLOR_DARK_PURPLE[2]))
+
+        # Custom properties
+        self.create_property("query_name", "")
+        self.create_property("query_path", "")
+        self.create_property("report_name", "")
+        self.create_property("parameters", "")
+
+        # Visual styling - Blue
+        self.set_color(COLOR_BLUE[0], COLOR_BLUE[1], COLOR_BLUE[2])
+
+
+class TableBoxNode(BaseNode):
+    """Node displaying a vertical list of database table names rendered directly in the node box."""
+
+    __identifier__ = "reporting.nodes"
+    NODE_NAME = "Table Box"
+
+    def __init__(self):
+        super().__init__(TableBoxItem)
+        # Ports created unconditionally in __init__ so NodeGraphQt serialization restores them properly
+        self.add_input("in_tables", multi_input=True, display_name=False, color=(COLOR_DARK_ORANGE[0], COLOR_DARK_ORANGE[1], COLOR_DARK_ORANGE[2]))
+        self.add_output("out_tables", multi_output=True, display_name=False, color=(COLOR_GREEN[0], COLOR_GREEN[1], COLOR_GREEN[2]))
+
+        self.create_property("box_type", "Input Tables")
+        self.create_property("raw_tables_json", "")
+        self.raw_tables: List[str] = []
+        self.show_full_path: bool = True
+
+        self.set_color(COLOR_GREEN[0], COLOR_GREEN[1], COLOR_GREEN[2])
+
+    def set_display_mode(self, show_full_path: bool):
+        """Switch between full path (e.g. project.dataset.table) and short name (table)."""
+        self.show_full_path = show_full_path
+        self._refresh_display_text()
+
+    def _refresh_display_text(self):
+        # If raw_tables is empty, restore from property if present
+        if not self.raw_tables:
+            saved = self.get_property("raw_tables_json")
+            if saved:
+                import json
+                try:
+                    self.raw_tables = json.loads(saved)
+                except Exception:
+                    pass
+
+        lines = []
+        for t in self.raw_tables:
+            name = t if self.show_full_path else t.split(".")[-1]
+            lines.append(f"• {name}")
+
+        self.view.set_table_lines(lines)
+
+    def setup_as_input(self, tables: List[str]):
+        """Configure node as an Input Table box."""
+        import json
+        self.set_name("Input Tables")
+        self.set_property("box_type", "Input Tables")
+        self.view.table_box_type = "Input Tables"
+        self.view.set_custom_title("Input Tables")
+        self.raw_tables = list(tables)
+        self.set_property("raw_tables_json", json.dumps(self.raw_tables))
+
+        # Input tables connect their out_tables to query tables_in
+        in_p = self.get_input("in_tables")
+        if in_p:
+            in_p.set_visible(False)
+        out_p = self.get_output("out_tables")
+        if out_p:
+            out_p.set_visible(True)
+            out_p.color = COLOR_GREEN
+
+        self._refresh_display_text()
+        self.set_color(COLOR_GREEN[0], COLOR_GREEN[1], COLOR_GREEN[2])
+
+    def setup_as_output(self, tables: List[str]):
+        """Configure node as an Output Table box."""
+        import json
+        self.set_name("Output Tables")
+        self.set_property("box_type", "Output Tables")
+        self.view.table_box_type = "Output Tables"
+        self.view.set_custom_title("Output Tables")
+        self.raw_tables = list(tables)
+        self.set_property("raw_tables_json", json.dumps(self.raw_tables))
+
+        # Output tables receive connection from query tables_out
+        out_p = self.get_output("out_tables")
+        if out_p:
+            out_p.set_visible(False)
+        in_p = self.get_input("in_tables")
+        if in_p:
+            in_p.set_visible(True)
+            in_p.color = COLOR_DARK_ORANGE
+
+        self._refresh_display_text()
+        self.set_color(COLOR_DARK_ORANGE[0], COLOR_DARK_ORANGE[1], COLOR_DARK_ORANGE[2])
+
+    def setup_as_csv_output(self, csv_files: List[str] | str):
+        """Configure node as an Output CSV box displaying output CSV file name(s)."""
+        import json
+        self.set_name("Output CSV")
+        self.set_property("box_type", "Output CSV")
+        self.view.table_box_type = "Output CSV"
+        self.view.set_custom_title("Output CSV")
+        if isinstance(csv_files, str):
+            self.raw_tables = [csv_files]
+        else:
+            self.raw_tables = list(csv_files)
+        self.set_property("raw_tables_json", json.dumps(self.raw_tables))
+
+        # Output CSV receives connection from query csv_out / tables_out
+        out_p = self.get_output("out_tables")
+        if out_p:
+            out_p.set_visible(False)
+        in_p = self.get_input("in_tables")
+        if in_p:
+            in_p.set_visible(True)
+            in_p.color = COLOR_DARK_PURPLE
+
+        self._refresh_display_text()
+        self.set_color(COLOR_DARK_PURPLE[0], COLOR_DARK_PURPLE[1], COLOR_DARK_PURPLE[2])
+
+    def on_property_changed(self, name, value):
+        super().on_property_changed(name, value)
+        if name == "raw_tables_json":
+            self._refresh_display_text()
+        elif name == "box_type":
+            self.view.table_box_type = value
+            self.view.set_custom_title(value)
+            if value == "Input Tables":
+                in_p = self.get_input("in_tables")
+                if in_p:
+                    in_p.set_visible(False)
+                out_p = self.get_output("out_tables")
+                if out_p:
+                    out_p.set_visible(True)
+                self.set_color(COLOR_GREEN[0], COLOR_GREEN[1], COLOR_GREEN[2])
+            elif value == "Output CSV":
+                out_p = self.get_output("out_tables")
+                if out_p:
+                    out_p.set_visible(False)
+                in_p = self.get_input("in_tables")
+                if in_p:
+                    in_p.set_visible(True)
+                    in_p.color = COLOR_DARK_PURPLE
+                self.set_color(COLOR_DARK_PURPLE[0], COLOR_DARK_PURPLE[1], COLOR_DARK_PURPLE[2])
+            else:
+                out_p = self.get_output("out_tables")
+                if out_p:
+                    out_p.set_visible(False)
+                in_p = self.get_input("in_tables")
+                if in_p:
+                    in_p.set_visible(True)
+                    in_p.color = COLOR_DARK_ORANGE
+                self.set_color(COLOR_DARK_ORANGE[0], COLOR_DARK_ORANGE[1], COLOR_DARK_ORANGE[2])
+
+
+def get_noodle_color(pipe: PipeItem) -> Tuple[int, int, int, int]:
+    """Calculate the noodle colour based on connected node types."""
+    out_p = pipe.output_port
+    in_p = pipe.input_port
+    if not out_p or not in_p:
+        return COLOR_BLUE
+
+    out_node = out_p.node
+    in_node = in_p.node
+
+    out_box_type = getattr(out_node, "table_box_type", "")
+    in_box_type = getattr(in_node, "table_box_type", "")
+    in_node_name = getattr(in_node, "name", "")
+    out_node_name = getattr(out_node, "name", "")
+
+    # 1. From input table to query node: same green as input table box
+    if (
+        out_box_type == "Input Tables"
+        or out_p.name == "out_tables"
+        or in_p.name == "tables_in"
+        or "Input" in out_node_name
+        or "[In]" in out_node_name
+    ):
+        return COLOR_GREEN
+
+    # 2. From query node to output CSV box: same dark purple as output CSV box
+    if (
+        in_box_type == "Output CSV"
+        or in_p.name == "in_csv"
+        or out_p.name == "csv_out"
+        or "CSV" in in_node_name
+    ):
+        return COLOR_DARK_PURPLE
+
+    # 3. From query node to output table: same dark orange as output table box
+    if (
+        in_box_type == "Output Tables"
+        or (in_p.name == "in_tables" and out_p.name == "tables_out")
+        or "Out" in in_node_name
+        or "Output Tables" in in_node_name
+    ):
+        return COLOR_DARK_ORANGE
+
+    # 4. From query node to query node: same blue as query node box
+    if out_p.name == "run_out" and in_p.name == "run_in":
+        return COLOR_BLUE
+
+    # Default fallback
+    return COLOR_BLUE
+
+
+# Install PipeItem monkey patches for dynamic noodle coloring
+_orig_pipe_reset = PipeItem.reset
+_orig_pipe_set_connections = PipeItem.set_connections
+
+
+def _custom_pipe_reset(self):
+    color = get_noodle_color(self)
+    if color:
+        self._color = color
+    _orig_pipe_reset(self)
+
+
+def _custom_pipe_set_connections(self, port1, port2):
+    _orig_pipe_set_connections(self, port1, port2)
+    self.reset()
+
+
+PipeItem.reset = _custom_pipe_reset
+PipeItem.set_connections = _custom_pipe_set_connections

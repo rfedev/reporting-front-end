@@ -1,0 +1,124 @@
+"""Unit tests for the bigquery_run execution module."""
+
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+import pandas as pd
+
+from reporting_app.core.bigquery_run import (
+    is_csv_export_query,
+    run_bigquery_script,
+    substitute_parameters,
+)
+
+
+class TestBigQueryRun(unittest.TestCase):
+
+    def test_substitute_parameters(self):
+        sql = "SELECT * FROM `mytable` WHERE dt = '{repDate}' AND id = {id};"
+        params = {"repDate": "2026-09-08", "id": "12345"}
+        res = substitute_parameters(sql, params)
+        self.assertEqual(
+            res,
+            "SELECT * FROM `mytable` WHERE dt = '2026-09-08' AND id = 12345;",
+        )
+
+    def test_is_csv_export_query_select(self):
+        sql = """
+        -- Comment at start
+        /* Multi-line
+           comment */
+        SELECT customer_id, count(1)
+        FROM `proj.dataset.table`
+        GROUP BY 1;
+        """
+        self.assertTrue(is_csv_export_query(sql))
+
+    def test_is_csv_export_query_create_table(self):
+        sql = """
+        CREATE TABLE `proj.dataset.table` AS
+        SELECT 1 as x;
+        """
+        self.assertFalse(is_csv_export_query(sql))
+
+    def test_is_csv_export_query_create_or_replace_table(self):
+        sql = """
+        -- Header comment
+        CREATE OR REPLACE TABLE `proj.dataset.table` AS
+        SELECT 1 as x;
+        """
+        self.assertFalse(is_csv_export_query(sql))
+
+    def test_is_csv_export_query_insert_into(self):
+        sql = """
+        INSERT INTO `proj.dataset.table` (a, b)
+        VALUES (1, 2);
+        """
+        self.assertFalse(is_csv_export_query(sql))
+
+    def test_run_bigquery_script_select_exports_csv(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            sql_file = temp_path / "test_query.sql"
+            sql_file.write_text("SELECT id, name FROM `sample`;", encoding="utf-8")
+
+            outputs_dir = temp_path / "outputs"
+
+            mock_df = pd.DataFrame({"id": [1, 2], "name": ["Alice", "Bob"]})
+            mock_results = MagicMock()
+            mock_results.to_dataframe.return_value = mock_df
+
+            mock_query_job = MagicMock()
+            mock_query_job.result.return_value = mock_results
+
+            mock_client = MagicMock()
+            mock_client.query.return_value = mock_query_job
+
+            with patch("reporting_app.core.bigquery_run.bigquery.Client", return_value=mock_client):
+                result = run_bigquery_script(
+                    sql_script_path=sql_file,
+                    report_name="test_report",
+                    outputs_dir=outputs_dir,
+                    parameters={},
+                )
+
+            self.assertTrue(result["is_export"])
+            self.assertEqual(result["row_count"], 2)
+            expected_csv = outputs_dir / "test_query.csv"
+            self.assertEqual(result["output_file"], str(expected_csv))
+            self.assertTrue(expected_csv.exists())
+
+            # Verify CSV content
+            csv_content = expected_csv.read_text(encoding="utf-8")
+            self.assertIn("Alice", csv_content)
+            self.assertIn("Bob", csv_content)
+
+    def test_run_bigquery_script_create_table_no_csv(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            sql_file = temp_path / "create_table.sql"
+            sql_file.write_text("CREATE TABLE `sample` AS SELECT 1;", encoding="utf-8")
+
+            outputs_dir = temp_path / "outputs"
+
+            mock_query_job = MagicMock()
+            mock_client = MagicMock()
+            mock_client.query.return_value = mock_query_job
+
+            with patch("reporting_app.core.bigquery_run.bigquery.Client", return_value=mock_client):
+                result = run_bigquery_script(
+                    sql_script_path=sql_file,
+                    report_name="test_report",
+                    outputs_dir=outputs_dir,
+                    parameters={},
+                )
+
+            self.assertFalse(result["is_export"])
+            self.assertIsNone(result["output_file"])
+            # Ensure no CSV was created
+            self.assertFalse((outputs_dir / "create_table.csv").exists())
+
+
+if __name__ == "__main__":
+    unittest.main()

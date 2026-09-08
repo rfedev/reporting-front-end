@@ -1,0 +1,9 @@
+Do not use. This is just for notes.
+
+## Process flow
+A process flow is contained in a json file. The name of the process flow is the name of the json file (without the extension).
+The process flow contains a run order of 'queries' which can branch off and converge etc. The queries can have parameters which will be held as an array of key/value pairs.
+
+
+## Tables
+This is a database of all tables used in the application.

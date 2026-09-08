@@ -1,0 +1,616 @@
+{
+  "flow_name": "Process-01",
+  "report_name": "l0006-policy-counts",
+  "query_names": [
+    "policy-counts-output",
+    "policy-counts-01",
+    "policy-counts-02",
+    "policy-counts-03"
+  ],
+  "parameter_defaults": {
+    "repDate": "2026-09-01",
+    "policyStatus": "ACTIVE"
+  },
+  "show_full_table_names": true,
+  "graph_session": {
+    "graph": {
+      "layout_direction": 0,
+      "acyclic": true,
+      "pipe_collision": false,
+      "pipe_slicing": true,
+      "pipe_style": 1,
+      "accept_connection_types": "{}",
+      "reject_connection_types": "{}"
+    },
+    "nodes": {
+      "0x7f49688fa8b0": {
+        "type_": "reporting.nodes.QueryNode",
+        "icon": null,
+        "name": "policy-counts-output",
+        "color": [
+          45,
+          80,
+          130,
+          255
+        ],
+        "border_color": [
+          74,
+          84,
+          85,
+          255
+        ],
+        "text_color": [
+          255,
+          255,
+          255,
+          180
+        ],
+        "disabled": false,
+        "selected": false,
+        "visible": true,
+        "width": 162.359375,
+        "height": 98.3,
+        "pos": [
+          -394.37361588532724,
+          495.08211385570644
+        ],
+        "layout_direction": 0,
+        "port_deletion_allowed": false,
+        "subgraph_session": {},
+        "custom": {
+          "query_name": "policy-counts-output",
+          "query_path": "/home/ric/git/reporting-front-end/reports/l0006-policy-counts/queries/policy-counts-output.sql",
+          "report_name": "l0006-policy-counts",
+          "parameters": ""
+        }
+      },
+      "0x7f49688fa9e0": {
+        "type_": "reporting.nodes.TableBoxNode",
+        "icon": null,
+        "name": "Input Tables 3",
+        "color": [
+          35,
+          115,
+          70,
+          255
+        ],
+        "border_color": [
+          74,
+          84,
+          85,
+          255
+        ],
+        "text_color": [
+          255,
+          255,
+          255,
+          180
+        ],
+        "disabled": false,
+        "selected": false,
+        "visible": true,
+        "width": 428.0,
+        "height": 96.0,
+        "pos": [
+          -932.4630421798375,
+          529.2864932980024
+        ],
+        "layout_direction": 0,
+        "port_deletion_allowed": false,
+        "subgraph_session": {},
+        "custom": {
+          "box_type": "Input Tables",
+          "raw_tables_json": "[\"analytics_reporting.final_policy_counts_report\"]"
+        }
+      },
+      "0x7f49688fab10": {
+        "type_": "reporting.nodes.TableBoxNode",
+        "icon": null,
+        "name": "Output CSV",
+        "color": [
+          110,
+          45,
+          130,
+          255
+        ],
+        "border_color": [
+          74,
+          84,
+          85,
+          255
+        ],
+        "text_color": [
+          255,
+          255,
+          255,
+          180
+        ],
+        "disabled": false,
+        "selected": false,
+        "visible": true,
+        "width": 428.0,
+        "height": 96.0,
+        "pos": [
+          -15.997450353860692,
+          582.9446382555693
+        ],
+        "layout_direction": 0,
+        "port_deletion_allowed": false,
+        "subgraph_session": {},
+        "custom": {
+          "box_type": "Output CSV",
+          "raw_tables_json": "[\"analytics_reporting.final_policy_counts_report\"]"
+        }
+      },
+      "0x7f49688fad70": {
+        "type_": "reporting.nodes.QueryNode",
+        "icon": null,
+        "name": "policy-counts-01 1",
+        "color": [
+          45,
+          80,
+          130,
+          255
+        ],
+        "border_color": [
+          74,
+          84,
+          85,
+          255
+        ],
+        "text_color": [
+          255,
+          255,
+          255,
+          180
+        ],
+        "disabled": false,
+        "selected": false,
+        "visible": true,
+        "width": 162.140625,
+        "height": 98.3,
+        "pos": [
+          -450.240150924327,
+          -224.25754643740427
+        ],
+        "layout_direction": 0,
+        "port_deletion_allowed": false,
+        "subgraph_session": {},
+        "custom": {
+          "query_name": "policy-counts-01",
+          "query_path": "/home/ric/git/reporting-front-end/reports/l0006-policy-counts/queries/policy-counts-01.sql",
+          "report_name": "l0006-policy-counts",
+          "parameters": "repDate, policyStatus"
+        }
+      },
+      "0x7f49688faea0": {
+        "type_": "reporting.nodes.TableBoxNode",
+        "icon": null,
+        "name": "Input Tables 4",
+        "color": [
+          35,
+          115,
+          70,
+          255
+        ],
+        "border_color": [
+          74,
+          84,
+          85,
+          255
+        ],
+        "text_color": [
+          255,
+          255,
+          255,
+          180
+        ],
+        "disabled": false,
+        "selected": false,
+        "visible": true,
+        "width": 202.0,
+        "height": 96.0,
+        "pos": [
+          -799.5661377661413,
+          -202.15545665473846
+        ],
+        "layout_direction": 0,
+        "port_deletion_allowed": false,
+        "subgraph_session": {},
+        "custom": {
+          "box_type": "Input Tables",
+          "raw_tables_json": "[\"raw_data.policies\"]"
+        }
+      },
+      "0x7f49688fafd0": {
+        "type_": "reporting.nodes.TableBoxNode",
+        "icon": null,
+        "name": "Output Tables 3",
+        "color": [
+          180,
+          85,
+          20,
+          255
+        ],
+        "border_color": [
+          74,
+          84,
+          85,
+          255
+        ],
+        "text_color": [
+          255,
+          255,
+          255,
+          180
+        ],
+        "disabled": false,
+        "selected": false,
+        "visible": true,
+        "width": 389.0,
+        "height": 96.0,
+        "pos": [
+          -199.56613776614137,
+          -202.15545665473846
+        ],
+        "layout_direction": 0,
+        "port_deletion_allowed": false,
+        "subgraph_session": {},
+        "custom": {
+          "box_type": "Output Tables",
+          "raw_tables_json": "[\"analytics_reporting.stage_active_policies\"]"
+        }
+      },
+      "0x7f49688fb490": {
+        "type_": "reporting.nodes.QueryNode",
+        "icon": null,
+        "name": "policy-counts-02",
+        "color": [
+          45,
+          80,
+          130,
+          255
+        ],
+        "border_color": [
+          74,
+          84,
+          85,
+          255
+        ],
+        "text_color": [
+          255,
+          255,
+          255,
+          180
+        ],
+        "disabled": false,
+        "selected": false,
+        "visible": true,
+        "width": 162.140625,
+        "height": 98.3,
+        "pos": [
+          -443.1574231471758,
+          83.61460814097656
+        ],
+        "layout_direction": 0,
+        "port_deletion_allowed": false,
+        "subgraph_session": {},
+        "custom": {
+          "query_name": "policy-counts-02",
+          "query_path": "/home/ric/git/reporting-front-end/reports/l0006-policy-counts/queries/policy-counts-02.sql",
+          "report_name": "l0006-policy-counts",
+          "parameters": "repDate"
+        }
+      },
+      "0x7f49688fb5c0": {
+        "type_": "reporting.nodes.TableBoxNode",
+        "icon": null,
+        "name": "Input Tables",
+        "color": [
+          35,
+          115,
+          70,
+          255
+        ],
+        "border_color": [
+          74,
+          84,
+          85,
+          255
+        ],
+        "text_color": [
+          255,
+          255,
+          255,
+          180
+        ],
+        "disabled": false,
+        "selected": false,
+        "visible": true,
+        "width": 389.0,
+        "height": 114.0,
+        "pos": [
+          -956.2054767861777,
+          93.95840165070126
+        ],
+        "layout_direction": 0,
+        "port_deletion_allowed": false,
+        "subgraph_session": {},
+        "custom": {
+          "box_type": "Input Tables",
+          "raw_tables_json": "[\"analytics_reporting.stage_active_policies\", \"raw_data.customers\"]"
+        }
+      },
+      "0x7f49688fb6f0": {
+        "type_": "reporting.nodes.TableBoxNode",
+        "icon": null,
+        "name": "Output Tables",
+        "color": [
+          180,
+          85,
+          20,
+          255
+        ],
+        "border_color": [
+          74,
+          84,
+          85,
+          255
+        ],
+        "text_color": [
+          255,
+          255,
+          255,
+          180
+        ],
+        "disabled": false,
+        "selected": false,
+        "visible": true,
+        "width": 420.0,
+        "height": 96.0,
+        "pos": [
+          -163.1574231471758,
+          43.61460814097656
+        ],
+        "layout_direction": 0,
+        "port_deletion_allowed": false,
+        "subgraph_session": {},
+        "custom": {
+          "box_type": "Output Tables",
+          "raw_tables_json": "[\"analytics_reporting.stage_customer_aggregates\"]"
+        }
+      },
+      "0x7f49688fb820": {
+        "type_": "reporting.nodes.QueryNode",
+        "icon": null,
+        "name": "policy-counts-03",
+        "color": [
+          45,
+          80,
+          130,
+          255
+        ],
+        "border_color": [
+          74,
+          84,
+          85,
+          255
+        ],
+        "text_color": [
+          255,
+          255,
+          255,
+          180
+        ],
+        "disabled": false,
+        "selected": false,
+        "visible": true,
+        "width": 162.140625,
+        "height": 98.3,
+        "pos": [
+          -385.5804068572809,
+          315.1966817960312
+        ],
+        "layout_direction": 0,
+        "port_deletion_allowed": false,
+        "subgraph_session": {},
+        "custom": {
+          "query_name": "policy-counts-03",
+          "query_path": "/home/ric/git/reporting-front-end/reports/l0006-policy-counts/queries/policy-counts-03.sql",
+          "report_name": "l0006-policy-counts",
+          "parameters": ""
+        }
+      },
+      "0x7f49688fb950": {
+        "type_": "reporting.nodes.TableBoxNode",
+        "icon": null,
+        "name": "Input Tables 1",
+        "color": [
+          35,
+          115,
+          70,
+          255
+        ],
+        "border_color": [
+          74,
+          84,
+          85,
+          255
+        ],
+        "text_color": [
+          255,
+          255,
+          255,
+          180
+        ],
+        "disabled": false,
+        "selected": true,
+        "visible": true,
+        "width": 420.0,
+        "height": 96.0,
+        "pos": [
+          -985.5237738860068,
+          319.7671708554509
+        ],
+        "layout_direction": 0,
+        "port_deletion_allowed": false,
+        "subgraph_session": {},
+        "custom": {
+          "box_type": "Input Tables",
+          "raw_tables_json": "[\"analytics_reporting.stage_customer_aggregates\"]"
+        }
+      },
+      "0x7f49688fba80": {
+        "type_": "reporting.nodes.TableBoxNode",
+        "icon": null,
+        "name": "Output Tables 1",
+        "color": [
+          180,
+          85,
+          20,
+          255
+        ],
+        "border_color": [
+          74,
+          84,
+          85,
+          255
+        ],
+        "text_color": [
+          255,
+          255,
+          255,
+          180
+        ],
+        "disabled": false,
+        "selected": false,
+        "visible": true,
+        "width": 428.0,
+        "height": 96.0,
+        "pos": [
+          -108.43624396038575,
+          325.1738311003667
+        ],
+        "layout_direction": 0,
+        "port_deletion_allowed": false,
+        "subgraph_session": {},
+        "custom": {
+          "box_type": "Output Tables",
+          "raw_tables_json": "[\"analytics_reporting.final_policy_counts_report\"]"
+        }
+      }
+    },
+    "connections": [
+      {
+        "in": [
+          "0x7f49688fa8b0",
+          "run_in"
+        ],
+        "out": [
+          "0x7f49688fb820",
+          "run_out"
+        ]
+      },
+      {
+        "in": [
+          "0x7f49688fa8b0",
+          "tables_in"
+        ],
+        "out": [
+          "0x7f49688fa9e0",
+          "out_tables"
+        ]
+      },
+      {
+        "out": [
+          "0x7f49688fa8b0",
+          "csv_out"
+        ],
+        "in": [
+          "0x7f49688fab10",
+          "in_tables"
+        ]
+      },
+      {
+        "in": [
+          "0x7f49688fad70",
+          "tables_in"
+        ],
+        "out": [
+          "0x7f49688faea0",
+          "out_tables"
+        ]
+      },
+      {
+        "out": [
+          "0x7f49688fad70",
+          "run_out"
+        ],
+        "in": [
+          "0x7f49688fb490",
+          "run_in"
+        ]
+      },
+      {
+        "out": [
+          "0x7f49688fad70",
+          "tables_out"
+        ],
+        "in": [
+          "0x7f49688fafd0",
+          "in_tables"
+        ]
+      },
+      {
+        "in": [
+          "0x7f49688fb490",
+          "tables_in"
+        ],
+        "out": [
+          "0x7f49688fb5c0",
+          "out_tables"
+        ]
+      },
+      {
+        "out": [
+          "0x7f49688fb490",
+          "run_out"
+        ],
+        "in": [
+          "0x7f49688fb820",
+          "run_in"
+        ]
+      },
+      {
+        "out": [
+          "0x7f49688fb490",
+          "tables_out"
+        ],
+        "in": [
+          "0x7f49688fb6f0",
+          "in_tables"
+        ]
+      },
+      {
+        "in": [
+          "0x7f49688fb820",
+          "tables_in"
+        ],
+        "out": [
+          "0x7f49688fb950",
+          "out_tables"
+        ]
+      },
+      {
+        "out": [
+          "0x7f49688fb820",
+          "tables_out"
+        ],
+        "in": [
+          "0x7f49688fba80",
+          "in_tables"
+        ]
+      }
+    ]
+  }
+}

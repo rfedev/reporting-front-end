@@ -1,0 +1,60 @@
+"""SQLAlchemy ORM models for application persistence."""
+
+from sqlalchemy import Column, Float, Integer, String, Text, UniqueConstraint
+from reporting_app.persistence.database import Base
+
+
+class AppSetting(Base):
+    """Key-value application settings (e.g. working_directory, auto_scan)."""
+
+    __tablename__ = "app_settings"
+
+    key = Column(String(128), primary_key=True)
+    value = Column(Text, nullable=False)
+
+
+class ParameterDefault(Base):
+    """Stored default values for query parameters at query or process flow scope."""
+
+    __tablename__ = "parameter_defaults"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    scope_type = Column(String(32), nullable=False)  # "query" or "flow"
+    scope_name = Column(String(256), nullable=False)  # query_name or flow_name
+    param_name = Column(String(128), nullable=False)
+    default_value = Column(Text, nullable=False, default="")
+
+    __table_args__ = (
+        UniqueConstraint("scope_type", "scope_name", "param_name", name="uq_scope_param"),
+    )
+
+
+class CatalogTable(Base):
+    """Catalog of all tables used across queries in the application."""
+
+    __tablename__ = "catalog_tables"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    table_name = Column(String(256), nullable=False, index=True)
+    report_name = Column(String(128), nullable=False, index=True)
+    query_name = Column(String(128), nullable=False, index=True)
+    table_type = Column(String(32), nullable=False)  # "input" or "output"
+
+
+class CachedQueryMeta(Base):
+    """Cached query metadata for quick retrieval."""
+
+    __tablename__ = "cached_query_meta"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    report_name = Column(String(128), nullable=False)
+    query_name = Column(String(128), nullable=False)
+    file_path = Column(Text, nullable=False)
+    mtime = Column(Float, nullable=False)
+    parameters_json = Column(Text, nullable=False, default="[]")
+    input_tables_json = Column(Text, nullable=False, default="[]")
+    output_tables_json = Column(Text, nullable=False, default="[]")
+
+    __table_args__ = (
+        UniqueConstraint("report_name", "query_name", name="uq_report_query"),
+    )

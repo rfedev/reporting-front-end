@@ -106,10 +106,9 @@ class TestUISmoke(unittest.TestCase):
 
         # Check nodes on canvas
         nodes = editor.graph.all_nodes()
-        node_names = [n.name() for n in nodes]
-        self.assertIn("Output CSV", node_names)
-
-        csv_node = [n for n in nodes if n.name() == "Output CSV"][0]
+        csv_nodes = [n for n in nodes if n.get_property("box_type") == "Output CSV"]
+        self.assertEqual(len(csv_nodes), 1)
+        csv_node = csv_nodes[0]
         self.assertEqual(csv_node.get_property("box_type"), "Output CSV")
         # Header title rendered has no numeric suffix
         self.assertEqual(csv_node.view.custom_title, "Output CSV")

@@ -29,6 +29,7 @@ from reporting_app.controllers.app_controller import AppController
 from reporting_app.controllers.flow_controller import ProcessFlowController
 from reporting_app.core.bigquery_run import run_bigquery_script
 from reporting_app.core.models import ProcessFlowInfo, QueryInfo, QueryParameter, Report
+from reporting_app.presentation.flow_editor.graph_builder import ProcessFlowGraphBuilder
 from reporting_app.presentation.flow_editor.nodes import QueryNode, TableBoxNode
 from reporting_app.presentation.flow_editor.query_tree_widget import QueryManagementPanel
 from reporting_app.presentation.query_dialog import QueryRunDialog
@@ -45,7 +46,7 @@ class ProcessFlowEditorWindow(QMainWindow):
         flow_info: Optional[ProcessFlowInfo] = None,
         flow_name: Optional[str] = None,
         app_controller: Optional[AppController] = None,
-        parent=None,
+        parent: Optional[QWidget] = None,
     ):
         super().__init__(parent)
         self.report = report
@@ -65,6 +66,7 @@ class ProcessFlowEditorWindow(QMainWindow):
         self.resize(1200, 750)
 
         self._node_counter = 0
+        self._node_positions: Dict[str, Tuple[float, float]] = {}
         # Load persisted show_full_table_names state
         self.show_full_table_names = self.flow_controller.get_show_full_table_names()
 
@@ -72,6 +74,10 @@ class ProcessFlowEditorWindow(QMainWindow):
         self._build_ui()
         self._setup_canvas_pan_and_select()
         self._load_initial_graph()
+
+        # Connect file watcher / report change signal to detect disk edits to queries
+        if self.app_controller:
+            self.app_controller.active_report_changed.connect(self._on_report_updated_from_controller)
 
     def _init_graph(self) -> None:
         """Initialize NodeGraphQt instance and register custom nodes."""
@@ -383,84 +389,76 @@ class ProcessFlowEditorWindow(QMainWindow):
 
         # If empty session but query names exist in flow definition, create nodes for them
         flow_query_names = self.flow_controller.get_query_names()
-        x_offset = 0
-        for qname in flow_query_names:
-            self.add_query_to_canvas(qname, pos=(x_offset, 0))
-            x_offset += 650
+        queries_to_add = [self.report.get_query(q) for q in flow_query_names if self.report.get_query(q)]
+        if queries_to_add:
+            ProcessFlowGraphBuilder.rebuild_graph(
+                self.graph,
+                queries_to_add,
+                self._node_positions,
+                self.show_full_table_names,
+            )
 
         QtCore.QTimer.singleShot(100, self._fit_graph_to_canvas)
 
+    def _sync_graph_topology(self, additional_query: Optional[str] = None) -> None:
+        """Reconcile and synchronize the graph topology for all active query nodes on the canvas."""
+        # Find all active query names currently on the canvas
+        active_query_names: List[str] = []
+        for node in self.graph.all_nodes():
+            if isinstance(node, QueryNode) or getattr(node, "type_", "") == "reporting.nodes.QueryNode":
+                qname = node.get_property("query_name") or node.name()
+                if qname and qname not in active_query_names:
+                    active_query_names.append(qname)
+
+        if additional_query and additional_query not in active_query_names:
+            active_query_names.append(additional_query)
+
+        active_queries = [self.report.get_query(name) for name in active_query_names if self.report.get_query(name)]
+
+        # Reconstruct graph according to Process Flow Graph Logic
+        self._node_positions = ProcessFlowGraphBuilder.rebuild_graph(
+            self.graph,
+            active_queries,
+            self._node_positions,
+            self.show_full_table_names,
+        )
+
     def add_query_to_canvas(self, query_name: str, pos: Optional[tuple] = None) -> Optional[QueryNode]:
-        """Add a QueryNode and automatically create and connect its Input/Output TableBoxNodes."""
+        """Add a query to the canvas and recalculate the process flow graph topology."""
         qinfo = self.report.get_query(query_name)
         if not qinfo:
             logger.warning(f"Query {query_name} not found in report.")
             return None
 
+        # Check if already on canvas
+        for node in self.graph.all_nodes():
+            if (isinstance(node, QueryNode) or getattr(node, "type_", "") == "reporting.nodes.QueryNode"):
+                existing_name = node.get_property("query_name") or node.name()
+                if existing_name == query_name:
+                    return node
+
         if pos is None:
             self._node_counter += 1
             pos = (200 * (self._node_counter % 4), 120 * (self._node_counter % 4))
 
-        x, y = pos
+        self._node_positions[query_name] = (pos[0], pos[1])
+        self._sync_graph_topology(additional_query=query_name)
 
-        # Create Query Node
-        qnode: QueryNode = self.graph.create_node(
-            "reporting.nodes.QueryNode",
-            name=qinfo.name,
-            pos=[x, y],
-        )
-        qnode.set_property("query_name", qinfo.name)
-        qnode.set_property("query_path", str(qinfo.file_path.resolve()))
-        qnode.set_property("report_name", self.report.name)
-        qnode.set_property("parameters", ", ".join(qinfo.parameter_names))
+        # Return the created query node
+        for node in self.graph.all_nodes():
+            if (isinstance(node, QueryNode) or getattr(node, "type_", "") == "reporting.nodes.QueryNode"):
+                if (node.get_property("query_name") or node.name()) == query_name:
+                    return node
+        return None
 
-        # Automatically create and connect input tables box if there are input tables
-        if qinfo.input_tables:
-            in_table_node: TableBoxNode = self.graph.create_node(
-                "reporting.nodes.TableBoxNode",
-                name=f"{qinfo.name} [In]",
-                pos=[x - 320, y - 40],
-            )
-            in_table_node.setup_as_input(qinfo.input_tables)
-            in_table_node.set_display_mode(self.show_full_table_names)
-            try:
-                in_table_node.get_output("out_tables").connect_to(qnode.get_input("tables_in"))
-            except Exception as e:
-                logger.debug(f"Could not connect input tables port: {e}")
+    def _on_report_updated_from_controller(self, new_report: Optional[Report]) -> None:
+        """Handle disk modifications detected by the application controller/file watcher."""
+        if not new_report or new_report.name != self.report.name:
+            return
 
-        # Automatically create and connect output tables box if there are output tables (dark orange)
-        if qinfo.output_tables:
-            out_table_node: TableBoxNode = self.graph.create_node(
-                "reporting.nodes.TableBoxNode",
-                name=f"{qinfo.name} [Out]",
-                pos=[x + 280, y - 40],
-            )
-            out_table_node.setup_as_output(qinfo.output_tables)
-            out_table_node.set_display_mode(self.show_full_table_names)
-            try:
-                qnode.get_output("tables_out").connect_to(out_table_node.get_input("in_tables"))
-            except Exception as e:
-                logger.debug(f"Could not connect output tables port: {e}")
-
-        # Automatically create and connect output CSV box if query has output CSV (dark purple)
-        if getattr(qinfo, "has_output_csv", False) or getattr(qinfo, "output_csv_tables", None):
-            y_offset = -40 if not qinfo.output_tables else 80
-            csv_table_node: TableBoxNode = self.graph.create_node(
-                "reporting.nodes.TableBoxNode",
-                name=f"{qinfo.name} [CSV]",
-                pos=[x + 280, y + y_offset],
-            )
-            # Display the output CSV file name instead of the table name
-            csv_file_name = f"{qinfo.name}.csv"
-            csv_table_node.setup_as_csv_output(csv_file_name)
-            csv_table_node.set_display_mode(self.show_full_table_names)
-            try:
-                csv_port = qnode.get_output("csv_out") or qnode.get_output("tables_out")
-                csv_port.connect_to(csv_table_node.get_input("in_tables"))
-            except Exception as e:
-                logger.debug(f"Could not connect output CSV port: {e}")
-
-        return qnode
+        self.report = new_report
+        self._refresh_left_queries()
+        self._sync_graph_topology()
 
     def _on_node_double_clicked(self, node) -> None:
         """Handle double click on query node to open in OS default application."""
@@ -478,10 +476,11 @@ class ProcessFlowEditorWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(qinfo.file_path.resolve())))
 
     def _on_delete_selected(self) -> None:
-        """Delete currently selected nodes from the canvas."""
+        """Delete currently selected nodes from the canvas and resynchronize topology."""
         selected_nodes = self.graph.selected_nodes()
         if selected_nodes:
             self.graph.delete_nodes(selected_nodes)
+            self._sync_graph_topology()
             self.status_bar.showMessage(f"Deleted {len(selected_nodes)} node(s).", 3000)
 
     def _on_save(self) -> None:
@@ -622,6 +621,7 @@ class ProcessFlowEditorWindow(QMainWindow):
             ]
             if nodes_to_remove:
                 self.graph.delete_nodes(nodes_to_remove)
+            self._sync_graph_topology()
 
     def _on_query_renamed(self, old_name: str, new_name: str) -> None:
         if self.app_controller:

@@ -190,7 +190,6 @@ class TableBoxNode(BaseNode):
     def setup_as_input(self, tables: List[str]):
         """Configure node as an Input Table box."""
         import json
-        self.set_name("Input Tables")
         self.set_property("box_type", "Input Tables")
         self.view.table_box_type = "Input Tables"
         self.view.set_custom_title("Input Tables")
@@ -212,21 +211,22 @@ class TableBoxNode(BaseNode):
     def setup_as_output(self, tables: List[str]):
         """Configure node as an Output Table box."""
         import json
-        self.set_name("Output Tables")
         self.set_property("box_type", "Output Tables")
         self.view.table_box_type = "Output Tables"
         self.view.set_custom_title("Output Tables")
         self.raw_tables = list(tables)
         self.set_property("raw_tables_json", json.dumps(self.raw_tables))
 
-        # Output tables receive connection from query tables_out
-        out_p = self.get_output("out_tables")
-        if out_p:
-            out_p.set_visible(False)
+        # Output tables can receive connections from query tables_out or upstream output boxes
         in_p = self.get_input("in_tables")
         if in_p:
             in_p.set_visible(True)
             in_p.color = COLOR_DARK_ORANGE
+        # Output tables can also output to downstream queries or consolidated output boxes
+        out_p = self.get_output("out_tables")
+        if out_p:
+            out_p.set_visible(True)
+            out_p.color = COLOR_DARK_ORANGE
 
         self._refresh_display_text()
         self.set_color(COLOR_DARK_ORANGE[0], COLOR_DARK_ORANGE[1], COLOR_DARK_ORANGE[2])
@@ -234,7 +234,6 @@ class TableBoxNode(BaseNode):
     def setup_as_csv_output(self, csv_files: List[str] | str):
         """Configure node as an Output CSV box displaying output CSV file name(s)."""
         import json
-        self.set_name("Output CSV")
         self.set_property("box_type", "Output CSV")
         self.view.table_box_type = "Output CSV"
         self.view.set_custom_title("Output CSV")
@@ -270,6 +269,7 @@ class TableBoxNode(BaseNode):
                 out_p = self.get_output("out_tables")
                 if out_p:
                     out_p.set_visible(True)
+                    out_p.color = COLOR_GREEN
                 self.set_color(COLOR_GREEN[0], COLOR_GREEN[1], COLOR_GREEN[2])
             elif value == "Output CSV":
                 out_p = self.get_output("out_tables")
@@ -280,19 +280,27 @@ class TableBoxNode(BaseNode):
                     in_p.set_visible(True)
                     in_p.color = COLOR_DARK_PURPLE
                 self.set_color(COLOR_DARK_PURPLE[0], COLOR_DARK_PURPLE[1], COLOR_DARK_PURPLE[2])
-            else:
-                out_p = self.get_output("out_tables")
-                if out_p:
-                    out_p.set_visible(False)
+            else:  # Output Tables
                 in_p = self.get_input("in_tables")
                 if in_p:
                     in_p.set_visible(True)
                     in_p.color = COLOR_DARK_ORANGE
+                out_p = self.get_output("out_tables")
+                if out_p:
+                    out_p.set_visible(True)
+                    out_p.color = COLOR_DARK_ORANGE
                 self.set_color(COLOR_DARK_ORANGE[0], COLOR_DARK_ORANGE[1], COLOR_DARK_ORANGE[2])
 
 
 def get_noodle_color(pipe: PipeItem) -> Tuple[int, int, int, int]:
-    """Calculate the noodle colour based on connected node types."""
+    """Determine pipe color based on source and target node and port types:
+
+    Rules per specification:
+    - Orange edges: Query Node -> Output Table collection; or Upstream Output Table -> Consolidated Output box.
+    - Green edges: Any intake into a Query Node (External Input Source -> Query Node, or Output Table -> Query Node).
+    - Dark Purple edges: Query Node -> Output CSV box.
+    - Blue edges: Query Node -> Query Node execution order.
+    """
     out_p = pipe.output_port
     in_p = pipe.input_port
     if not out_p or not in_p:
@@ -306,17 +314,13 @@ def get_noodle_color(pipe: PipeItem) -> Tuple[int, int, int, int]:
     in_node_name = getattr(in_node, "name", "")
     out_node_name = getattr(out_node, "name", "")
 
-    # 1. From input table to query node: same green as input table box
-    if (
-        out_box_type == "Input Tables"
-        or out_p.name == "out_tables"
-        or in_p.name == "tables_in"
-        or "Input" in out_node_name
-        or "[In]" in out_node_name
-    ):
-        return COLOR_GREEN
+    # 1. Any ingestion into a Query Node tables_in port is GREEN
+    if in_p.name == "tables_in" or (isinstance(in_node_name, str) and not ("[" in in_node_name or in_box_type)):
+        # If going into a query node tables_in port, it's a consumption link (Green)
+        if in_p.name == "tables_in":
+            return COLOR_GREEN
 
-    # 2. From query node to output CSV box: same dark purple as output CSV box
+    # 2. From query node to output CSV box: DARK PURPLE
     if (
         in_box_type == "Output CSV"
         or in_p.name == "in_csv"
@@ -325,20 +329,28 @@ def get_noodle_color(pipe: PipeItem) -> Tuple[int, int, int, int]:
     ):
         return COLOR_DARK_PURPLE
 
-    # 3. From query node to output table: same dark orange as output table box
-    if (
-        in_box_type == "Output Tables"
-        or (in_p.name == "in_tables" and out_p.name == "tables_out")
-        or "Out" in in_node_name
-        or "Output Tables" in in_node_name
-    ):
+    # 3. Direct authorship from Query Node to Output Table collection: ORANGE
+    if out_p.name == "tables_out" and (in_box_type == "Output Tables" or "Out" in in_node_name):
         return COLOR_DARK_ORANGE
 
-    # 4. From query node to query node: same blue as query node box
+    # 4. From Upstream Output Table to Consolidated Output box: ORANGE
+    if out_box_type == "Output Tables" and in_box_type == "Output Tables":
+        return COLOR_DARK_ORANGE
+
+    # 5. From any Table box to Query Node: GREEN
+    if (out_box_type in ("Input Tables", "Output Tables") or out_p.name == "out_tables") and in_p.name == "tables_in":
+        return COLOR_GREEN
+
+    # 6. From query node to query node: BLUE
     if out_p.name == "run_out" and in_p.name == "run_in":
         return COLOR_BLUE
 
-    # Default fallback
+    # Fallbacks based on box types
+    if in_box_type == "Output Tables" or out_box_type == "Output Tables":
+        return COLOR_DARK_ORANGE
+    if out_box_type == "Input Tables":
+        return COLOR_GREEN
+
     return COLOR_BLUE
 
 

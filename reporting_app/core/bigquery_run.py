@@ -27,33 +27,29 @@ _MODIFY_TABLE_RE = re.compile(
 
 
 def substitute_parameters(sql: str, parameters: Dict[str, str]) -> str:
-    """Replace all {param_name} placeholders with their supplied values."""
+    """Replace all {param_name} placeholders with their supplied values using string.format()."""
     if not parameters:
         return sql
+    # string.format requires all keys present or defaultdict-like behavior
+    # Use format_map with a fallback mapping so any non-matching bracket syntax is preserved safely
+    class SafeFormatDict(dict):
+        def __missing__(self, key):
+            return "{" + key + "}"
 
-    def replacer(match):
-        param_key = match.group(1).strip()
-        if param_key in parameters:
-            return str(parameters[param_key])
-        return match.group(0)
-
-    return re.sub(r"\{([a-zA-Z0-9_-]+)\}", replacer, sql)
+    return sql.format_map(SafeFormatDict(parameters))
 
 
 def is_csv_export_query(sql: str) -> bool:
-    """Determine whether the query should export its results to a CSV file.
+    """Determine whether the query should export results to a CSV file.
 
     Returns:
-        False if the query creates or modifies a table (e.g. CREATE TABLE, INSERT INTO).
-        True if the query is a SELECT statement whose result set should be saved to CSV.
+        True if the query has at least one standalone SELECT statement (not saving into a table).
+        False otherwise.
     """
-    from reporting_app.core.sql_parser import strip_comments
+    from reporting_app.core.sql_parser import scan_select_output_tables
 
-    cleaned = strip_comments(sql).strip()
-    # If it contains a CREATE TABLE or INSERT INTO statement, it saves to BigQuery table directly
-    if _MODIFY_TABLE_RE.search(cleaned):
-        return False
-    return True
+    csv_tables = scan_select_output_tables(sql)
+    return len(csv_tables) > 0
 
 
 def run_bigquery_script(
@@ -64,6 +60,7 @@ def run_bigquery_script(
     project_id: Optional[str] = None,
     stream_to_csv: bool = False,
     client: Optional[Any] = None,
+    output_filename: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Execute a single query script and conditionally export results to CSV.
 
@@ -75,6 +72,7 @@ def run_bigquery_script(
         project_id: Optional GCP project ID override (defaults to environment ADC project).
         stream_to_csv: Stream large result sets directly to CSV.
         client: Optional pre-configured bigquery.Client.
+        output_filename: Optional custom CSV filename (e.g. 'custom_name.csv').
 
     Returns:
         Dictionary with execution details: query_name, is_export, output_file, row_count, status.
@@ -91,7 +89,11 @@ def run_bigquery_script(
 
     out_dir = Path(outputs_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    output_file = out_dir / f"{query_name}.csv"
+    if output_filename:
+        csv_name = output_filename if output_filename.endswith(".csv") else f"{output_filename}.csv"
+        output_file = out_dir / csv_name
+    else:
+        output_file = out_dir / f"{query_name}.csv"
 
     # Initialize BigQuery client using ADC
     if client is None:

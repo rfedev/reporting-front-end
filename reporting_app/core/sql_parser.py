@@ -16,8 +16,8 @@ _COMMENT_RE = re.compile(
     re.DOTALL | re.MULTILINE
 )
 
-# Regex for {parameter_name}
-_PARAM_RE = re.compile(r"\{([a-zA-Z0-9_-]+)\}")
+# Regex for {parameter_name} - anything inside curly brackets (ignoring double curly brackets if any)
+_PARAM_RE = re.compile(r"\{([^{}]+)\}")
 
 # Table name token pattern (allows backticks, dots, hyphens, alphanumeric, underscores)
 # e.g., `my-project.my_dataset.my_table` or dataset.table or table
@@ -50,7 +50,7 @@ def clean_table_name(table_ref: str) -> str:
 
 
 def scan_query_parameters(sql: str) -> List[str]:
-    """Scan SQL text for parameters in curly brackets like {repDate}.
+    """Scan SQL text for parameters in curly brackets like {startDate} or {repDate}.
 
     Returns a list of unique parameter names preserving appearance order.
     """

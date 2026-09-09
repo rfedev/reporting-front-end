@@ -58,6 +58,7 @@ class ProcessFlowController(QObject):
                 "query_names": [],
                 "parameter_defaults": {},
                 "show_full_table_names": True,
+                "csv_filenames": {},
                 "graph_session": {},
             }
             self.parameter_defaults = {}
@@ -65,6 +66,16 @@ class ProcessFlowController(QObject):
     def get_show_full_table_names(self) -> bool:
         """Return persisted toggle state for full vs short table names."""
         return self.flow_data.get("show_full_table_names", True)
+
+    def get_csv_filenames(self) -> Dict[str, str]:
+        """Return dictionary mapping query_name to custom CSV filename."""
+        return self.flow_data.get("csv_filenames", {})
+
+    def set_csv_filename(self, query_name: str, filename: str) -> None:
+        """Set a custom CSV filename for a query in this flow."""
+        if "csv_filenames" not in self.flow_data:
+            self.flow_data["csv_filenames"] = {}
+        self.flow_data["csv_filenames"][query_name] = filename
 
     def get_graph_session(self) -> Dict[str, Any]:
         """Return the serialized NodeGraph session dictionary."""
@@ -145,12 +156,15 @@ class ProcessFlowController(QObject):
         parameter_defaults: Dict[str, str],
         graph_session: Dict[str, Any],
         show_full_table_names: bool = True,
+        csv_filenames: Optional[Dict[str, str]] = None,
     ) -> None:
         """Save process flow to JSON and update database parameter defaults."""
         self.parameter_defaults.update(parameter_defaults)
         self.flow_data["query_names"] = active_query_names
         self.flow_data["parameter_defaults"] = self.parameter_defaults
         self.flow_data["show_full_table_names"] = show_full_table_names
+        if csv_filenames is not None:
+            self.flow_data["csv_filenames"] = csv_filenames
         self.flow_data["graph_session"] = graph_session
 
         FlowStorage.save(
@@ -161,6 +175,7 @@ class ProcessFlowController(QObject):
             parameter_defaults=self.parameter_defaults,
             graph_session=graph_session,
             show_full_table_names=show_full_table_names,
+            csv_filenames=self.flow_data.get("csv_filenames", {}),
         )
 
         # Update persistence layer defaults if repository is provided

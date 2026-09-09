@@ -115,6 +115,58 @@ class TableBoxItem(NodeItem):
         self.draw_node()
 
 
+class QueryNodeItem(NodeItem):
+    """Custom graphics item for QueryNode displaying parameters list within the node."""
+
+    def __init__(self, name="Query", parent=None):
+        super().__init__(name, parent)
+        self.parameter_list: List[str] = []
+
+    def set_parameters(self, params: List[str]):
+        self.parameter_list = list(params)
+        self.draw_node()
+
+    def _calc_size_horizontal(self):
+        w, h = super()._calc_size_horizontal()
+        font = QtGui.QFont("sans-serif", 9)
+        fm = QtGui.QFontMetrics(font)
+        display_lines = [f"• {{{p}}}" for p in self.parameter_list] if self.parameter_list else []
+        lines_w = max([fm.horizontalAdvance(line) for line in display_lines] or [0]) + 50
+        extra_h = (len(display_lines) * (fm.lineSpacing() + 2)) + (16 if display_lines else 0)
+        return max(w, float(lines_w), 160.0), max(h + extra_h, 70.0)
+
+    def _paint_horizontal(self, painter, option, widget):
+        super()._paint_horizontal(painter, option, widget)
+        if not self.parameter_list:
+            return
+
+        painter.save()
+        rect = self.boundingRect()
+
+        # Find the lower boundary of all ports to draw below them
+        ports = [p for p in self.inputs + self.outputs if p.isVisible()]
+        bottom_port_y = max([p.y() + p.boundingRect().height() for p in ports] or [self._text_item.boundingRect().height() + 10])
+
+        font = QtGui.QFont("sans-serif", 9)
+        painter.setFont(font)
+        fm = QtGui.QFontMetrics(font)
+        line_h = fm.lineSpacing() + 2
+
+        # Draw a subtle separator line
+        sep_y = bottom_port_y + 8.0
+        painter.setPen(QtGui.QPen(QtGui.QColor(80, 110, 160, 180), 1.0, QtCore.Qt.DashLine))
+        painter.drawLine(QtCore.QPointF(rect.left() + 8, sep_y), QtCore.QPointF(rect.right() - 8, sep_y))
+
+        # Draw parameters header and items
+        painter.setPen(QtGui.QColor(180, 205, 240))
+        text_y = sep_y + 6.0
+        for p in self.parameter_list:
+            painter.drawText(QtCore.QPointF(rect.left() + 14, text_y + fm.ascent()), f"• {{{p}}}")
+            text_y += line_h
+
+        painter.restore()
+
+
 class QueryNode(BaseNode):
     """Node representing an individual SQL query file."""
 
@@ -122,7 +174,7 @@ class QueryNode(BaseNode):
     NODE_NAME = "Query"
 
     def __init__(self):
-        super().__init__()
+        super().__init__(QueryNodeItem)
         # Input execution port (connect from prior queries) - Blue
         self.add_input("run_in", multi_input=True, display_name=True, color=(COLOR_BLUE[0], COLOR_BLUE[1], COLOR_BLUE[2]))
         # Input tables port (connect from input TableBox) - Green
@@ -143,6 +195,23 @@ class QueryNode(BaseNode):
 
         # Visual styling - Blue
         self.set_color(COLOR_BLUE[0], COLOR_BLUE[1], COLOR_BLUE[2])
+
+    def set_parameters(self, param_list: List[str]):
+        """Set query parameters to display in the node body."""
+        self.set_property("parameters", ", ".join(param_list))
+        if hasattr(self.view, "set_parameters"):
+            self.view.set_parameters(param_list)
+
+    def on_property_changed(self, name, value):
+        super().on_property_changed(name, value)
+        if name == "parameters" and hasattr(self.view, "set_parameters"):
+            if isinstance(value, str):
+                params = [p.strip() for p in value.split(",") if p.strip()]
+            elif isinstance(value, (list, tuple)):
+                params = list(value)
+            else:
+                params = []
+            self.view.set_parameters(params)
 
 
 class TableBoxNode(BaseNode):

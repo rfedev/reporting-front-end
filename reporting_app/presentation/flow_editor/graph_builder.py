@@ -29,12 +29,14 @@ class ProcessFlowGraphBuilder:
         queries: List[QueryInfo],
         existing_positions: Optional[Dict[str, Tuple[float, float]]] = None,
         show_full_table_names: bool = True,
+        csv_filenames: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Tuple[float, float]]:
         """Reconstruct the entire graph topology according to the architectural rules
 
         while preserving node positions where possible.
         """
         existing_positions = dict(existing_positions or {})
+        csv_filenames = csv_filenames or {}
 
         # 1. Capture current live positions of all existing nodes from canvas.
         # Canvas positions MUST take precedence over any stale/passed-in positions.
@@ -86,7 +88,7 @@ class ProcessFlowGraphBuilder:
             qnode.set_property("query_name", q.name)
             qnode.set_property("query_path", str(q.file_path.resolve()) if q.file_path else "")
             qnode.set_property("report_name", q.report_name)
-            qnode.set_property("parameters", ", ".join(q.parameter_names))
+            qnode.set_parameters(q.parameter_names)
             query_nodes[q.name] = qnode
 
             # Create immediate Output Box (Orange) if query produces output tables
@@ -116,8 +118,9 @@ class ProcessFlowGraphBuilder:
                     name=csv_key,
                     pos=[csv_pos[0], csv_pos[1]],
                 )
-                csv_file_name = f"{q.name}.csv"
+                csv_file_name = csv_filenames.get(q.name, f"{q.name}.csv") if csv_filenames else f"{q.name}.csv"
                 csv_box.setup_as_csv_output(csv_file_name)
+                csv_box.create_property("query_owner", q.name)
                 csv_box.set_display_mode(show_full_table_names)
                 try:
                     csv_port = qnode.get_output("csv_out") or qnode.get_output("tables_out")

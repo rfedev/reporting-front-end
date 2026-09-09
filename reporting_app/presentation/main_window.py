@@ -19,8 +19,9 @@ from PySide6.QtWidgets import (
 )
 
 from reporting_app.controllers.app_controller import AppController
+from reporting_app.controllers.flow_controller import ProcessFlowController
 from reporting_app.core.bigquery_run import run_bigquery_script
-from reporting_app.core.models import ProcessFlowInfo, QueryInfo, Report
+from reporting_app.core.models import ProcessFlowInfo, QueryInfo, QueryParameter, Report
 from reporting_app.presentation.flow_editor.editor_window import ProcessFlowEditorWindow
 from reporting_app.presentation.query_dialog import QueryRunDialog
 from reporting_app.presentation.settings_dialog import SettingsDialog
@@ -90,8 +91,8 @@ class MainWindow(QMainWindow):
         self.new_flow_btn.clicked.connect(self._on_new_process_flow)
 
         self.run_flow_btn = QPushButton("Run Process Flow")
-        self.run_flow_btn.setEnabled(False)  # Greyed out per instructions
-        self.run_flow_btn.setToolTip("Run Process Flow is not currently implemented")
+        self.run_flow_btn.setToolTip("Run the selected process flow")
+        self.run_flow_btn.clicked.connect(self._on_run_process_flow)
 
         flow_buttons_layout.addWidget(self.edit_flow_btn)
         flow_buttons_layout.addWidget(self.new_flow_btn)
@@ -196,6 +197,9 @@ class MainWindow(QMainWindow):
             self.flows_combo.setCurrentText(current)
         self.flows_combo.blockSignals(False)
 
+        selected = self.flows_combo.currentText()
+        self.run_flow_btn.setEnabled(bool(selected and selected != AppController.ALL_QUERIES_OPTION))
+
     def _update_queries_dropdown(self, query_names: List[str]) -> None:
         self.queries_combo.blockSignals(True)
         self.queries_combo.clear()
@@ -213,6 +217,7 @@ class MainWindow(QMainWindow):
     def _on_flow_selected(self, flow_name: str) -> None:
         if flow_name:
             self.controller.select_process_flow(flow_name)
+            self.run_flow_btn.setEnabled(flow_name != AppController.ALL_QUERIES_OPTION)
 
     def _on_query_selected(self, query_name: str) -> None:
         self.controller.select_query(query_name)
@@ -358,3 +363,108 @@ class MainWindow(QMainWindow):
                     "Query Execution Error",
                     f"Failed to execute query '{query_name}':\n\n{e}\n\nNote: If authentication failed, please run 'gcloud auth application-default login' in terminal.",
                 )
+
+    def _on_run_process_flow(self) -> None:
+        """Execute the currently selected process flow."""
+        active_report = self.controller.active_report
+        flow_name = self.flows_combo.currentText()
+        if not active_report or not flow_name or flow_name == AppController.ALL_QUERIES_OPTION:
+            QMessageBox.information(self, "Select Flow", "Please select a valid process flow to run.")
+            return
+
+        flow_info = active_report.get_process_flow(flow_name)
+        if not flow_info:
+            QMessageBox.warning(self, "Flow Not Found", f"Process flow '{flow_name}' not found.")
+            return
+
+        flow_ctrl = ProcessFlowController(
+            report=active_report,
+            flow_info=flow_info,
+            repo=self.controller.repo,
+        )
+
+        queries_order = flow_ctrl.get_execution_order()
+        if not queries_order:
+            QMessageBox.information(self, "Empty Flow", "There are no queries in this process flow to run.")
+            return
+
+        unique_params = flow_ctrl.get_unique_parameters(queries_order)
+        param_values = dict(flow_ctrl.parameter_defaults)
+
+        if unique_params:
+            combined_qinfo = QueryInfo(
+                name=f"Flow: {flow_ctrl.flow_name}",
+                file_path=flow_ctrl.file_path,
+                report_name=active_report.name,
+                parameters=[QueryParameter(name=p, default_value=param_values.get(p, "")) for p in unique_params],
+            )
+            dialog = QueryRunDialog(
+                query_info=combined_qinfo,
+                initial_defaults=param_values,
+                parent=self,
+            )
+            dialog.setWindowTitle(f"Run Process Flow - {flow_ctrl.flow_name}")
+            dialog.run_btn.setText("Run Process Flow")
+
+            if dialog.exec() != QueryRunDialog.Accepted:
+                return
+
+            param_values = dialog.get_parameter_values()
+            flow_ctrl.parameter_defaults.update(param_values)
+
+        outputs_dir = active_report.folder_path / "outputs"
+        outputs_dir.mkdir(parents=True, exist_ok=True)
+        csv_map = flow_ctrl.get_csv_filenames()
+
+        results_log = []
+        errors = []
+
+        self.status_bar.showMessage(f"Running process flow ({len(queries_order)} queries)...")
+
+        for idx, qname in enumerate(queries_order, start=1):
+            qinfo = active_report.get_query(qname)
+            if not qinfo or not qinfo.file_path.exists():
+                err = f"Query '{qname}' SQL file not found."
+                errors.append(err)
+                results_log.append(f"[{idx}/{len(queries_order)}] ❌ {qname}: {err}")
+                break
+
+            self.status_bar.showMessage(f"[{idx}/{len(queries_order)}] Running {qname}...")
+            QApplication.processEvents()
+
+            try:
+                custom_csv = csv_map.get(qname)
+                res = run_bigquery_script(
+                    sql_script_path=qinfo.file_path,
+                    report_name=active_report.name,
+                    outputs_dir=outputs_dir,
+                    parameters=param_values,
+                    output_filename=custom_csv,
+                )
+                if res.get("is_export"):
+                    results_log.append(
+                        f"[{idx}/{len(queries_order)}] 📄 {qname}: Exported {res.get('row_count', 0):,} rows to {res.get('output_file')}"
+                    )
+                else:
+                    results_log.append(f"[{idx}/{len(queries_order)}] 📦 {qname}: Table created/updated successfully.")
+            except Exception as e:
+                err = f"Execution failed: {e}"
+                errors.append(f"{qname}: {e}")
+                results_log.append(f"[{idx}/{len(queries_order)}] ❌ {qname}: {err}")
+                break
+
+        if errors:
+            self.status_bar.showMessage(f"Process flow '{flow_ctrl.flow_name}' failed.", 5000)
+            QMessageBox.critical(
+                self,
+                "Process Flow Execution Error",
+                f"Process flow stopped due to an error:\n\n" + "\n".join(results_log),
+            )
+        else:
+            self.status_bar.showMessage(f"Process flow '{flow_ctrl.flow_name}' completed.", 5000)
+            QMessageBox.information(
+                self,
+                "Process Flow Completed",
+                f"Successfully executed all {len(queries_order)} query step(s):\n\n" + "\n".join(results_log),
+            )
+

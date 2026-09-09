@@ -30,6 +30,7 @@ class FlowStorage:
         parameter_defaults: Dict[str, str],
         graph_session: Dict[str, Any],
         show_full_table_names: bool = True,
+        csv_filenames: Optional[Dict[str, str]] = None,
     ) -> None:
         """Save process flow JSON data to disk."""
         data = {
@@ -38,6 +39,7 @@ class FlowStorage:
             "query_names": query_names,
             "parameter_defaults": parameter_defaults,
             "show_full_table_names": show_full_table_names,
+            "csv_filenames": csv_filenames or {},
             "graph_session": graph_session,
         }
         file_path.parent.mkdir(parents=True, exist_ok=True)

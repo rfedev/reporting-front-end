@@ -8,8 +8,10 @@ from PySide6 import QtCore, QtWidgets
 from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRectF, QUrl, Qt
 from PySide6.QtGui import QCursor, QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QDialog,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QProgressDialog,
@@ -414,6 +416,7 @@ class ProcessFlowEditorWindow(QMainWindow):
                 queries_to_add,
                 self._node_positions,
                 self.show_full_table_names,
+                self.flow_controller.get_csv_filenames(),
             )
 
         QtCore.QTimer.singleShot(100, self._fit_graph_to_canvas)
@@ -439,6 +442,7 @@ class ProcessFlowEditorWindow(QMainWindow):
             active_queries,
             self._node_positions,
             self.show_full_table_names,
+            self.flow_controller.get_csv_filenames(),
         )
 
     def add_query_to_canvas(self, query_name: str, pos: Optional[tuple] = None) -> Optional[QueryNode]:
@@ -484,13 +488,96 @@ class ProcessFlowEditorWindow(QMainWindow):
         self._sync_graph_topology()
 
     def _on_node_double_clicked(self, node) -> None:
-        """Handle double click on query node to open in OS default application."""
+        """Handle double click on query node to open in OS default application, or CSV box to edit names."""
         if isinstance(node, QueryNode) or node.type_ == "reporting.nodes.QueryNode":
             query_path = node.get_property("query_path")
             if query_path and Path(query_path).exists():
                 QDesktopServices.openUrl(QUrl.fromLocalFile(query_path))
             else:
                 self._open_query_file(node.name())
+        elif isinstance(node, TableBoxNode) or node.type_ == "reporting.nodes.TableBoxNode":
+            btype = node.get_property("box_type") or getattr(getattr(node, "view", None), "table_box_type", "")
+            if btype == "Output CSV":
+                self._show_csv_rename_dialog(node)
+
+    def _show_csv_rename_dialog(self, target_node: TableBoxNode) -> None:
+        """Show a dialog with text inputs for all output CSVs created in this process flow."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Output CSV Filenames")
+        dialog.resize(480, 320)
+        dlg_layout = QVBoxLayout(dialog)
+
+        desc = QLabel(
+            "<b>Output CSV Filenames:</b><br>"
+            "<i>Update the CSV filenames for queries exporting to CSV in this process flow:</i>"
+        )
+        desc.setWordWrap(True)
+        dlg_layout.addWidget(desc)
+
+        # Collect all queries that export to CSV
+        active_csv_nodes = [
+            n for n in self.graph.all_nodes()
+            if (isinstance(n, TableBoxNode) or n.type_ == "reporting.nodes.TableBoxNode")
+            and (n.get_property("box_type") == "Output CSV" or getattr(getattr(n, "view", None), "table_box_type", "") == "Output CSV")
+        ]
+
+        # Form layout of CSV inputs
+        form_widget = QWidget()
+        form_layout = QVBoxLayout(form_widget)
+        edits: Dict[str, QLineEdit] = {}
+
+        for cnode in active_csv_nodes:
+            qname = cnode.get_property("query_owner")
+            if not qname:
+                raw_name = cnode.name()
+                qname = raw_name.replace(" [CSV]", "").strip()
+
+            current_csv = self.flow_controller.get_csv_filenames().get(qname)
+            if not current_csv and cnode.raw_tables:
+                current_csv = cnode.raw_tables[0]
+            if not current_csv:
+                current_csv = f"{qname}.csv"
+
+            row = QHBoxLayout()
+            row.addWidget(QLabel(f"<b>{qname}:</b>"))
+            ledit = QLineEdit(current_csv)
+            edits[qname] = ledit
+            row.addWidget(ledit)
+            form_layout.addLayout(row)
+
+        dlg_layout.addWidget(form_widget)
+        dlg_layout.addStretch()
+
+        btn_row = QHBoxLayout()
+        save_btn = QPushButton("Update")
+        save_btn.setStyleSheet("font-weight: bold; background-color: #2b78e4; color: white;")
+        cancel_btn = QPushButton("Cancel")
+        btn_row.addStretch()
+        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(save_btn)
+        dlg_layout.addLayout(btn_row)
+
+        save_btn.clicked.connect(dialog.accept)
+        cancel_btn.clicked.connect(dialog.reject)
+
+        if dialog.exec() == QDialog.Accepted:
+            csv_map = self.flow_controller.get_csv_filenames()
+            for qname, edit in edits.items():
+                new_val = edit.text().strip()
+                if new_val:
+                    if not new_val.endswith(".csv"):
+                        new_val = f"{new_val}.csv"
+                    csv_map[qname] = new_val
+                    self.flow_controller.set_csv_filename(qname, new_val)
+
+            # Update nodes on canvas
+            for cnode in active_csv_nodes:
+                qname = cnode.get_property("query_owner") or cnode.name().replace(" [CSV]", "").strip()
+                if qname in csv_map:
+                    cnode.setup_as_csv_output(csv_map[qname])
+                    cnode.set_display_mode(self.show_full_table_names)
+
+            self.status_bar.showMessage("Updated output CSV filenames.", 3000)
 
     def _open_query_file(self, query_name: str) -> None:
         """Open query .sql file with default system application."""
@@ -563,6 +650,7 @@ class ProcessFlowEditorWindow(QMainWindow):
             parameter_defaults=existing_defaults,
             graph_session=session_data,
             show_full_table_names=self.show_full_table_names,
+            csv_filenames=self.flow_controller.get_csv_filenames(),
         )
 
         if self.app_controller:
@@ -608,6 +696,7 @@ class ProcessFlowEditorWindow(QMainWindow):
 
         outputs_dir = self.report.folder_path / "outputs"
         outputs_dir.mkdir(parents=True, exist_ok=True)
+        csv_map = self.flow_controller.get_csv_filenames()
 
         results_log = []
         errors = []
@@ -626,11 +715,13 @@ class ProcessFlowEditorWindow(QMainWindow):
             QtWidgets.QApplication.processEvents()
 
             try:
+                custom_csv = csv_map.get(qname)
                 res = run_bigquery_script(
                     sql_script_path=qinfo.file_path,
                     report_name=self.report.name,
                     outputs_dir=outputs_dir,
                     parameters=param_values,
+                    output_filename=custom_csv,
                 )
                 if res.get("is_export"):
                     results_log.append(f"[{idx}/{len(queries_order)}] ✅ {qname}: Exported {res.get('row_count', 0):,} rows to {res.get('output_file')}")

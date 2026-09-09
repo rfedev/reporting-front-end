@@ -206,6 +206,167 @@ class TestGraphTopology(unittest.TestCase):
 
         editor.close()
 
+    def test_delete_selected_only_deletes_query_nodes(self):
+        """Verify that 'delete selected' and Delete key only delete QueryNodes,
+
+        never directly deleting TableBoxNodes.
+        """
+        editor = ProcessFlowEditorWindow(
+            report=self.controller.active_report,
+            flow_name="DeleteRuleFlow",
+            app_controller=self.controller,
+        )
+        editor.add_query_to_canvas("query1")
+        editor.add_query_to_canvas("query2")
+
+        # 1. Select ONLY TableBoxNode (e.g. query1 [Out])
+        all_nodes = editor.graph.all_nodes()
+        table_boxes = [n for n in all_nodes if isinstance(n, TableBoxNode)]
+        self.assertTrue(len(table_boxes) > 0)
+        target_tb = table_boxes[0]
+
+        editor.graph.clear_selection()
+        target_tb.set_selected(True)
+        self.assertTrue(target_tb.selected())
+
+        # Trigger delete selected
+        editor._on_delete_selected()
+
+        # The TableBoxNode must NOT be deleted
+        remaining_ids = [n.id for n in editor.graph.all_nodes()]
+        self.assertIn(target_tb.id, remaining_ids)
+
+        # 2. Select QueryNode query2
+        q2_node = [n for n in editor.graph.all_nodes() if n.name() == "query2"][0]
+        editor.graph.clear_selection()
+        q2_node.set_selected(True)
+        # Also select another table box along with it
+        target_tb.set_selected(True)
+
+        editor._on_delete_selected()
+
+        # query2 was deleted, query1 remains
+        remaining_names = [n.name() for n in editor.graph.all_nodes()]
+        self.assertNotIn("query2", remaining_names)
+        self.assertIn("query1", remaining_names)
+
+        editor.close()
+
+    def test_boxes_not_rearranged_when_node_added_or_deleted(self):
+        """Verify existing node positions are strictly preserved when nodes are added or deleted."""
+        editor = ProcessFlowEditorWindow(
+            report=self.controller.active_report,
+            flow_name="PosPreserveFlow",
+            app_controller=self.controller,
+        )
+        editor.add_query_to_canvas("query1", pos=(150.0, 250.0))
+
+        q1_node = [n for n in editor.graph.all_nodes() if n.name() == "query1"][0]
+        q1_out = [n for n in editor.graph.all_nodes() if n.name() == "query1 [Out]"][0]
+
+        # Manually move query1 and its output box to custom positions
+        q1_node.set_pos(320.0, 480.0)
+        q1_out.set_pos(650.0, 480.0)
+
+        # Add query2 at a different position
+        editor.add_query_to_canvas("query2", pos=(900.0, 100.0))
+
+        # Query1 and its output box must remain at the exact positions set by the user
+        q1_node_now = [n for n in editor.graph.all_nodes() if n.name() == "query1"][0]
+        q1_out_now = [n for n in editor.graph.all_nodes() if n.name() == "query1 [Out]"][0]
+
+        self.assertEqual(q1_node_now.pos(), [320.0, 480.0])
+        self.assertEqual(q1_out_now.pos(), [650.0, 480.0])
+
+        # Delete query2
+        q2_node = [n for n in editor.graph.all_nodes() if n.name() == "query2"][0]
+        editor.graph.clear_selection()
+        q2_node.set_selected(True)
+        editor._on_delete_selected()
+
+        # Query1 and its output box must still remain at the exact same positions
+        q1_node_after_del = [n for n in editor.graph.all_nodes() if n.name() == "query1"][0]
+        q1_out_after_del = [n for n in editor.graph.all_nodes() if n.name() == "query1 [Out]"][0]
+
+        self.assertEqual(q1_node_after_del.pos(), [320.0, 480.0])
+        self.assertEqual(q1_out_after_del.pos(), [650.0, 480.0])
+
+        editor.close()
+
+    def test_auto_format_horizontal_and_vertical(self):
+        """Verify horizontal and vertical auto-format layouts:
+
+        - Correct topological progression (L-to-R or T-to-B).
+        - No overlapping bounding boxes.
+        """
+        editor = ProcessFlowEditorWindow(
+            report=self.controller.active_report,
+            flow_name="AutoLayoutFlow",
+            app_controller=self.controller,
+        )
+        editor.add_query_to_canvas("query1")
+        editor.add_query_to_canvas("query2")
+        editor.add_query_to_canvas("query3")
+        editor.add_query_to_canvas("query4")
+
+        # 1. Test Horizontal Layout (Left to Right)
+        editor._auto_layout("horizontal")
+
+        q1_pos = [n for n in editor.graph.all_nodes() if n.name() == "query1"][0].pos()
+        q3_pos = [n for n in editor.graph.all_nodes() if n.name() == "query3"][0].pos()
+        q4_pos = [n for n in editor.graph.all_nodes() if n.name() == "query4"][0].pos()
+
+        # query3 depends on query1; query4 depends on query3
+        # In horizontal mode, X must strictly increase along dependencies
+        self.assertLess(q1_pos[0], q3_pos[0])
+        self.assertLess(q3_pos[0], q4_pos[0])
+
+        # Check that no nodes overlap in horizontal layout
+        nodes = editor.graph.all_nodes()
+        rects = []
+        for n in nodes:
+            pos = n.pos()
+            w = n.view.boundingRect().width()
+            h = n.view.boundingRect().height()
+            rects.append((n.name(), pos[0], pos[1], pos[0] + w, pos[1] + h))
+
+        for i in range(len(rects)):
+            for j in range(i + 1, len(rects)):
+                name_i, l1, t1, r1, b1 = rects[i]
+                name_j, l2, t2, r2, b2 = rects[j]
+                # Check for rectangle intersection (with 1px tolerance for touching edges)
+                overlaps = not (r1 <= l2 or r2 <= l1 or b1 <= t2 or b2 <= t1)
+                self.assertFalse(overlaps, f"Nodes '{name_i}' and '{name_j}' overlap in horizontal layout!")
+
+        # 2. Test Vertical Layout (Top to Bottom)
+        editor._auto_layout("vertical")
+
+        q1_pos_v = [n for n in editor.graph.all_nodes() if n.name() == "query1"][0].pos()
+        q3_pos_v = [n for n in editor.graph.all_nodes() if n.name() == "query3"][0].pos()
+        q4_pos_v = [n for n in editor.graph.all_nodes() if n.name() == "query4"][0].pos()
+
+        # In vertical mode, Y must strictly increase along dependencies
+        self.assertLess(q1_pos_v[1], q3_pos_v[1])
+        self.assertLess(q3_pos_v[1], q4_pos_v[1])
+
+        # Check that no nodes overlap in vertical layout
+        rects_v = []
+        for n in nodes:
+            pos = n.pos()
+            w = n.view.boundingRect().width()
+            h = n.view.boundingRect().height()
+            rects_v.append((n.name(), pos[0], pos[1], pos[0] + w, pos[1] + h))
+
+        for i in range(len(rects_v)):
+            for j in range(i + 1, len(rects_v)):
+                name_i, l1, t1, r1, b1 = rects_v[i]
+                name_j, l2, t2, r2, b2 = rects_v[j]
+                overlaps = not (r1 <= l2 or r2 <= l1 or b1 <= t2 or b2 <= t1)
+                self.assertFalse(overlaps, f"Nodes '{name_i}' and '{name_j}' overlap in vertical layout!")
+
+        editor.close()
+
 
 if __name__ == "__main__":
     unittest.main()
+

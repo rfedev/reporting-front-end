@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 from PySide6 import QtCore, QtWidgets
 from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRectF, QUrl, Qt
-from PySide6.QtGui import QCursor, QDesktopServices
+from PySide6.QtGui import QCursor, QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -243,9 +243,21 @@ class ProcessFlowEditorWindow(QMainWindow):
         toolbar.addSeparator()
 
         delete_btn = QPushButton("🗑 Delete Selected")
-        delete_btn.setToolTip("Delete selected nodes or connection noodles (or press Delete key)")
+        delete_btn.setToolTip("Delete selected query nodes (or press Delete key)")
         delete_btn.clicked.connect(self._on_delete_selected)
         toolbar.addWidget(delete_btn)
+
+        toolbar.addSeparator()
+
+        layout_h_btn = QPushButton("⬌ Auto Layout (H)")
+        layout_h_btn.setToolTip("Auto-format process flow layout horizontally (Left to Right)")
+        layout_h_btn.clicked.connect(lambda: self._auto_layout("horizontal"))
+        toolbar.addWidget(layout_h_btn)
+
+        layout_v_btn = QPushButton("⬍ Auto Layout (V)")
+        layout_v_btn.setToolTip("Auto-format process flow layout vertically (Top to Bottom)")
+        layout_v_btn.clicked.connect(lambda: self._auto_layout("vertical"))
+        toolbar.addWidget(layout_v_btn)
 
         fit_btn = QPushButton("🔍 Fit Graph")
         fit_btn.setToolTip("Fit all nodes into available canvas view")
@@ -318,6 +330,12 @@ class ProcessFlowEditorWindow(QMainWindow):
         self.status_bar = QStatusBar(self)
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("Pan: Drag empty space | Multi-select: Ctrl+Drag | Double-click node to edit SQL.")
+
+        # Shortcuts for Delete
+        self.del_shortcut = QShortcut(QKeySequence.Delete, self)
+        self.del_shortcut.activated.connect(self._on_delete_selected)
+        self.backspace_shortcut = QShortcut(QKeySequence(Qt.Key_Backspace), self)
+        self.backspace_shortcut.activated.connect(self._on_delete_selected)
 
     def _toggle_left_panel(self) -> None:
         """Collapse or expand left queries panel."""
@@ -438,8 +456,13 @@ class ProcessFlowEditorWindow(QMainWindow):
                     return node
 
         if pos is None:
-            self._node_counter += 1
-            pos = (200 * (self._node_counter % 4), 120 * (self._node_counter % 4))
+            all_nodes = self.graph.all_nodes()
+            if all_nodes:
+                max_x = max((n.pos()[0] for n in all_nodes), default=0.0)
+                min_y = min((n.pos()[1] for n in all_nodes), default=0.0)
+                pos = (max_x + 750.0, min_y)
+            else:
+                pos = (0.0, 0.0)
 
         self._node_positions[query_name] = (pos[0], pos[1])
         self._sync_graph_topology(additional_query=query_name)
@@ -476,12 +499,46 @@ class ProcessFlowEditorWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(qinfo.file_path.resolve())))
 
     def _on_delete_selected(self) -> None:
-        """Delete currently selected nodes from the canvas and resynchronize topology."""
+        """Delete currently selected query nodes and resynchronize topology.
+        
+        Tables are automatically managed and cannot be directly deleted.
+        """
         selected_nodes = self.graph.selected_nodes()
-        if selected_nodes:
-            self.graph.delete_nodes(selected_nodes)
+        query_nodes = [
+            n for n in selected_nodes
+            if isinstance(n, QueryNode) or getattr(n, "type_", "") == "reporting.nodes.QueryNode"
+        ]
+        if query_nodes:
+            self.graph.delete_nodes(query_nodes)
             self._sync_graph_topology()
-            self.status_bar.showMessage(f"Deleted {len(selected_nodes)} node(s).", 3000)
+            self.status_bar.showMessage(f"Deleted {len(query_nodes)} query node(s).", 3000)
+        elif selected_nodes:
+            self.status_bar.showMessage(
+                "Table boxes are managed automatically; only query nodes can be deleted.", 3000
+            )
+
+    def _auto_layout(self, direction: str = "horizontal") -> None:
+        """Auto-format process flow layout horizontally (left to right) or vertically (top to bottom)."""
+        active_query_names: List[str] = []
+        for node in self.graph.all_nodes():
+            if isinstance(node, QueryNode) or getattr(node, "type_", "") == "reporting.nodes.QueryNode":
+                qname = node.get_property("query_name") or node.name()
+                if qname and qname not in active_query_names:
+                    active_query_names.append(qname)
+
+        active_queries = [self.report.get_query(name) for name in active_query_names if self.report.get_query(name)]
+        if not active_queries:
+            return
+
+        new_positions = ProcessFlowGraphBuilder.auto_layout(
+            self.graph,
+            active_queries,
+            direction=direction,
+        )
+        self._node_positions.update(new_positions)
+        self._fit_graph_to_canvas()
+        dir_name = "Horizontal (Left-to-Right)" if direction == "horizontal" else "Vertical (Top-to-Bottom)"
+        self.status_bar.showMessage(f"Auto-formatted layout: {dir_name}", 3000)
 
     def _on_save(self) -> None:
         """Save process flow graph state, parameter defaults, and table display mode."""
@@ -677,7 +734,11 @@ class ProcessFlowEditorWindow(QMainWindow):
         target_widgets = {viewer, viewport, getattr(self, "graph_widget", None)} - {None}
 
         if watched in target_widgets:
-            if event.type() in (QEvent.DragEnter, QEvent.DragMove):
+            if event.type() == QEvent.KeyPress:
+                if event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
+                    self._on_delete_selected()
+                    return True
+            elif event.type() in (QEvent.DragEnter, QEvent.DragMove):
                 mime = event.mimeData()
                 if (
                     mime.hasFormat("application/x-query-name")

@@ -7,7 +7,7 @@ Extracts:
 """
 
 import re
-from typing import List, Set, Tuple
+from typing import List, Optional, Set, Tuple
 
 
 # Regex for removing single line and multi-line comments
@@ -31,7 +31,13 @@ _INPUT_TABLE_RE = re.compile(
 
 # Regex for CREATE TABLE and INSERT INTO statements
 _OUTPUT_TABLE_RE = re.compile(
-    rf"\b(?:CREATE\s+(?:OR\s+REPLACE\s+)?(?:TEMP\s+|TEMPORARY\s+)?TABLE(?:\s+IF\s+NOT\s+EXISTS)?|INSERT\s+INTO)\s+({_TABLE_TOKEN})",
+    rf"\b(?:CREATE\s+(?:OR\s+REPLACE\s+)?(?:TEMP\s+|TEMPORARY\s+)?TABLE(?:\s+IF\s+NOT\s+EXISTS)?|INSERT(?:\s+INTO)?|MERGE(?:\s+INTO)?)\s+({_TABLE_TOKEN})",
+    re.IGNORECASE
+)
+
+# Regex for Common Table Expressions (WITH cte AS (...) or , cte AS (...))
+_CTE_RE = re.compile(
+    r"(?:\bWITH|,)\s*([a-zA-Z0-9_\-\.]+)\s+AS\s*\(",
     re.IGNORECASE
 )
 
@@ -111,17 +117,62 @@ def scan_select_output_tables(sql: str) -> List[str]:
     return csv_tables
 
 
+def extract_project_id_from_sql(sql: str) -> Optional[str]:
+    """Extract BigQuery project_id based on the first 'from' statement table address.
+
+    Per instructions: All tables have the name format 'project-id.dataset_id.table_id'.
+    Returns the project-id string if found, else None.
+    """
+    cleaned_sql = strip_comments(sql)
+    for match in _INPUT_TABLE_RE.finditer(cleaned_sql):
+        raw_match = match.group(0)
+        # Check that it's a FROM clause
+        if re.match(r"\bFROM\b", raw_match, re.IGNORECASE):
+            raw_name = match.group(1)
+            name = clean_table_name(raw_name)
+            if name.upper() not in {"SELECT", "UNNEST", "LATERAL"}:
+                parts = name.split(".")
+                if len(parts) >= 3:
+                    return parts[0]
+                elif len(parts) == 2:
+                    return None
+
+    # Fallback: check any FROM or JOIN table address with 3 parts
+    for match in _INPUT_TABLE_RE.finditer(cleaned_sql):
+        name = clean_table_name(match.group(1))
+        if name.upper() not in {"SELECT", "UNNEST", "LATERAL"}:
+            parts = name.split(".")
+            if len(parts) >= 3:
+                return parts[0]
+
+    # Fallback: check output table address
+    for match in _OUTPUT_TABLE_RE.finditer(cleaned_sql):
+        name = clean_table_name(match.group(1))
+        if name.upper() not in {"SELECT", "UNNEST"}:
+            parts = name.split(".")
+            if len(parts) >= 3:
+                return parts[0]
+
+    return None
+
+
 def scan_query_tables(sql: str) -> Tuple[List[str], List[str], List[str]]:
     """Determine input, output, and CSV output tables from BigQuery SQL.
 
-    Input tables: extracted from FROM and JOIN clauses.
-    Output tables: extracted from CREATE TABLE and INSERT INTO statements.
+    Input tables: extracted from FROM and JOIN clauses (excluding CTEs and created tables).
+    Output tables: extracted from CREATE TABLE, INSERT INTO, and MERGE statements.
     Output CSV tables: extracted from standalone SELECT statements exporting to CSV.
 
     Returns:
         Tuple of (input_tables, output_tables, output_csv_tables)
     """
     cleaned_sql = strip_comments(sql)
+
+    # Detect Common Table Expressions (CTEs) so they aren't marked as external input tables
+    cte_names: Set[str] = set()
+    for match in _CTE_RE.finditer(cleaned_sql):
+        cte_name = clean_table_name(match.group(1))
+        cte_names.add(cte_name)
 
     input_tables: List[str] = []
     seen_inputs: Set[str] = set()
@@ -144,8 +195,10 @@ def scan_query_tables(sql: str) -> Tuple[List[str], List[str], List[str]]:
     for match in _INPUT_TABLE_RE.finditer(cleaned_sql):
         raw_name = match.group(1)
         name = clean_table_name(raw_name)
-        # Skip subqueries / special BigQuery keywords
+        # Skip subqueries / special BigQuery keywords / CTEs
         if name.upper() in {"SELECT", "UNNEST", "LATERAL"}:
+            continue
+        if name in cte_names:
             continue
         if name and name not in seen_inputs and name not in seen_outputs:
             seen_inputs.add(name)

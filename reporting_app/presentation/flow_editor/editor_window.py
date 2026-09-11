@@ -3,23 +3,28 @@
 import json
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from PySide6 import QtCore, QtWidgets
 from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRectF, QUrl, Qt
 from PySide6.QtGui import QCursor, QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QCheckBox,
     QDialog,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QProgressDialog,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSplitter,
     QStatusBar,
     QToolBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -29,14 +34,146 @@ from NodeGraphQt.qgraphics.pipe import PipeItem
 
 from reporting_app.controllers.app_controller import AppController
 from reporting_app.controllers.flow_controller import ProcessFlowController
-from reporting_app.core.bigquery_run import run_bigquery_script
+from reporting_app.core.bigquery_run import run_bigquery_script, run_bigquery_import_csv
 from reporting_app.core.models import ProcessFlowInfo, QueryInfo, QueryParameter, Report
 from reporting_app.presentation.flow_editor.graph_builder import ProcessFlowGraphBuilder
-from reporting_app.presentation.flow_editor.nodes import QueryNode, TableBoxNode
+from reporting_app.presentation.flow_editor.nodes import ImportCsvNode, QueryNode, TableBoxNode
 from reporting_app.presentation.flow_editor.query_tree_widget import QueryManagementPanel
 from reporting_app.presentation.query_dialog import QueryRunDialog
 
 logger = logging.getLogger(__name__)
+
+
+class ImportCsvDialog(QDialog):
+    """Dialog window to configure CSV file import(s) into BigQuery table(s)."""
+
+    def __init__(self, initial_imports: Optional[List[dict]] = None, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setWindowTitle("Import CSV Configuration")
+        self.resize(650, 420)
+        self.rows: List[dict] = []
+        self._build_ui(initial_imports or [])
+
+    def _build_ui(self, initial_imports: List[dict]):
+        main_layout = QVBoxLayout(self)
+
+        header_label = QLabel(
+            "<b>Configure CSV Import:</b><br>"
+            "<i>Specify CSV file location, whether it has headers, and destination BigQuery output table address.</i>"
+        )
+        header_label.setWordWrap(True)
+        main_layout.addWidget(header_label)
+
+        # Scroll area for rows
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        self.container = QWidget()
+        self.container_layout = QVBoxLayout(self.container)
+        self.container_layout.setSpacing(12)
+        scroll.setWidget(self.container)
+        main_layout.addWidget(scroll)
+
+        # Bottom buttons
+        bottom_bar = QHBoxLayout()
+        add_btn = QPushButton("➕ Add csv")
+        add_btn.setToolTip("Add another CSV import file")
+        add_btn.clicked.connect(self._add_row)
+        bottom_bar.addWidget(add_btn)
+        bottom_bar.addStretch()
+
+        ok_btn = QPushButton("OK")
+        ok_btn.setStyleSheet("font-weight: bold; background-color: #2b78e4; color: white;")
+        ok_btn.clicked.connect(self.accept)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        bottom_bar.addWidget(cancel_btn)
+        bottom_bar.addWidget(ok_btn)
+        main_layout.addLayout(bottom_bar)
+
+        # Populate rows
+        if initial_imports:
+            for item in initial_imports:
+                self._add_row(
+                    csv_path=item.get("csv_path", ""),
+                    has_headers=item.get("has_headers", True),
+                    output_table=item.get("output_table", ""),
+                )
+        else:
+            self._add_row()
+
+    def _add_row(self, csv_path: str = "", has_headers: bool = True, output_table: str = ""):
+        row_widget = QWidget()
+        row_layout = QVBoxLayout(row_widget)
+        row_layout.setContentsMargins(8, 8, 8, 8)
+        row_widget.setStyleSheet("border: 1px solid #555; border-radius: 4px;")
+
+        # Row 1: CSV file path + Browse + Headers checkbox + Delete (if not first row)
+        r1 = QHBoxLayout()
+        r1.addWidget(QLabel("CSV File:"))
+        path_edit = QLineEdit(csv_path)
+        path_edit.setPlaceholderText("Select or enter CSV file path...")
+        r1.addWidget(path_edit)
+
+        browse_btn = QPushButton("Browse...")
+        def pick_file():
+            selected, _ = QFileDialog.getOpenFileName(
+                self, "Select CSV File", "", "CSV Files (*.csv);;All Files (*)"
+            )
+            if selected:
+                path_edit.setText(selected)
+        browse_btn.clicked.connect(pick_file)
+        r1.addWidget(browse_btn)
+
+        headers_cb = QCheckBox("Headers")
+        headers_cb.setChecked(has_headers)
+        r1.addWidget(headers_cb)
+
+        del_btn = None
+        if len(self.rows) > 0:
+            del_btn = QPushButton("🗑")
+            del_btn.setToolTip("Delete this import row")
+            del_btn.setFixedWidth(32)
+            r1.addWidget(del_btn)
+
+        row_layout.addLayout(r1)
+
+        # Row 2: Output table text box
+        r2 = QHBoxLayout()
+        r2.addWidget(QLabel("Output Table:"))
+        table_edit = QLineEdit(output_table)
+        table_edit.setPlaceholderText("project-id.dataset_id.table_id")
+        r2.addWidget(table_edit)
+        row_layout.addLayout(r2)
+
+        row_data = {
+            "widget": row_widget,
+            "path_edit": path_edit,
+            "headers_cb": headers_cb,
+            "table_edit": table_edit,
+        }
+        self.rows.append(row_data)
+        self.container_layout.addWidget(row_widget)
+
+        if del_btn:
+            def remove_this_row():
+                if row_data in self.rows:
+                    self.rows.remove(row_data)
+                    row_widget.deleteLater()
+            del_btn.clicked.connect(remove_this_row)
+
+    def get_imports(self) -> List[dict]:
+        results = []
+        for r in self.rows:
+            csv_path = r["path_edit"].text().strip()
+            table = r["table_edit"].text().strip()
+            headers = r["headers_cb"].isChecked()
+            if csv_path or table:
+                results.append({
+                    "csv_path": csv_path,
+                    "has_headers": headers,
+                    "output_table": table,
+                })
+        return results
 
 
 class ProcessFlowEditorWindow(QMainWindow):
@@ -86,6 +223,7 @@ class ProcessFlowEditorWindow(QMainWindow):
         self.graph = NodeGraph()
         self.graph.register_node(QueryNode)
         self.graph.register_node(TableBoxNode)
+        self.graph.register_node(ImportCsvNode)
 
         # Wire node double click
         self.graph.node_double_clicked.connect(self._on_node_double_clicked)
@@ -118,6 +256,11 @@ class ProcessFlowEditorWindow(QMainWindow):
                 map_pos = viewer.mapToScene(event.pos())
                 items = viewer._items_near(map_pos, None, 15, 15)
                 if not items:
+                    # Deselect everything in the process flow editor by clicking once on empty space
+                    self.graph.clear_selection()
+                    if viewer.scene():
+                        viewer.scene().clearSelection()
+
                     # Engage smooth pan mode using MMB engine
                     viewer.MMB_state = True
                     viewer._origin_pos = event.pos()
@@ -251,32 +394,39 @@ class ProcessFlowEditorWindow(QMainWindow):
 
         toolbar.addSeparator()
 
-        layout_h_btn = QPushButton("⬌ Auto Layout (H)")
-        layout_h_btn.setToolTip("Auto-format process flow layout horizontally (Left to Right)")
-        layout_h_btn.clicked.connect(lambda: self._auto_layout("horizontal"))
-        toolbar.addWidget(layout_h_btn)
-
-        layout_v_btn = QPushButton("⬍ Auto Layout (V)")
-        layout_v_btn.setToolTip("Auto-format process flow layout vertically (Top to Bottom)")
-        layout_v_btn.clicked.connect(lambda: self._auto_layout("vertical"))
-        toolbar.addWidget(layout_v_btn)
-
-        fit_btn = QPushButton("🔍 Fit Graph")
-        fit_btn.setToolTip("Fit all nodes into available canvas view")
-        fit_btn.clicked.connect(self._fit_graph_to_canvas)
-        toolbar.addWidget(fit_btn)
+        import_csv_btn = QPushButton("📥 Import csv")
+        import_csv_btn.setToolTip("Add an Import Query node to load CSV files into BigQuery tables")
+        import_csv_btn.clicked.connect(self._on_add_import_csv)
+        toolbar.addWidget(import_csv_btn)
 
         toolbar.addSeparator()
 
-        # Table address toggle
-        self.toggle_table_names_btn = QPushButton(
-            "🏷 Full Table Address" if self.show_full_table_names else "🏷 Short Table Name"
-        )
-        self.toggle_table_names_btn.setToolTip("Toggle between full table address and short table name")
-        self.toggle_table_names_btn.setCheckable(True)
-        self.toggle_table_names_btn.setChecked(self.show_full_table_names)
-        self.toggle_table_names_btn.clicked.connect(self._toggle_table_names_display)
-        toolbar.addWidget(self.toggle_table_names_btn)
+        # Appearance dropdown menu button
+        self.appearance_btn = QToolButton(self)
+        self.appearance_btn.setText("Appearance")
+        self.appearance_btn.setPopupMode(QToolButton.InstantPopup)
+        appearance_menu = QMenu(self.appearance_btn)
+
+        action_layout_h = appearance_menu.addAction("Auto Layout (Horizontal)")
+        action_layout_h.triggered.connect(lambda: self._auto_layout("horizontal"))
+
+        action_layout_v = appearance_menu.addAction("Auto Layout (Vertical)")
+        action_layout_v.triggered.connect(lambda: self._auto_layout("vertical"))
+
+        appearance_menu.addSeparator()
+
+        action_fit = appearance_menu.addAction("Fit Graph")
+        action_fit.triggered.connect(self._fit_graph_to_canvas)
+
+        appearance_menu.addSeparator()
+
+        self.action_full_table_names = appearance_menu.addAction("Full Table Address")
+        self.action_full_table_names.setCheckable(True)
+        self.action_full_table_names.setChecked(self.show_full_table_names)
+        self.action_full_table_names.triggered.connect(self._toggle_table_names_display)
+
+        self.appearance_btn.setMenu(appearance_menu)
+        toolbar.addWidget(self.appearance_btn)
 
         # Spacer to push toggle right button to far right
         spacer = QWidget()
@@ -363,6 +513,13 @@ class ProcessFlowEditorWindow(QMainWindow):
             if isinstance(node, TableBoxNode) or node.type_ == "reporting.nodes.TableBoxNode":
                 node.set_display_mode(self.show_full_table_names)
 
+    def _toggle_table_names_display(self) -> None:
+        """Toggle full table address vs short table name across all TableBoxNodes."""
+        self.show_full_table_names = self.action_full_table_names.isChecked()
+        for node in self.graph.all_nodes():
+            if isinstance(node, TableBoxNode) or node.type_ == "reporting.nodes.TableBoxNode":
+                node.set_display_mode(self.show_full_table_names)
+
     def _fit_graph_to_canvas(self) -> None:
         """Fit all nodes into the available canvas taking into account panel visibility."""
         viewer = self.graph.viewer()
@@ -389,6 +546,20 @@ class ProcessFlowEditorWindow(QMainWindow):
     def _load_initial_graph(self) -> None:
         """Load saved session or automatically add flow queries if brand new."""
         session_data = self.flow_controller.get_graph_session()
+        view_state = self.flow_controller.get_view_state()
+        viewer = self.graph.viewer()
+
+        def apply_view_state():
+            if view_state and "zoom" in view_state:
+                zoom = view_state.get("zoom")
+                center = view_state.get("center")
+                if zoom is not None:
+                    viewer.set_zoom(zoom)
+                if center and len(center) == 2:
+                    viewer.centerOn(float(center[0]), float(center[1]))
+            else:
+                self._fit_graph_to_canvas()
+
         if session_data and "nodes" in session_data and session_data["nodes"]:
             try:
                 self.graph.deserialize_session(session_data)
@@ -402,7 +573,7 @@ class ProcessFlowEditorWindow(QMainWindow):
                 for item in self.graph.viewer().scene().items():
                     if isinstance(item, PipeItem):
                         item.reset()
-                QtCore.QTimer.singleShot(100, self._fit_graph_to_canvas)
+                QtCore.QTimer.singleShot(100, apply_view_state)
                 return
             except Exception as e:
                 logger.error(f"Error restoring node session: {e}")
@@ -410,16 +581,71 @@ class ProcessFlowEditorWindow(QMainWindow):
         # If empty session but query names exist in flow definition, create nodes for them
         flow_query_names = self.flow_controller.get_query_names()
         queries_to_add = [self.report.get_query(q) for q in flow_query_names if self.report.get_query(q)]
-        if queries_to_add:
+        csv_imports = self.flow_controller.get_csv_imports()
+        if queries_to_add or csv_imports:
             ProcessFlowGraphBuilder.rebuild_graph(
                 self.graph,
                 queries_to_add,
                 self._node_positions,
                 self.show_full_table_names,
                 self.flow_controller.get_csv_filenames(),
+                import_csv_data=csv_imports,
             )
 
-        QtCore.QTimer.singleShot(100, self._fit_graph_to_canvas)
+        QtCore.QTimer.singleShot(100, apply_view_state)
+
+    def _on_add_import_csv(self) -> None:
+        """Add an Import Query node to the canvas."""
+        existing_names = {
+            n.name() for n in self.graph.all_nodes()
+            if isinstance(n, ImportCsvNode) or getattr(n, "type_", "") == "reporting.nodes.ImportCsvNode"
+        }
+        node_name = "Import csv"
+        idx = 2
+        while node_name in existing_names:
+            node_name = f"Import csv {idx}"
+            idx += 1
+
+        all_nodes = self.graph.all_nodes()
+        if all_nodes:
+            max_x = max((n.pos()[0] for n in all_nodes), default=0.0)
+            min_y = min((n.pos()[1] for n in all_nodes), default=0.0)
+            pos = [max_x + 500.0, min_y]
+        else:
+            pos = [0.0, 0.0]
+
+        inode: ImportCsvNode = self.graph.create_node(
+            "reporting.nodes.ImportCsvNode",
+            name=node_name,
+            pos=pos,
+        )
+        self._node_positions[node_name] = (pos[0], pos[1])
+        self._show_import_csv_dialog(inode)
+
+    def _show_import_csv_dialog(self, node: ImportCsvNode) -> None:
+        """Show configuration dialog for ImportCsvNode."""
+        current_imports = node.get_imports()
+        dialog = ImportCsvDialog(initial_imports=current_imports, parent=self)
+        if dialog.exec() == QDialog.Accepted:
+            new_imports = dialog.get_imports()
+            node.set_imports(new_imports)
+            self._sync_graph_topology()
+            self.status_bar.showMessage("Updated CSV import configuration.", 3000)
+
+    def _collect_csv_import_data(self) -> List[dict]:
+        """Collect all CSV import definitions from canvas nodes or persisted flow controller data."""
+        data = []
+        for node in self.graph.all_nodes():
+            if isinstance(node, ImportCsvNode) or getattr(node, "type_", "") == "reporting.nodes.ImportCsvNode":
+                data.append({
+                    "node_name": node.name(),
+                    "items": node.get_imports(),
+                })
+        if not data:
+            saved = self.flow_controller.get_csv_imports()
+            if saved:
+                data = saved
+        return data
 
     def _sync_graph_topology(self, additional_query: Optional[str] = None) -> None:
         """Reconcile and synchronize the graph topology for all active query nodes on the canvas."""
@@ -435,6 +661,7 @@ class ProcessFlowEditorWindow(QMainWindow):
             active_query_names.append(additional_query)
 
         active_queries = [self.report.get_query(name) for name in active_query_names if self.report.get_query(name)]
+        csv_imports = self._collect_csv_import_data()
 
         # Reconstruct graph according to Process Flow Graph Logic
         self._node_positions = ProcessFlowGraphBuilder.rebuild_graph(
@@ -443,6 +670,7 @@ class ProcessFlowEditorWindow(QMainWindow):
             self._node_positions,
             self.show_full_table_names,
             self.flow_controller.get_csv_filenames(),
+            import_csv_data=csv_imports,
         )
 
     def add_query_to_canvas(self, query_name: str, pos: Optional[tuple] = None) -> Optional[QueryNode]:
@@ -495,6 +723,8 @@ class ProcessFlowEditorWindow(QMainWindow):
                 QDesktopServices.openUrl(QUrl.fromLocalFile(query_path))
             else:
                 self._open_query_file(node.name())
+        elif isinstance(node, ImportCsvNode) or node.type_ == "reporting.nodes.ImportCsvNode":
+            self._show_import_csv_dialog(node)
         elif isinstance(node, TableBoxNode) or node.type_ == "reporting.nodes.TableBoxNode":
             btype = node.get_property("box_type") or getattr(getattr(node, "view", None), "table_box_type", "")
             if btype == "Output CSV":
@@ -583,7 +813,14 @@ class ProcessFlowEditorWindow(QMainWindow):
         """Open query .sql file with default system application."""
         qinfo = self.report.get_query(query_name)
         if qinfo and qinfo.file_path.exists():
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(qinfo.file_path.resolve())))
+            file_str = str(qinfo.file_path.resolve())
+            opened = QDesktopServices.openUrl(QUrl.fromLocalFile(file_str))
+            if not opened:
+                import subprocess
+                try:
+                    subprocess.Popen(["xdg-open", file_str])
+                except Exception as e:
+                    logger.warning(f"Failed to open with xdg-open: {e}")
 
     def _on_delete_selected(self) -> None:
         """Delete currently selected query nodes and resynchronize topology.
@@ -645,12 +882,22 @@ class ProcessFlowEditorWindow(QMainWindow):
             if param not in existing_defaults:
                 existing_defaults[param] = ""
 
+        # Capture current zoom and pan center
+        viewer = self.graph.viewer()
+        view_state = {
+            "zoom": viewer.get_zoom(),
+            "center": [viewer.scene_center().x(), viewer.scene_center().y()],
+        }
+        csv_imports = self._collect_csv_import_data()
+
         self.flow_controller.save_flow(
             active_query_names=active_query_names,
             parameter_defaults=existing_defaults,
             graph_session=session_data,
             show_full_table_names=self.show_full_table_names,
             csv_filenames=self.flow_controller.get_csv_filenames(),
+            csv_imports=csv_imports,
+            view_state=view_state,
         )
 
         if self.app_controller:
@@ -660,16 +907,22 @@ class ProcessFlowEditorWindow(QMainWindow):
         QMessageBox.information(self, "Saved", f"Process flow '{self.flow_controller.flow_name}' saved.")
 
     def _on_run_flow(self) -> None:
-        """Execute all queries in the process flow in topological order."""
+        """Execute all CSV imports and queries in the process flow."""
         session_data = self.graph.serialize_session()
         queries_order = self.flow_controller.get_execution_order(session_data)
 
-        if not queries_order:
-            QMessageBox.information(self, "Empty Flow", "There are no queries in this process flow to run.")
+        # Check if there are any executable elements (queries or CSV imports)
+        has_imports = any(
+            isinstance(n, ImportCsvNode) or getattr(n, "type_", "") == "reporting.nodes.ImportCsvNode"
+            for n in self.graph.all_nodes()
+        )
+
+        if not queries_order and not has_imports:
+            QMessageBox.information(self, "Empty Flow", "There are no queries or CSV imports in this process flow to run.")
             return
 
         # Consolidate all unique parameters across the queries
-        unique_params = self.flow_controller.get_unique_parameters(queries_order)
+        unique_params = self.flow_controller.get_unique_parameters(queries_order) if queries_order else []
         param_values = dict(self.flow_controller.parameter_defaults)
 
         if unique_params:
@@ -701,7 +954,37 @@ class ProcessFlowEditorWindow(QMainWindow):
         results_log = []
         errors = []
 
-        self.status_bar.showMessage(f"Running process flow ({len(queries_order)} queries)...")
+        # 1. Run CSV Imports if present
+        for node in self.graph.all_nodes():
+            if isinstance(node, ImportCsvNode) or getattr(node, "type_", "") == "reporting.nodes.ImportCsvNode":
+                imp_items = node.get_imports()
+                for item in imp_items:
+                    c_path = item.get("csv_path", "").strip()
+                    d_table = item.get("output_table", "").strip()
+                    headers = item.get("has_headers", True)
+                    if not c_path or not d_table:
+                        continue
+                    self.status_bar.showMessage(f"Importing {c_path} -> {d_table}...")
+                    QtWidgets.QApplication.processEvents()
+                    try:
+                        imp_res = run_bigquery_import_csv(
+                            csv_path=c_path,
+                            destination_table=d_table,
+                            has_headers=headers,
+                        )
+                        row_cnt = imp_res.get("row_count")
+                        cnt_str = f"{row_cnt:,} rows" if row_cnt is not None else "completed"
+                        results_log.append(f"📥 Imported CSV '{c_path}' into '{d_table}' ({cnt_str})")
+                    except Exception as e:
+                        err_msg = f"Import CSV failed for {d_table}: {e}"
+                        errors.append(err_msg)
+                        results_log.append(f"❌ {err_msg}")
+                        break
+                if errors:
+                    break
+
+        if not errors:
+            self.status_bar.showMessage(f"Running process flow queries ({len(queries_order)} queries)...")
 
         for idx, qname in enumerate(queries_order, start=1):
             qinfo = self.report.get_query(qname)

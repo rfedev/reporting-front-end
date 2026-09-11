@@ -192,6 +192,16 @@ class TestUISmoke(unittest.TestCase):
 
         editor.close()
 
+    def test_main_window_edit_process_flow(self):
+        win = MainWindow(controller=self.controller)
+        self.controller.initialize()
+        # Verify opening process flow editor does not throw NameError
+        win._on_edit_process_flow()
+        self.assertTrue(len(win.editor_windows) >= 1)
+        for ed in win.editor_windows:
+            ed.close()
+        win.close()
+
 
 if __name__ == "__main__":
     unittest.main()

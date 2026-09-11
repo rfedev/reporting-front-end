@@ -21,11 +21,11 @@ class AppController(QObject):
     # Signals for presentation layer updates
     reports_updated = Signal(list)  # list of report names
     active_report_changed = Signal(object)  # Optional[Report]
-    process_flows_updated = Signal(list)  # list of flow names (including "All Queries")
+    process_flows_updated = Signal(list)  # list of flow names
     queries_updated = Signal(list)  # list of query names
     status_changed = Signal(str)  # status text
 
-    ALL_QUERIES_OPTION = "All Queries"
+    DEFAULT_PROCESS_FLOW_NAME = "Process Flow 01"
 
     def __init__(self, db_manager: Optional[DatabaseManager] = None, parent: Optional[QObject] = None):
         super().__init__(parent)
@@ -45,7 +45,7 @@ class AppController(QObject):
         # Runtime state
         self.reports_by_name: Dict[str, Report] = {}
         self.active_report: Optional[Report] = None
-        self.active_flow_name: str = self.ALL_QUERIES_OPTION
+        self.active_flow_name: Optional[str] = None
         self.active_query_name: Optional[str] = None
 
     def initialize(self) -> None:
@@ -71,6 +71,36 @@ class AppController(QObject):
         self.repo.set_auto_scan(enabled)
         self.watcher.set_enabled(enabled)
 
+    def _create_default_process_flow(self, report: Report) -> ProcessFlowInfo:
+        """Create a default 'Process Flow 01' if none exists for the report (Requirement 2)."""
+        import json
+        queries_dir = report.folder_path / "queries"
+        queries_dir.mkdir(parents=True, exist_ok=True)
+        flow_path = queries_dir / f"{self.DEFAULT_PROCESS_FLOW_NAME}.json"
+        if not flow_path.exists():
+            data = {
+                "flow_name": self.DEFAULT_PROCESS_FLOW_NAME,
+                "report_name": report.name,
+                "query_names": [],
+                "parameter_defaults": {},
+                "show_full_table_names": True,
+                "csv_filenames": {},
+                "graph_session": {},
+            }
+            flow_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+        info = ProcessFlowInfo(
+            name=self.DEFAULT_PROCESS_FLOW_NAME,
+            file_path=flow_path,
+            report_name=report.name,
+            query_names=[],
+            parameter_defaults={},
+            raw_data={},
+            mtime=flow_path.stat().st_mtime,
+        )
+        report.process_flows.append(info)
+        return info
+
     def scan(self) -> None:
         """Trigger scanning of reports and queries."""
         self.status_changed.emit("Scanning reports directory...")
@@ -85,9 +115,13 @@ class AppController(QObject):
         report_names = list(self.reports_by_name.keys())
         self.reports_updated.emit(report_names)
 
-        # Re-select active report if possible
+        # Requirement 1: Restore persisted report selection
+        saved_report = self.repo.get_selected_report()
+
         if self.active_report and self.active_report.name in self.reports_by_name:
             self.select_report(self.active_report.name, preserve_flow=True)
+        elif saved_report and saved_report in self.reports_by_name:
+            self.select_report(saved_report)
         elif report_names:
             self.select_report(report_names[0])
         else:
@@ -109,42 +143,50 @@ class AppController(QObject):
             self.queries_updated.emit([])
             return
 
-        # Build process flows list with "All Queries" as default first entry
-        flow_options = [self.ALL_QUERIES_OPTION]
-        flow_options.extend([f.name for f in report.process_flows])
+        # Requirement 1: Persist selected report
+        self.repo.set_selected_report(report_name)
+
+        # Requirement 2: Remove 'All Queries'. If no process flow created yet, create 'Process Flow 01'
+        if not report.process_flows:
+            self._create_default_process_flow(report)
+
+        flow_options = [f.name for f in report.process_flows]
         self.process_flows_updated.emit(flow_options)
 
-        target_flow = self.active_flow_name if (preserve_flow and self.active_flow_name in flow_options) else self.ALL_QUERIES_OPTION
+        # Determine target process flow (persisted or preserved)
+        saved_flow = self.repo.get_selected_flow(report.name)
+        if preserve_flow and self.active_flow_name and self.active_flow_name in flow_options:
+            target_flow = self.active_flow_name
+        elif saved_flow and saved_flow in flow_options:
+            target_flow = saved_flow
+        else:
+            target_flow = flow_options[0] if flow_options else ""
+
         self.select_process_flow(target_flow)
 
-    def select_process_flow(self, flow_name: str) -> None:
-        """Select active process flow and filter queries dropdown accordingly."""
-        self.active_flow_name = flow_name
-
-        if not self.active_report:
-            self.queries_updated.emit([])
-            return
-
-        if flow_name == self.ALL_QUERIES_OPTION or not flow_name:
-            # Show all queries
-            query_names = [q.name for q in self.active_report.queries]
-        else:
-            # Show only queries used in this process flow
-            flow = self.active_report.get_process_flow(flow_name)
-            if flow and flow.query_names:
-                query_names = [name for name in flow.query_names if self.active_report.get_query(name)]
-            else:
-                # If flow has no queries yet or empty, show none
-                query_names = []
-
+        # Populate queries list with all queries in the active report
+        query_names = [q.name for q in report.queries]
         self.queries_updated.emit(query_names)
-        if query_names:
-            self.active_query_name = query_names[0]
+
+        saved_query = self.repo.get_selected_query(report.name)
+        if saved_query and saved_query in query_names:
+            self.select_query(saved_query)
+        elif query_names:
+            self.select_query(query_names[0])
         else:
             self.active_query_name = None
 
+    def select_process_flow(self, flow_name: str) -> None:
+        """Select active process flow and remember selection."""
+        self.active_flow_name = flow_name
+        if self.active_report and flow_name:
+            self.repo.set_selected_flow(flow_name, self.active_report.name)
+
     def select_query(self, query_name: str) -> None:
+        """Select active query and remember selection."""
         self.active_query_name = query_name
+        if self.active_report and query_name:
+            self.repo.set_selected_query(query_name, self.active_report.name)
 
     def get_query_info(self, query_name: str) -> Optional[QueryInfo]:
         """Fetch QueryInfo for the currently active report."""
@@ -158,6 +200,90 @@ class AppController(QObject):
         if not qinfo or not qinfo.file_path.exists():
             return False
         return QDesktopServices.openUrl(QUrl.fromLocalFile(str(qinfo.file_path.resolve())))
+
+    # --- Report / Process Flow / Query Management (Requirement 3) ---
+
+    def add_report(self, report_name: str) -> Optional[Report]:
+        """Create a new report folder with queries subfolder and default flow."""
+        clean_name = report_name.strip()
+        if not clean_name:
+            return None
+
+        # Determine target directory
+        working_dir = self.get_working_directory()
+        reports_sub = working_dir / "reports"
+        target_dir = reports_sub if (reports_sub.exists() and reports_sub.is_dir()) else working_dir
+        rep_folder = target_dir / clean_name
+        rep_folder.mkdir(parents=True, exist_ok=True)
+        (rep_folder / "queries").mkdir(parents=True, exist_ok=True)
+
+        self.scan()
+        self.select_report(clean_name)
+        return self.active_report
+
+    def remove_report(self, report_name: str) -> bool:
+        """Remove a report folder from disk."""
+        rep = self.reports_by_name.get(report_name)
+        if not rep or not rep.folder_path.exists():
+            return False
+
+        import shutil
+        try:
+            shutil.rmtree(rep.folder_path)
+            self.scan()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to remove report folder {rep.folder_path}: {e}")
+            return False
+
+    def add_process_flow(self, flow_name: str) -> Optional[ProcessFlowInfo]:
+        """Create a new process flow in the active report."""
+        if not self.active_report:
+            return None
+
+        clean_name = flow_name.strip()
+        if clean_name.endswith(".json"):
+            clean_name = clean_name[:-5]
+        if not clean_name:
+            return None
+
+        import json
+        queries_dir = self.active_report.folder_path / "queries"
+        queries_dir.mkdir(parents=True, exist_ok=True)
+        flow_path = queries_dir / f"{clean_name}.json"
+
+        if not flow_path.exists():
+            data = {
+                "flow_name": clean_name,
+                "report_name": self.active_report.name,
+                "query_names": [],
+                "parameter_defaults": {},
+                "show_full_table_names": True,
+                "csv_filenames": {},
+                "graph_session": {},
+            }
+            flow_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+        self.scan()
+        self.select_process_flow(clean_name)
+        return self.active_report.get_process_flow(clean_name)
+
+    def remove_process_flow(self, flow_name: str) -> bool:
+        """Remove a process flow file from disk."""
+        if not self.active_report:
+            return False
+
+        flow_info = self.active_report.get_process_flow(flow_name)
+        if not flow_info or not flow_info.file_path.exists():
+            return False
+
+        try:
+            flow_info.file_path.unlink()
+            self.scan()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to remove process flow {flow_name}: {e}")
+            return False
 
     def add_query(self, query_name: str, template_sql: str = "") -> Optional[QueryInfo]:
         """Create a new query file in the active report."""

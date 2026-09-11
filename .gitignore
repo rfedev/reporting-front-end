@@ -1,0 +1,11 @@
+
+# Don't sync ouput folders.
+**/output/
+**/outputs/
+**/Output/
+**/Outputs/
+
+/tests/
+
+#/instructions.md
+/misc-notes.txt

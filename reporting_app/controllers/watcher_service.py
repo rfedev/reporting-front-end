@@ -42,9 +42,10 @@ class FileWatcherService(QObject):
             return 0.0
         total: float = 0.0
         try:
-            # Check up to depth 3 (working_dir / report / [code] / files)
             for path in self.target_dir.glob("**/*"):
-                if path.suffix in {".sql", ".json"} or path.is_dir():
+                if any(part in {"outputs", ".git", ".venv", "__pycache__", "node_modules"} for part in path.parts):
+                    continue
+                if path.is_file() and path.suffix in {".sql", ".json"}:
                     total += path.stat().st_mtime
         except Exception as e:
             logger.debug(f"Error computing mtime: {e}")

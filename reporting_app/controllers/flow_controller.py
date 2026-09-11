@@ -77,9 +77,21 @@ class ProcessFlowController(QObject):
             self.flow_data["csv_filenames"] = {}
         self.flow_data["csv_filenames"][query_name] = filename
 
+    def get_csv_imports(self) -> List[dict]:
+        """Return list of CSV import group configurations for this flow."""
+        return self.flow_data.get("csv_imports", [])
+
+    def set_csv_imports(self, imports: List[dict]) -> None:
+        """Set CSV import group configurations for this flow."""
+        self.flow_data["csv_imports"] = imports
+
     def get_graph_session(self) -> Dict[str, Any]:
         """Return the serialized NodeGraph session dictionary."""
         return self.flow_data.get("graph_session", {})
+
+    def get_view_state(self) -> Dict[str, Any]:
+        """Return persisted canvas view state (zoom, scene_center)."""
+        return self.flow_data.get("view_state", {})
 
     def get_query_names(self) -> List[str]:
         """Return list of query names used in this flow."""
@@ -157,6 +169,8 @@ class ProcessFlowController(QObject):
         graph_session: Dict[str, Any],
         show_full_table_names: bool = True,
         csv_filenames: Optional[Dict[str, str]] = None,
+        csv_imports: Optional[List[dict]] = None,
+        view_state: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Save process flow to JSON and update database parameter defaults."""
         self.parameter_defaults.update(parameter_defaults)
@@ -165,7 +179,11 @@ class ProcessFlowController(QObject):
         self.flow_data["show_full_table_names"] = show_full_table_names
         if csv_filenames is not None:
             self.flow_data["csv_filenames"] = csv_filenames
+        if csv_imports is not None:
+            self.flow_data["csv_imports"] = csv_imports
         self.flow_data["graph_session"] = graph_session
+        if view_state is not None:
+            self.flow_data["view_state"] = view_state
 
         FlowStorage.save(
             file_path=self.file_path,
@@ -176,6 +194,8 @@ class ProcessFlowController(QObject):
             graph_session=graph_session,
             show_full_table_names=show_full_table_names,
             csv_filenames=self.flow_data.get("csv_filenames", {}),
+            csv_imports=self.flow_data.get("csv_imports", []),
+            view_state=self.flow_data.get("view_state", {}),
         )
 
         # Update persistence layer defaults if repository is provided

@@ -90,6 +90,45 @@ class TestSqlParser(unittest.TestCase):
             ["project.dataset.report_summary", "project.dataset.detail_records"],
         )
 
+    def test_extract_project_id_from_sql(self):
+        from reporting_app.core.sql_parser import extract_project_id_from_sql
+
+        sql1 = """
+        SELECT * FROM `my-gcp-project.my_dataset.my_table` WHERE id = 1;
+        """
+        self.assertEqual(extract_project_id_from_sql(sql1), "my-gcp-project")
+
+        sql2 = """
+        CREATE OR REPLACE TABLE `iw-gid-prd-01-c683.dest_dataset.tbl` AS
+        SELECT col1, col2
+        FROM `iw-gid-prd-01-c683.src_dataset.source_tbl`
+        JOIN `other-proj.dataset.tbl2` ON 1=1;
+        """
+        self.assertEqual(extract_project_id_from_sql(sql2), "iw-gid-prd-01-c683")
+
+        # Table without 3-part project qualification
+        sql3 = "SELECT * FROM `dataset.tbl`;"
+        self.assertIsNone(extract_project_id_from_sql(sql3))
+
+    def test_cte_and_create_with_select_csv(self):
+        # Verify CTEs are not treated as external inputs
+        # And verify CREATE TABLE + SELECT results in both output_tables and csv_tables (Requirement 6 & 12)
+        sql = """
+        WITH my_cte AS (
+            SELECT id FROM `iw-gid-prd-01-c683.raw_dataset.users`
+        )
+        CREATE OR REPLACE TABLE `iw-gid-prd-01-c683.mart_dataset.active_users` AS
+        SELECT u.id
+        FROM my_cte AS u;
+
+        SELECT * FROM `iw-gid-prd-01-c683.mart_dataset.active_users`;
+        """
+        input_tables, output_tables, csv_tables = scan_query_tables(sql)
+        self.assertEqual(output_tables, ["iw-gid-prd-01-c683.mart_dataset.active_users"])
+        self.assertEqual(csv_tables, ["iw-gid-prd-01-c683.mart_dataset.active_users"])
+        # my_cte must NOT be in input_tables; only the real source table
+        self.assertEqual(input_tables, ["iw-gid-prd-01-c683.raw_dataset.users"])
+
 
 if __name__ == "__main__":
     unittest.main()

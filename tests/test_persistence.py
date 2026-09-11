@@ -58,12 +58,37 @@ class TestPersistence(unittest.TestCase):
             query_names=["q1", "q2"],
             parameter_defaults={"p1": "v1"},
             graph_session={"nodes": {}},
+            show_full_table_names=True,
+            csv_filenames={"q1": "q1_custom.csv"},
+            csv_imports=[{"node_name": "Import csv", "items": [{"csv_path": "/path/a.csv", "has_headers": True, "output_table": "proj.d.t"}]}],
+            view_state={"zoom": 0.85, "center": [120.0, 340.0]},
         )
 
         loaded = FlowStorage.load(flow_file)
         self.assertEqual(loaded["flow_name"], "Flow-Test")
         self.assertEqual(loaded["query_names"], ["q1", "q2"])
         self.assertEqual(loaded["parameter_defaults"], {"p1": "v1"})
+        self.assertEqual(loaded["csv_filenames"], {"q1": "q1_custom.csv"})
+        self.assertEqual(len(loaded["csv_imports"]), 1)
+        self.assertEqual(loaded["view_state"], {"zoom": 0.85, "center": [120.0, 340.0]})
+
+    def test_workbench_dataset(self):
+        self.assertEqual(self.repo.get_workbench_dataset(), "")
+        self.repo.set_workbench_dataset("iw-gid-prd-01-c683.gid_art_test")
+        self.assertEqual(self.repo.get_workbench_dataset(), "iw-gid-prd-01-c683.gid_art_test")
+
+    def test_dropdown_selection_persistence(self):
+        self.assertEqual(self.repo.get_selected_report(), "")
+        self.assertEqual(self.repo.get_selected_flow("report1"), "")
+        self.assertEqual(self.repo.get_selected_query("report1"), "")
+
+        self.repo.set_selected_report("report1")
+        self.repo.set_selected_flow("Process Flow 01", "report1")
+        self.repo.set_selected_query("query1", "report1")
+
+        self.assertEqual(self.repo.get_selected_report(), "report1")
+        self.assertEqual(self.repo.get_selected_flow("report1"), "Process Flow 01")
+        self.assertEqual(self.repo.get_selected_query("report1"), "query1")
 
 
 if __name__ == "__main__":

@@ -214,6 +214,57 @@ class QueryNode(BaseNode):
             self.view.set_parameters(params)
 
 
+class ImportCsvItem(NodeItem):
+    """Custom graphics item for ImportCsvNode."""
+
+    def __init__(self, name="Import csv", parent=None):
+        super().__init__(name, parent)
+
+
+class ImportCsvNode(BaseNode):
+    """Node representing one or more CSV file imports into BigQuery tables."""
+
+    __identifier__ = "reporting.nodes"
+    NODE_NAME = "Import csv"
+
+    def __init__(self):
+        super().__init__(ImportCsvItem)
+        # Input execution port (connect from prior queries/imports) - Blue
+        self.add_input("run_in", multi_input=True, display_name=True, color=(COLOR_BLUE[0], COLOR_BLUE[1], COLOR_BLUE[2]))
+
+        # Output execution port (connect to subsequent queries) - Blue
+        self.add_output("run_out", multi_output=True, display_name=True, color=(COLOR_BLUE[0], COLOR_BLUE[1], COLOR_BLUE[2]))
+        # Output tables port (connect to output TableBox) - Dark Orange
+        self.add_output("tables_out", multi_output=True, display_name=True, color=(COLOR_DARK_ORANGE[0], COLOR_DARK_ORANGE[1], COLOR_DARK_ORANGE[2]))
+
+        # Custom properties
+        self.create_property("import_name", "Import csv")
+        self.create_property("imports_json", "[]")  # list of {"csv_path": ..., "has_headers": bool, "output_table": ...}
+
+        # Visual styling - Purple
+        self.set_color(COLOR_DARK_PURPLE[0], COLOR_DARK_PURPLE[1], COLOR_DARK_PURPLE[2])
+
+    def get_imports(self) -> List[dict]:
+        import json
+        raw = self.get_property("imports_json") or "[]"
+        try:
+            return json.loads(raw)
+        except Exception:
+            return []
+
+    def set_imports(self, imports: List[dict]):
+        import json
+        self.set_property("imports_json", json.dumps(imports))
+
+    def get_output_tables(self) -> List[str]:
+        tables = []
+        for item in self.get_imports():
+            t = item.get("output_table", "").strip()
+            if t and t not in tables:
+                tables.append(t)
+        return tables
+
+
 class TableBoxNode(BaseNode):
     """Node displaying a vertical list of database table names rendered directly in the node box."""
 

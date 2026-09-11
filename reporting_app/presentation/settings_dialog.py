@@ -15,15 +15,24 @@ from PySide6.QtWidgets import (
 
 
 class SettingsDialog(QDialog):
-    """Dialog allowing configuration of working directory and auto-scan preferences."""
+    """Dialog allowing configuration of working directory, workbench dataset, and auto-scan preferences."""
 
-    def __init__(self, current_dir: Path, auto_scan: bool, parent=None):
+    DEFAULT_WORKBENCH_DATASET = "iw-gid-prd-01-c683.gid_art_yourworkbenchID"
+
+    def __init__(
+        self,
+        current_dir: Path,
+        auto_scan: bool,
+        workbench_dataset: str = "",
+        parent=None,
+    ):
         super().__init__(parent)
         self.setWindowTitle("Settings")
-        self.resize(500, 180)
+        self.resize(520, 220)
 
         self._selected_dir = current_dir
         self._auto_scan = auto_scan
+        self._workbench_dataset = workbench_dataset
 
         self._build_ui()
 
@@ -42,6 +51,12 @@ class SettingsDialog(QDialog):
         dir_layout.addWidget(browse_btn)
 
         form_layout.addRow("Working Directory:", dir_layout)
+
+        # Workbench Dataset row (Requirement 4)
+        initial_workbench = self._workbench_dataset or self.DEFAULT_WORKBENCH_DATASET
+        self.workbench_edit = QLineEdit(initial_workbench)
+        self.workbench_edit.setPlaceholderText(self.DEFAULT_WORKBENCH_DATASET)
+        form_layout.addRow("Workbench Dataset:", self.workbench_edit)
 
         # Auto-scan checkbox
         self.auto_scan_checkbox = QCheckBox("Enable auto-scanning for reports, flows, and queries")
@@ -68,6 +83,9 @@ class SettingsDialog(QDialog):
 
     def get_working_directory(self) -> Path:
         return Path(self.dir_edit.text())
+
+    def get_workbench_dataset(self) -> str:
+        return self.workbench_edit.text().strip()
 
     def get_auto_scan(self) -> bool:
         return self.auto_scan_checkbox.isChecked()

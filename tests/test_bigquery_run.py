@@ -119,6 +119,102 @@ class TestBigQueryRun(unittest.TestCase):
             # Ensure no CSV was created
             self.assertFalse((outputs_dir / "create_table.csv").exists())
 
+    def test_run_bigquery_script_auto_extracts_project_id(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            sql_file = temp_path / "from_query.sql"
+            sql_file.write_text(
+                "SELECT * FROM `my-custom-project.dataset.source_table`;",
+                encoding="utf-8",
+            )
+            outputs_dir = temp_path / "outputs"
+
+            mock_df = pd.DataFrame({"col": [10, 20]})
+            mock_results = MagicMock()
+            mock_results.to_dataframe.return_value = mock_df
+
+            mock_query_job = MagicMock()
+            mock_query_job.result.return_value = mock_results
+
+            mock_client = MagicMock()
+            mock_client.query.return_value = mock_query_job
+
+            with patch("reporting_app.core.bigquery_run.bigquery.Client", return_value=mock_client) as mock_client_cls:
+                res = run_bigquery_script(
+                    sql_script_path=sql_file,
+                    report_name="test_report",
+                    outputs_dir=outputs_dir,
+                )
+
+            # Client should be initialized with project="my-custom-project"
+            mock_client_cls.assert_called_with(project="my-custom-project")
+            self.assertEqual(res["project_id"], "my-custom-project")
+            mock_client.query.assert_called_once()
+            _, kwargs = mock_client.query.call_args
+            self.assertEqual(kwargs.get("project"), "my-custom-project")
+
+    def test_run_bigquery_script_combined_create_and_csv(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            sql_file = temp_path / "combined.sql"
+            sql_file.write_text(
+                """
+                CREATE OR REPLACE TABLE `my-proj.dataset.tbl` AS SELECT 1;
+                SELECT * FROM `my-proj.dataset.tbl`;
+                """,
+                encoding="utf-8",
+            )
+            outputs_dir = temp_path / "outputs"
+
+            mock_df = pd.DataFrame({"x": [1]})
+            mock_results = MagicMock()
+            mock_results.to_dataframe.return_value = mock_df
+
+            mock_query_job = MagicMock()
+            mock_query_job.result.return_value = mock_results
+
+            mock_client = MagicMock()
+            mock_client.query.return_value = mock_query_job
+
+            with patch("reporting_app.core.bigquery_run.bigquery.Client", return_value=mock_client):
+                res = run_bigquery_script(
+                    sql_script_path=sql_file,
+                    report_name="test_report",
+                    outputs_dir=outputs_dir,
+                )
+
+            self.assertTrue(res["is_export"])
+            self.assertTrue(res["has_output_tables"])
+            self.assertEqual(res["output_tables"], ["my-proj.dataset.tbl"])
+            self.assertEqual(res["row_count"], 1)
+
+    def test_run_bigquery_import_csv(self):
+        from reporting_app.core.bigquery_run import run_bigquery_import_csv
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            csv_file = temp_path / "data.csv"
+            csv_file.write_text("id,name\n1,Alice\n2,Bob\n", encoding="utf-8")
+
+            mock_client = MagicMock()
+            mock_job = MagicMock()
+            mock_client.load_table_from_file.return_value = mock_job
+            mock_table = MagicMock()
+            mock_table.num_rows = 2
+            mock_client.get_table.return_value = mock_table
+
+            with patch("reporting_app.core.bigquery_run.bigquery.Client", return_value=mock_client) as mock_cls:
+                res = run_bigquery_import_csv(
+                    csv_path=csv_file,
+                    destination_table="my-proj.dataset.imported_table",
+                    has_headers=True,
+                )
+
+            mock_cls.assert_called_with(project="my-proj")
+            self.assertEqual(res["status"], "SUCCESS")
+            self.assertEqual(res["row_count"], 2)
+            self.assertEqual(res["destination_table"], "my-proj.dataset.imported_table")
+
 
 if __name__ == "__main__":
     unittest.main()

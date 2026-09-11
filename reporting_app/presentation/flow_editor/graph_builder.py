@@ -15,7 +15,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from NodeGraphQt import BaseNode, NodeGraph
 from reporting_app.core.models import QueryInfo
-from reporting_app.presentation.flow_editor.nodes import QueryNode, TableBoxNode
+from reporting_app.presentation.flow_editor.nodes import ImportCsvNode, QueryNode, TableBoxNode
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +30,7 @@ class ProcessFlowGraphBuilder:
         existing_positions: Optional[Dict[str, Tuple[float, float]]] = None,
         show_full_table_names: bool = True,
         csv_filenames: Optional[Dict[str, str]] = None,
+        import_csv_data: Optional[List[dict]] = None,
     ) -> Dict[str, Tuple[float, float]]:
         """Reconstruct the entire graph topology according to the architectural rules
 
@@ -37,6 +38,18 @@ class ProcessFlowGraphBuilder:
         """
         existing_positions = dict(existing_positions or {})
         csv_filenames = csv_filenames or {}
+        import_csv_data = import_csv_data or []
+
+        # 0. Capture user execution connections (run_out -> run_in) to preserve them
+        preserved_run_conns: List[Tuple[str, str]] = []
+        for node in graph.all_nodes():
+            run_out = node.get_output("run_out")
+            if run_out:
+                for target_port in run_out.connected_ports():
+                    target_node = target_port.node()
+                    src_name = node.get_property("query_name") or node.name()
+                    tgt_name = target_node.get_property("query_name") or target_node.name()
+                    preserved_run_conns.append((src_name, tgt_name))
 
         # 1. Capture current live positions of all existing nodes from canvas.
         # Canvas positions MUST take precedence over any stale/passed-in positions.
@@ -49,6 +62,10 @@ class ProcessFlowGraphBuilder:
 
         # Remove keys belonging to queries no longer present on canvas
         active_query_names = {q.name for q in queries}
+        active_query_names.add("Import csv")
+        for idx in range(len(import_csv_data) + 5):
+            active_query_names.add(f"Import csv {idx}")
+
         keys_to_remove = [
             k for k in list(existing_positions.keys())
             if not any(k == qn or k.startswith(f"{qn} [") for qn in active_query_names)
@@ -59,15 +76,21 @@ class ProcessFlowGraphBuilder:
         # Clear existing nodes
         graph.delete_nodes(graph.all_nodes())
 
-        if not queries:
+        if not queries and not import_csv_data:
             return existing_positions
 
-        # 2. Build table provenance index across active queries on canvas
-        # Single-Writer Provenance: table -> creating query name
+        # 2. Build table provenance index across active queries and CSV imports on canvas
+        # Single-Writer Provenance: table -> creating query/import name
         table_producers: Dict[str, str] = {}
         for q in queries:
             for out_t in q.output_tables:
                 table_producers[out_t] = q.name
+        for idx, imp_group in enumerate(import_csv_data):
+            imp_name = imp_group.get("node_name", "Import csv" if idx == 0 else f"Import csv {idx}")
+            for item in imp_group.get("items", []):
+                t = item.get("output_table", "").strip()
+                if t:
+                    table_producers[t] = imp_name
 
         # 3. Create all Query Nodes and their immediate Output Boxes & CSV Boxes
         query_nodes: Dict[str, QueryNode] = {}
@@ -131,14 +154,47 @@ class ProcessFlowGraphBuilder:
 
             col_x += 650
 
-        # 4. Resolve Input Requirements for each Query Node
+        # 4. Create ImportCsvNode(s) if import_csv_data is provided
+        import_nodes: Dict[str, ImportCsvNode] = {}
+        for idx, imp_group in enumerate(import_csv_data):
+            imp_name = imp_group.get("node_name", "Import csv" if idx == 0 else f"Import csv {idx}")
+            ipos = existing_positions.get(imp_name, (col_x, 0))
+            inode: ImportCsvNode = graph.create_node(
+                "reporting.nodes.ImportCsvNode",
+                name=imp_name,
+                pos=[ipos[0], ipos[1]],
+            )
+            items = imp_group.get("items", [])
+            inode.set_imports(items)
+            import_nodes[imp_name] = inode
+
+            out_tables = inode.get_output_tables()
+            if out_tables:
+                out_box_key = f"{imp_name} [Out]"
+                out_pos = existing_positions.get(out_box_key, (ipos[0] + 260, ipos[1]))
+                out_box: TableBoxNode = graph.create_node(
+                    "reporting.nodes.TableBoxNode",
+                    name=out_box_key,
+                    pos=[out_pos[0], out_pos[1]],
+                )
+                out_box.setup_as_output(out_tables)
+                out_box.set_display_mode(show_full_table_names)
+                try:
+                    inode.get_output("tables_out").connect_to(out_box.get_input("in_tables"))
+                except Exception as e:
+                    logger.debug(f"Could not connect {imp_name} to Output Box: {e}")
+                output_boxes[imp_name] = out_box
+
+            col_x += 650
+
+        # 5. Resolve Input Requirements for each Query Node
         for q in queries:
             qnode = query_nodes[q.name]
             qx, qy = qnode.pos()
 
             # Partition required input tables into:
-            # - external_tables: not produced by any active query in this graph
-            # - derived_tables: produced by upstream queries active in this graph
+            # - external_tables: not produced by any active query or import in this graph
+            # - derived_tables: produced by upstream queries or imports active in this graph
             external_tables: List[str] = []
             derived_tables_by_producer: Dict[str, List[str]] = defaultdict(list)
 
@@ -172,10 +228,9 @@ class ProcessFlowGraphBuilder:
             num_producers = len(derived_tables_by_producer)
             single_producer = list(derived_tables_by_producer.keys())[0] if num_producers == 1 else None
             is_complete_output = False
-            if single_producer:
-                upstream_qinfo = next((uq for uq in queries if uq.name == single_producer), None)
-                if upstream_qinfo:
-                    is_complete_output = set(derived_tables_by_producer[single_producer]) == set(upstream_qinfo.output_tables)
+            if single_producer and single_producer in output_boxes:
+                producer_box = output_boxes[single_producer]
+                is_complete_output = set(derived_tables_by_producer[single_producer]) == set(producer_box.raw_tables)
 
             if num_producers == 1 and is_complete_output:
                 # Direct Linear Chaining:
@@ -217,6 +272,20 @@ class ProcessFlowGraphBuilder:
                     junction_box.get_output("out_tables").connect_to(qnode.get_input("tables_in"))
                 except Exception as e:
                     logger.debug(f"Could not connect junction box to query {q.name}: {e}")
+
+        # 6. Restore preserved user execution connections (run_out -> run_in)
+        all_executable_nodes: Dict[str, BaseNode] = {**query_nodes, **import_nodes}
+        for src_name, tgt_name in preserved_run_conns:
+            src_node = all_executable_nodes.get(src_name)
+            tgt_node = all_executable_nodes.get(tgt_name)
+            if src_node and tgt_node:
+                try:
+                    src_out = src_node.get_output("run_out")
+                    tgt_in = tgt_node.get_input("run_in")
+                    if src_out and tgt_in:
+                        src_out.connect_to(tgt_in)
+                except Exception as e:
+                    logger.debug(f"Could not restore connection {src_name} -> {tgt_name}: {e}")
 
         # Reset pipe colors across the scene
         for item in graph.viewer().scene().items():

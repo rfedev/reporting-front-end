@@ -31,6 +31,8 @@ class FlowStorage:
         graph_session: Dict[str, Any],
         show_full_table_names: bool = True,
         csv_filenames: Optional[Dict[str, str]] = None,
+        csv_imports: Optional[List[dict]] = None,
+        view_state: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Save process flow JSON data to disk."""
         data = {
@@ -40,7 +42,9 @@ class FlowStorage:
             "parameter_defaults": parameter_defaults,
             "show_full_table_names": show_full_table_names,
             "csv_filenames": csv_filenames or {},
+            "csv_imports": csv_imports or [],
             "graph_session": graph_session,
+            "view_state": view_state or {},
         }
         file_path.parent.mkdir(parents=True, exist_ok=True)
         file_path.write_text(json.dumps(data, indent=2), encoding="utf-8")

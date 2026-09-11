@@ -52,6 +52,48 @@ class Repository:
     def set_auto_scan(self, enabled: bool) -> None:
         self.set_setting("auto_scan", "true" if enabled else "false")
 
+    # --- Workbench Dataset (Requirement 4) ---
+
+    def get_workbench_dataset(self) -> str:
+        """Return the default workbench dataset address."""
+        return self.get_setting("workbench_dataset", "")
+
+    def set_workbench_dataset(self, value: str) -> None:
+        """Store the default workbench dataset address."""
+        self.set_setting("workbench_dataset", value.strip())
+
+    # --- Dropdown Selections Persistence (Requirement 1) ---
+
+    def get_selected_report(self) -> str:
+        return self.get_setting("selected_report", "")
+
+    def set_selected_report(self, report_name: str) -> None:
+        self.set_setting("selected_report", report_name)
+
+    def get_selected_flow(self, report_name: Optional[str] = None) -> str:
+        if report_name:
+            val = self.get_setting(f"selected_flow_{report_name}", "")
+            if val:
+                return val
+        return self.get_setting("selected_flow", "")
+
+    def set_selected_flow(self, flow_name: str, report_name: Optional[str] = None) -> None:
+        self.set_setting("selected_flow", flow_name)
+        if report_name:
+            self.set_setting(f"selected_flow_{report_name}", flow_name)
+
+    def get_selected_query(self, report_name: Optional[str] = None) -> str:
+        if report_name:
+            val = self.get_setting(f"selected_query_{report_name}", "")
+            if val:
+                return val
+        return self.get_setting("selected_query", "")
+
+    def set_selected_query(self, query_name: str, report_name: Optional[str] = None) -> None:
+        self.set_setting("selected_query", query_name)
+        if report_name:
+            self.set_setting(f"selected_query_{report_name}", query_name)
+
     # --- Parameter Defaults ---
 
     def get_parameter_default(self, scope_type: str, scope_name: str, param_name: str) -> str:

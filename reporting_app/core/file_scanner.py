@@ -56,6 +56,10 @@ class FileScanner:
         if directory.name in IGNORED_DIRS or directory.name.startswith((".", "_")):
             return False
 
+        # If inside a 'reports' directory, any non-ignored directory is a report
+        if directory.parent.name == "reports":
+            return True
+
         # Check queries/ directory
         queries_dir = directory / "queries"
         if queries_dir.is_dir():
@@ -69,7 +73,12 @@ class FileScanner:
                 has_sql = any(code_dir.glob("*.sql"))
 
         has_json = any(directory.glob("*.json"))
-        return has_sql or has_json
+        try:
+            is_empty = not any(directory.iterdir())
+        except Exception:
+            is_empty = False
+
+        return has_sql or has_json or is_empty
 
     def scan_all_reports(self) -> List[Report]:
         """Scan the working directory and return all discovered reports."""

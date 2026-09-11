@@ -47,6 +47,10 @@ class MainWindow(QMainWindow):
         # Initial scan and load
         self.controller.initialize()
 
+        # Requirement 4: Check Workbench Dataset prompt if not set
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(100, self._check_workbench_dataset)
+
     def _build_ui(self) -> None:
         central_widget = QWidget(self)
         self.setCentralWidget(central_widget)
@@ -55,20 +59,33 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(20, 20, 20, 20)
 
         # ---------------------------------------------------------------------
-        # 1. Reports Section
+        # 1. Reports Section (Requirement 3: inline dropdown and icon buttons)
         # ---------------------------------------------------------------------
         report_layout = QHBoxLayout()
         report_label = QLabel("<b>Reports:</b>")
-        report_label.setFixedWidth(80)
+        report_label.setFixedWidth(100)
         self.reports_combo = QComboBox(self)
         self.reports_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         self.reports_combo.currentTextChanged.connect(self._on_report_selected)
+
+        self.add_report_btn = QPushButton("➕")
+        self.add_report_btn.setToolTip("Add Report")
+        self.add_report_btn.setFixedWidth(36)
+        self.add_report_btn.clicked.connect(self._on_add_report)
+
+        self.remove_report_btn = QPushButton("🗑")
+        self.remove_report_btn.setToolTip("Remove Report")
+        self.remove_report_btn.setFixedWidth(36)
+        self.remove_report_btn.clicked.connect(self._on_remove_report)
+
         report_layout.addWidget(report_label)
         report_layout.addWidget(self.reports_combo, 1)
+        report_layout.addWidget(self.add_report_btn)
+        report_layout.addWidget(self.remove_report_btn)
         main_layout.addLayout(report_layout)
 
         # ---------------------------------------------------------------------
-        # 2. Process Flows Section
+        # 2. Process Flows Section (Requirement 3: inline dropdown and icon buttons)
         # ---------------------------------------------------------------------
         self.flows_group = QGroupBox("Process Flows", self)
         flows_layout = QVBoxLayout(self.flows_group)
@@ -79,30 +96,40 @@ class MainWindow(QMainWindow):
         flow_label.setFixedWidth(100)
         self.flows_combo = QComboBox(self)
         self.flows_combo.currentTextChanged.connect(self._on_flow_selected)
-        flow_row1.addWidget(flow_label)
-        flow_row1.addWidget(self.flows_combo, 1)
-        flows_layout.addLayout(flow_row1)
 
-        flow_buttons_layout = QHBoxLayout()
-        self.edit_flow_btn = QPushButton("Edit Process Flow")
+        self.edit_flow_btn = QPushButton("✏")
+        self.edit_flow_btn.setToolTip("Edit Process Flow")
+        self.edit_flow_btn.setFixedWidth(36)
         self.edit_flow_btn.clicked.connect(self._on_edit_process_flow)
 
-        self.new_flow_btn = QPushButton("+ New Process Flow")
-        self.new_flow_btn.clicked.connect(self._on_new_process_flow)
+        self.add_flow_btn = QPushButton("➕")
+        self.add_flow_btn.setToolTip("Add Process Flow")
+        self.add_flow_btn.setFixedWidth(36)
+        self.add_flow_btn.clicked.connect(self._on_new_process_flow)
 
-        self.run_flow_btn = QPushButton("Run Process Flow")
-        self.run_flow_btn.setToolTip("Run the selected process flow")
+        self.remove_flow_btn = QPushButton("🗑")
+        self.remove_flow_btn.setToolTip("Remove Process Flow")
+        self.remove_flow_btn.setFixedWidth(36)
+        self.remove_flow_btn.clicked.connect(self._on_remove_process_flow)
+
+        self.run_flow_btn = QPushButton("▶")
+        self.run_flow_btn.setToolTip("Run Process Flow")
+        self.run_flow_btn.setFixedWidth(36)
+        self.run_flow_btn.setStyleSheet("font-weight: bold; color: #2a82da;")
         self.run_flow_btn.clicked.connect(self._on_run_process_flow)
 
-        flow_buttons_layout.addWidget(self.edit_flow_btn)
-        flow_buttons_layout.addWidget(self.new_flow_btn)
-        flow_buttons_layout.addWidget(self.run_flow_btn)
-        flows_layout.addLayout(flow_buttons_layout)
+        flow_row1.addWidget(flow_label)
+        flow_row1.addWidget(self.flows_combo, 1)
+        flow_row1.addWidget(self.edit_flow_btn)
+        flow_row1.addWidget(self.add_flow_btn)
+        flow_row1.addWidget(self.remove_flow_btn)
+        flow_row1.addWidget(self.run_flow_btn)
+        flows_layout.addLayout(flow_row1)
 
         main_layout.addWidget(self.flows_group)
 
         # ---------------------------------------------------------------------
-        # 3. Queries Section
+        # 3. Queries Section (Requirement 3: inline dropdown and icon buttons)
         # ---------------------------------------------------------------------
         self.queries_group = QGroupBox("Queries", self)
         queries_layout = QVBoxLayout(self.queries_group)
@@ -113,22 +140,35 @@ class MainWindow(QMainWindow):
         query_label.setFixedWidth(100)
         self.queries_combo = QComboBox(self)
         self.queries_combo.currentTextChanged.connect(self._on_query_selected)
-        query_row1.addWidget(query_label)
-        query_row1.addWidget(self.queries_combo, 1)
-        queries_layout.addLayout(query_row1)
 
-        query_buttons_layout = QHBoxLayout()
-        self.edit_query_btn = QPushButton("Edit Query")
-        self.edit_query_btn.setToolTip("Open query in OS default editor")
+        self.edit_query_btn = QPushButton("✏")
+        self.edit_query_btn.setToolTip("Edit Query (Open in Editor)")
+        self.edit_query_btn.setFixedWidth(36)
         self.edit_query_btn.clicked.connect(self._on_edit_query)
 
-        self.run_query_btn = QPushButton("Run Query")
-        self.run_query_btn.setToolTip("Open query parameter configuration dialog")
+        self.add_query_btn = QPushButton("➕")
+        self.add_query_btn.setToolTip("Add Query")
+        self.add_query_btn.setFixedWidth(36)
+        self.add_query_btn.clicked.connect(self._on_add_query)
+
+        self.remove_query_btn = QPushButton("🗑")
+        self.remove_query_btn.setToolTip("Remove Query")
+        self.remove_query_btn.setFixedWidth(36)
+        self.remove_query_btn.clicked.connect(self._on_remove_query)
+
+        self.run_query_btn = QPushButton("▶")
+        self.run_query_btn.setToolTip("Run Query")
+        self.run_query_btn.setFixedWidth(36)
+        self.run_query_btn.setStyleSheet("font-weight: bold; color: #2a82da;")
         self.run_query_btn.clicked.connect(self._on_run_query)
 
-        query_buttons_layout.addWidget(self.edit_query_btn)
-        query_buttons_layout.addWidget(self.run_query_btn)
-        queries_layout.addLayout(query_buttons_layout)
+        query_row1.addWidget(query_label)
+        query_row1.addWidget(self.queries_combo, 1)
+        query_row1.addWidget(self.edit_query_btn)
+        query_row1.addWidget(self.add_query_btn)
+        query_row1.addWidget(self.remove_query_btn)
+        query_row1.addWidget(self.run_query_btn)
+        queries_layout.addLayout(query_row1)
 
         main_layout.addWidget(self.queries_group)
 
@@ -159,6 +199,20 @@ class MainWindow(QMainWindow):
         # Update visibility of manual sync button based on auto-scan setting
         self._update_sync_button_visibility()
 
+    def _check_workbench_dataset(self) -> None:
+        """Prompt user for Workbench Dataset if not yet set (Requirement 4)."""
+        current_wb = self.controller.repo.get_workbench_dataset()
+        if not current_wb:
+            default_val = SettingsDialog.DEFAULT_WORKBENCH_DATASET
+            val, ok = QInputDialog.getText(
+                self,
+                "Workbench Dataset",
+                "Please enter your team workbench dataset address:",
+                text=default_val,
+            )
+            if ok and val.strip():
+                self.controller.repo.set_workbench_dataset(val.strip())
+
     def _wire_signals(self) -> None:
         """Connect controller signals to UI slots."""
         self.controller.reports_updated.connect(self._update_reports_dropdown)
@@ -170,44 +224,67 @@ class MainWindow(QMainWindow):
     def _update_sync_button_visibility(self) -> None:
         """Show manual sync button if auto-scan is turned off."""
         auto_scan = self.controller.get_auto_scan()
-        # Per instructions: "If this is off, a manual sync button will be shown on the main interface"
         self.sync_btn.setVisible(not auto_scan)
 
     def _update_reports_dropdown(self, report_names: List[str]) -> None:
         self.reports_combo.blockSignals(True)
         self.reports_combo.clear()
         self.reports_combo.addItems(report_names)
+
+        saved = self.controller.repo.get_selected_report()
+        if saved and saved in report_names:
+            self.reports_combo.setCurrentText(saved)
+        elif report_names:
+            self.reports_combo.setCurrentIndex(0)
         self.reports_combo.blockSignals(False)
 
         has_reports = len(report_names) > 0
         self.flows_group.setEnabled(has_reports)
         self.queries_group.setEnabled(has_reports)
+        self.remove_report_btn.setEnabled(has_reports)
 
     def _on_report_model_changed(self, report: Optional[Report]) -> None:
         has_report = report is not None
         self.flows_group.setEnabled(has_report)
         self.queries_group.setEnabled(has_report)
+        self.remove_report_btn.setEnabled(has_report)
 
     def _update_flows_dropdown(self, flow_names: List[str]) -> None:
-        current = self.controller.active_flow_name or self.flows_combo.currentText()
+        report_name = self.reports_combo.currentText()
+        saved = self.controller.repo.get_selected_flow(report_name)
+        current = self.controller.active_flow_name or saved or self.flows_combo.currentText()
+
         self.flows_combo.blockSignals(True)
         self.flows_combo.clear()
         self.flows_combo.addItems(flow_names)
         if current in flow_names:
             self.flows_combo.setCurrentText(current)
+        elif flow_names:
+            self.flows_combo.setCurrentIndex(0)
         self.flows_combo.blockSignals(False)
 
-        selected = self.flows_combo.currentText()
-        self.run_flow_btn.setEnabled(bool(selected and selected != AppController.ALL_QUERIES_OPTION))
+        has_flows = len(flow_names) > 0
+        self.edit_flow_btn.setEnabled(has_flows)
+        self.remove_flow_btn.setEnabled(has_flows)
+        self.run_flow_btn.setEnabled(has_flows)
 
     def _update_queries_dropdown(self, query_names: List[str]) -> None:
+        report_name = self.reports_combo.currentText()
+        saved = self.controller.repo.get_selected_query(report_name)
+        current = self.controller.active_query_name or saved or self.queries_combo.currentText()
+
         self.queries_combo.blockSignals(True)
         self.queries_combo.clear()
         self.queries_combo.addItems(query_names)
+        if current in query_names:
+            self.queries_combo.setCurrentText(current)
+        elif query_names:
+            self.queries_combo.setCurrentIndex(0)
         self.queries_combo.blockSignals(False)
 
         has_queries = len(query_names) > 0
         self.edit_query_btn.setEnabled(has_queries)
+        self.remove_query_btn.setEnabled(has_queries)
         self.run_query_btn.setEnabled(has_queries)
 
     def _on_report_selected(self, report_name: str) -> None:
@@ -217,22 +294,90 @@ class MainWindow(QMainWindow):
     def _on_flow_selected(self, flow_name: str) -> None:
         if flow_name:
             self.controller.select_process_flow(flow_name)
-            self.run_flow_btn.setEnabled(flow_name != AppController.ALL_QUERIES_OPTION)
+            self.run_flow_btn.setEnabled(True)
 
     def _on_query_selected(self, query_name: str) -> None:
-        self.controller.select_query(query_name)
+        if query_name:
+            self.controller.select_query(query_name)
+
+    # --- Actions for Adding and Removing Entities (Requirement 3) ---
+
+    def _on_add_report(self) -> None:
+        name, ok = QInputDialog.getText(self, "Add Report", "Enter new report name:")
+        if ok and name.strip():
+            rep = self.controller.add_report(name.strip())
+            if rep:
+                self.status_bar.showMessage(f"Report '{rep.name}' created.", 3000)
+
+    def _on_remove_report(self) -> None:
+        current = self.reports_combo.currentText()
+        if not current:
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Confirm Remove Report",
+            f"Are you sure you want to remove report '{current}' and all its files?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm == QMessageBox.Yes:
+            self.controller.remove_report(current)
+            self.status_bar.showMessage(f"Report '{current}' removed.", 3000)
+
+    def _on_remove_process_flow(self) -> None:
+        current = self.flows_combo.currentText()
+        if not current:
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Confirm Remove Process Flow",
+            f"Are you sure you want to remove process flow '{current}'?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm == QMessageBox.Yes:
+            self.controller.remove_process_flow(current)
+            self.status_bar.showMessage(f"Process flow '{current}' removed.", 3000)
+
+    def _on_add_query(self) -> None:
+        if not self.controller.active_report:
+            QMessageBox.information(self, "No Report", "Please select a report first.")
+            return
+        name, ok = QInputDialog.getText(self, "Add Query", "Enter query name (without .sql):")
+        if ok and name.strip():
+            qinfo = self.controller.add_query(name.strip())
+            if qinfo:
+                self.status_bar.showMessage(f"Query '{qinfo.name}' created.", 3000)
+
+    def _on_remove_query(self) -> None:
+        current = self.queries_combo.currentText()
+        if not current:
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Confirm Remove Query",
+            f"Are you sure you want to remove query '{current}'?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm == QMessageBox.Yes:
+            self.controller.remove_query(current)
+            self.status_bar.showMessage(f"Query '{current}' removed.", 3000)
 
     def _on_open_settings(self) -> None:
         dialog = SettingsDialog(
             current_dir=self.controller.get_working_directory(),
             auto_scan=self.controller.get_auto_scan(),
+            workbench_dataset=self.controller.repo.get_workbench_dataset(),
             parent=self,
         )
         if dialog.exec() == SettingsDialog.Accepted:
             new_dir = dialog.get_working_directory()
             new_auto_scan = dialog.get_auto_scan()
+            new_wb = dialog.get_workbench_dataset()
 
             self.controller.set_auto_scan(new_auto_scan)
+            self.controller.repo.set_workbench_dataset(new_wb)
             self._update_sync_button_visibility()
 
             if new_dir != self.controller.get_working_directory():
@@ -244,19 +389,10 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "No Report Selected", "Please select a report first.")
             return
 
-        flow_name = self.flows_combo.currentText()
-
-        # If 'All Queries' is selected, prompt user for a process flow name to create or edit
-        if flow_name == AppController.ALL_QUERIES_OPTION:
-            flow_name, ok = QInputDialog.getText(
-                self,
-                "Process Flow Name",
-                "Enter process flow name to create / edit:",
-                text="Process-01",
-            )
-            if not ok or not flow_name.strip():
-                return
-            flow_name = flow_name.strip()
+        flow_name = self.flows_combo.currentText().strip()
+        if not flow_name:
+            QMessageBox.information(self, "No Flow Selected", "Please select a process flow to edit.")
+            return
 
         flow_info = report.get_process_flow(flow_name)
         editor = ProcessFlowEditorWindow(
@@ -345,15 +481,18 @@ class MainWindow(QMainWindow):
                     outputs_dir=outputs_dir,
                     parameters=values,
                 )
+                msgs = []
+                if res.get("has_output_tables"):
+                    tbls = ", ".join(res.get("output_tables", []))
+                    msgs.append(f"Created/updated table(s):\n{tbls}")
                 if res.get("is_export"):
-                    msg = (
-                        f"Query '{query_name}' completed successfully!\n\n"
-                        f"Exported {res.get('row_count', 0):,} rows to:\n"
-                        f"{res.get('output_file')}"
+                    msgs.append(
+                        f"Exported {res.get('row_count', 0):,} rows to:\n{res.get('output_file')}"
                     )
-                else:
-                    msg = f"Query '{query_name}' executed table creation/update in BigQuery successfully."
+                if not msgs:
+                    msgs.append("Query executed in BigQuery successfully.")
 
+                msg = f"Query '{query_name}' completed successfully!\n\n" + "\n\n".join(msgs)
                 self.status_bar.showMessage(f"Query '{query_name}' completed.", 5000)
                 QMessageBox.information(self, "Query Completed", msg)
             except Exception as e:
@@ -368,7 +507,7 @@ class MainWindow(QMainWindow):
         """Execute the currently selected process flow."""
         active_report = self.controller.active_report
         flow_name = self.flows_combo.currentText()
-        if not active_report or not flow_name or flow_name == AppController.ALL_QUERIES_OPTION:
+        if not active_report or not flow_name:
             QMessageBox.information(self, "Select Flow", "Please select a valid process flow to run.")
             return
 
@@ -441,12 +580,15 @@ class MainWindow(QMainWindow):
                     parameters=param_values,
                     output_filename=custom_csv,
                 )
+                log_parts = []
+                if res.get("has_output_tables"):
+                    log_parts.append(f"Table(s): {', '.join(res.get('output_tables', []))}")
                 if res.get("is_export"):
-                    results_log.append(
-                        f"[{idx}/{len(queries_order)}] 📄 {qname}: Exported {res.get('row_count', 0):,} rows to {res.get('output_file')}"
-                    )
-                else:
-                    results_log.append(f"[{idx}/{len(queries_order)}] 📦 {qname}: Table created/updated successfully.")
+                    log_parts.append(f"Exported {res.get('row_count', 0):,} rows to {res.get('output_file')}")
+                if not log_parts:
+                    log_parts.append("Executed successfully.")
+
+                results_log.append(f"[{idx}/{len(queries_order)}] 📦 {qname}: {' | '.join(log_parts)}")
             except Exception as e:
                 err = f"Execution failed: {e}"
                 errors.append(f"{qname}: {e}")

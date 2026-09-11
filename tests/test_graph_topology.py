@@ -366,6 +366,93 @@ class TestGraphTopology(unittest.TestCase):
 
         editor.close()
 
+    def test_import_csv_node_and_dialog(self):
+        """Verify ImportCsvNode and ImportCsvDialog creation, row addition/deletion, and graph reconstruction."""
+        from reporting_app.presentation.flow_editor.editor_window import ImportCsvDialog
+        from reporting_app.presentation.flow_editor.nodes import ImportCsvNode
+
+        # 1. Test ImportCsvDialog
+        dlg = ImportCsvDialog(initial_imports=[
+            {"csv_path": "/path/to/users.csv", "has_headers": True, "output_table": "myproj.raw.users"}
+        ])
+        self.assertEqual(len(dlg.rows), 1)
+        self.assertEqual(dlg.rows[0]["path_edit"].text(), "/path/to/users.csv")
+        self.assertTrue(dlg.rows[0]["headers_cb"].isChecked())
+        self.assertEqual(dlg.rows[0]["table_edit"].text(), "myproj.raw.users")
+
+        # Add second row
+        dlg._add_row(csv_path="/path/to/orders.csv", has_headers=False, output_table="myproj.raw.orders")
+        self.assertEqual(len(dlg.rows), 2)
+        imports = dlg.get_imports()
+        self.assertEqual(len(imports), 2)
+        self.assertEqual(imports[1]["output_table"], "myproj.raw.orders")
+        self.assertFalse(imports[1]["has_headers"])
+
+        # 2. Test rebuild_graph with import_csv_data
+        editor = ProcessFlowEditorWindow(
+            report=self.controller.active_report,
+            flow_name="ImportFlow",
+            app_controller=self.controller,
+        )
+
+        import_csv_data = [
+            {
+                "node_name": "Import csv",
+                "items": [
+                    {"csv_path": "/path/to/test.csv", "has_headers": True, "output_table": "Table1"}
+                ]
+            }
+        ]
+
+        # query1 consumes Table1, which is produced by "Import csv"!
+        q1 = self.controller.active_report.get_query("query1")
+        ProcessFlowGraphBuilder.rebuild_graph(
+            editor.graph,
+            queries=[q1],
+            existing_positions={},
+            show_full_table_names=True,
+            csv_filenames={},
+            import_csv_data=import_csv_data,
+        )
+
+        all_nodes = {n.name(): n for n in editor.graph.all_nodes()}
+        self.assertIn("Import csv", all_nodes)
+        self.assertIn("Import csv [Out]", all_nodes)
+        self.assertIn("query1", all_nodes)
+
+        imp_node = all_nodes["Import csv"]
+        self.assertIsInstance(imp_node, ImportCsvNode)
+        imp_out_box = all_nodes["Import csv [Out]"]
+        self.assertEqual(imp_out_box.raw_tables, ["Table1"])
+
+        # query1 takes Table1 and Table2; since Table1 is produced by Import csv,
+        # it should connect via linear chaining or convergence to query1!
+        connected_to_q1_in = [p.node().name() for p in all_nodes["query1"].get_input("tables_in").connected_ports()]
+        # Either the convergence box or Import csv [Out] is connected to query1
+        self.assertTrue(any("Convergence" in c or c == "Import csv [Out]" for c in connected_to_q1_in))
+
+        editor.close()
+
+    def test_empty_space_deselection(self):
+        """Verify empty space deselection clears all selected nodes."""
+        editor = ProcessFlowEditorWindow(
+            report=self.controller.active_report,
+            flow_name="SelectFlow",
+            app_controller=self.controller,
+        )
+        editor.add_query_to_canvas("query1")
+        qnode = [n for n in editor.graph.all_nodes() if n.name() == "query1"][0]
+        qnode.set_selected(True)
+        self.assertIn(qnode, editor.graph.selected_nodes())
+
+        # Clear selection (simulating empty space click)
+        editor.graph.clear_selection()
+        if editor.graph.viewer().scene():
+            editor.graph.viewer().scene().clearSelection()
+
+        self.assertEqual(len(editor.graph.selected_nodes()), 0)
+        editor.close()
+
 
 if __name__ == "__main__":
     unittest.main()

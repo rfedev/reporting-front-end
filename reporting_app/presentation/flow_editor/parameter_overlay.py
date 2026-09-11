@@ -149,6 +149,10 @@ class CanvasParameterOverlay(QFrame):
         if date_option_defaults:
             self._last_selected_date_options.update(date_option_defaults)
 
+        # Only rebuild widgets if parameter names on canvas have actually changed
+        if self._param_names == new_names and (self._param_edits or self._date_combos or not new_names):
+            return
+
         self._param_names = new_names
 
         # Completely remove existing widgets from layout immediately

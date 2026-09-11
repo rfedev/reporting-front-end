@@ -155,7 +155,7 @@ class QueryManagementPanel(QWidget):
         name, ok = QInputDialog.getText(
             self,
             "Add Query",
-            "Enter new query name (without .sql extension):",
+            "Enter query name:",
         )
         if ok and name.strip():
             self.query_added.emit(name.strip())

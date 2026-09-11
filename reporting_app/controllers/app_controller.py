@@ -311,8 +311,11 @@ class AppController(QObject):
 
         # Clean name and ensure .sql extension
         base_name = query_name.strip()
-        if base_name.endswith(".sql"):
+        if base_name.lower().endswith(".sql"):
             base_name = base_name[:-4]
+        elif base_name.lower().endswith(".csv"):
+            base_name = base_name[:-4]
+        base_name = base_name.strip()
 
         # Save in ./<report>/queries/
         queries_dir = self.active_report.folder_path / "queries"

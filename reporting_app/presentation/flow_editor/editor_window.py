@@ -652,12 +652,16 @@ class ProcessFlowEditorWindow(QMainWindow):
 
         # Right Panel (Currently unused / placeholder)
         self.right_panel = QWidget(self)
+        self.right_panel.setMinimumWidth(0)
         right_layout = QVBoxLayout(self.right_panel)
         right_label = QLabel("<b>Properties & Inspector</b><br><br><i>(Right panel currently unused)</i>")
         right_label.setAlignment(Qt.AlignCenter)
         right_label.setStyleSheet("color: #888888; font-size: 12px;")
         right_layout.addWidget(right_label)
         self.splitter.addWidget(self.right_panel)
+        self.splitter.setCollapsible(0, False)
+        self.splitter.setCollapsible(1, False)
+        self.splitter.setCollapsible(2, True)
 
         # Set initial splitter sizes (load from flow_controller or repository if present)
         saved_sizes = self.flow_controller.get_splitter_sizes()
@@ -671,7 +675,7 @@ class ProcessFlowEditorWindow(QMainWindow):
         if saved_sizes and len(saved_sizes) == 3:
             self.splitter.setSizes(saved_sizes)
         else:
-            self.splitter.setSizes([240, 800, 160])
+            self.splitter.setSizes([240, 960, 0])
         self.setCentralWidget(self.splitter)
 
         # Status bar
@@ -724,14 +728,12 @@ class ProcessFlowEditorWindow(QMainWindow):
         is_visible = self.left_panel.isVisible()
         self.left_panel.setVisible(not is_visible)
         self.toggle_left_btn.setText("▶" if is_visible else "◀")
-        QtCore.QTimer.singleShot(50, self._fit_graph_to_canvas)
 
     def _toggle_right_panel(self) -> None:
         """Collapse or expand right inspector panel."""
         is_visible = self.right_panel.isVisible()
         self.right_panel.setVisible(not is_visible)
         self.toggle_right_btn.setText("◀" if is_visible else "▶")
-        QtCore.QTimer.singleShot(50, self._fit_graph_to_canvas)
 
     def _toggle_table_names_display(self) -> None:
         """Toggle full table address vs short table name across all TableBoxNodes."""
@@ -869,7 +871,7 @@ class ProcessFlowEditorWindow(QMainWindow):
 
         if has_table_changes:
             self._sync_graph_topology()
-        else:
+        elif has_param_changes:
             self._refresh_parameter_overlay()
 
     def _refresh_parameter_overlay(self) -> None:

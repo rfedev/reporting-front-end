@@ -27,7 +27,7 @@
       "reject_connection_types": "{}"
     },
     "nodes": {
-      "0x7f95bc1f0c30": {
+      "0x7fe85540eb10": {
         "type_": "reporting.nodes.QueryNode",
         "icon": null,
         "name": "new name11",
@@ -55,8 +55,8 @@
         "width": 162.140625,
         "height": 152.3,
         "pos": [
-          405.06329113924045,
-          264.97890295358644
+          536.3751375137514,
+          310.3993399339934
         ],
         "layout_direction": 0,
         "port_deletion_allowed": false,
@@ -68,7 +68,7 @@
           "parameters": "repdate, testParam1"
         }
       },
-      "0x7f95bc1f0d60": {
+      "0x7fe85540ec40": {
         "type_": "reporting.nodes.TableBoxNode",
         "icon": null,
         "name": "new name11 [CSV]",
@@ -91,13 +91,13 @@
           180
         ],
         "disabled": false,
-        "selected": true,
+        "selected": false,
         "visible": true,
         "width": 160,
         "height": 114.0,
         "pos": [
-          665.0632911392404,
-          264.97890295358644
+          796.3751375137514,
+          310.3993399339934
         ],
         "layout_direction": 0,
         "port_deletion_allowed": false,
@@ -112,27 +112,27 @@
     "connections": [
       {
         "out": [
-          "0x7f95bc1f0c30",
+          "0x7fe85540eb10",
           "csv_out"
         ],
         "in": [
-          "0x7f95bc1f0d60",
+          "0x7fe85540ec40",
           "in_tables"
         ]
       }
     ]
   },
   "view_state": {
-    "zoom": -0.41,
+    "zoom": 0.02,
     "center": [
-      425.0,
-      400.0
+      815.0852280333762,
+      463.6569583769694
     ]
   },
   "splitter_sizes": [
-    99,
-    915,
-    178
+    117,
+    1079,
+    0
   ],
   "parameter_date_options": {
     "repdate": "pick date"

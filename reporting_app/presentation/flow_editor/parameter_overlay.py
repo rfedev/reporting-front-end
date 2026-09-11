@@ -156,8 +156,8 @@ class CanvasParameterOverlay(QFrame):
             item = self.form_layout.takeAt(0)
             w = item.widget()
             if w:
-                w.setParent(None)
                 w.deleteLater()
+                w.hide()
 
         self._param_edits.clear()
         self._date_combos.clear()
@@ -177,12 +177,12 @@ class CanvasParameterOverlay(QFrame):
             return
 
         for pname in self._param_names:
-            lbl = QLabel(f"{pname}:")
+            lbl = QLabel(f"{pname}:", self.content_widget)
             lbl.setStyleSheet("font-weight: bold; color: #cbd5e0;")
             init_val = self._param_values.get(pname, "")
 
             if is_date_param(pname):
-                row_widget = QWidget()
+                row_widget = QWidget(self.content_widget)
                 row_layout = QHBoxLayout(row_widget)
                 row_layout.setContentsMargins(0, 0, 0, 0)
                 row_layout.setSpacing(4)
@@ -245,7 +245,7 @@ class CanvasParameterOverlay(QFrame):
 
                 self.form_layout.addRow(lbl, row_widget)
             else:
-                edit = QLineEdit(init_val)
+                edit = QLineEdit(init_val, self.content_widget)
                 edit.setMinimumWidth(130)
                 self._param_edits[pname] = edit
 

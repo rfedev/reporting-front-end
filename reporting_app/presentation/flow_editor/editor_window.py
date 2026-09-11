@@ -5,8 +5,8 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from PySide6 import QtCore, QtWidgets
-from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRectF, QUrl, Qt
-from PySide6.QtGui import QCursor, QDesktopServices, QKeySequence, QShortcut
+from PySide6.QtCore import QEvent, QFileSystemWatcher, QObject, QPoint, QPointF, QRectF, QTimer, QUrl, Qt
+from PySide6.QtGui import QCursor, QDesktopServices, QKeySequence, QShortcut, QShowEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -642,8 +642,8 @@ class ProcessFlowEditorWindow(QMainWindow):
         self.graph_widget.installEventFilter(self)
         self.graph.data_dropped.connect(self._on_graph_data_dropped)
 
-        # Top-left expandable parameter overlay on the canvas (parented to viewer so canvas paint events do not occlude it)
-        self.param_overlay = CanvasParameterOverlay(viewer)
+        # Top-left expandable parameter overlay on the canvas (parented to graph_widget so zoom/pan does not move it)
+        self.param_overlay = CanvasParameterOverlay(self.graph_widget)
         self.param_overlay.move(14, 14)
         self.param_overlay.show()
         self.param_overlay.raise_()
@@ -684,6 +684,40 @@ class ProcessFlowEditorWindow(QMainWindow):
         self.save_shortcut.activated.connect(self._on_save)
         self.del_shortcut = QShortcut(QKeySequence.Delete, self)
         self.del_shortcut.activated.connect(self._on_delete_selected)
+
+        # File watcher and polling timer to automatically sync query edits on disk
+        self._query_watcher = QFileSystemWatcher(self)
+        self._query_watcher.fileChanged.connect(self._on_query_file_modified)
+        self._query_watcher.directoryChanged.connect(self._on_query_file_modified)
+        self._setup_query_file_watcher()
+        self._sync_timer = QTimer(self)
+        self._sync_timer.setInterval(1000)
+        self._sync_timer.timeout.connect(self._sync_query_files_and_parameters)
+        self._sync_timer.start()
+
+    def _setup_query_file_watcher(self) -> None:
+        """Watch query files and folder to detect external modifications."""
+        if not hasattr(self, "_query_watcher") or not self.report or not self.report.folder_path:
+            return
+        files_to_watch = []
+        queries_dir = self.report.folder_path / "queries"
+        if queries_dir.exists():
+            files_to_watch.append(str(queries_dir.resolve()))
+        for q in self.report.queries:
+            if q.file_path and q.file_path.exists():
+                files_to_watch.append(str(q.file_path.resolve()))
+        if files_to_watch:
+            existing = self._query_watcher.files() + self._query_watcher.directories()
+            new_paths = [p for p in files_to_watch if p not in existing]
+            if new_paths:
+                self._query_watcher.addPaths(new_paths)
+
+    def _on_query_file_modified(self, path: str) -> None:
+        """Called when a query file or queries directory is modified on disk."""
+        self._sync_query_files_and_parameters()
+        if hasattr(self, "_query_watcher") and Path(path).exists():
+            if path not in self._query_watcher.files() and path not in self._query_watcher.directories():
+                self._query_watcher.addPath(path)
 
     def _toggle_left_panel(self) -> None:
         """Collapse or expand left queries panel."""
@@ -802,6 +836,9 @@ class ProcessFlowEditorWindow(QMainWindow):
 
         # Check for query file modifications and re-parse parameters
         from reporting_app.core.sql_parser import scan_query_parameters, scan_query_tables
+        has_table_changes = False
+        has_param_changes = False
+
         for q in self.report.queries:
             if q.file_path and q.file_path.exists():
                 try:
@@ -810,6 +847,10 @@ class ProcessFlowEditorWindow(QMainWindow):
                         content = q.file_path.read_text(encoding="utf-8", errors="replace")
                         param_names = scan_query_parameters(content)
                         input_tables, output_tables, _ = scan_query_tables(content)
+                        if input_tables != q.input_tables or output_tables != q.output_tables:
+                            has_table_changes = True
+                        if param_names != [p.name for p in q.parameters]:
+                            has_param_changes = True
                         q.parameters = [QueryParameter(name=p) for p in param_names]
                         q.input_tables = input_tables
                         q.output_tables = output_tables
@@ -824,7 +865,12 @@ class ProcessFlowEditorWindow(QMainWindow):
                 except Exception as e:
                     logger.debug(f"Error syncing query file {q.file_path}: {e}")
 
-        self._refresh_parameter_overlay()
+        self._setup_query_file_watcher()
+
+        if has_table_changes:
+            self._sync_graph_topology()
+        else:
+            self._refresh_parameter_overlay()
 
     def _refresh_parameter_overlay(self) -> None:
         """Refresh flow parameter overlay with all unique parameters from active canvas queries."""
@@ -834,14 +880,20 @@ class ProcessFlowEditorWindow(QMainWindow):
                 for n in self.graph.all_nodes()
                 if isinstance(n, QueryNode) or getattr(n, "type_", "") == "reporting.nodes.QueryNode"
             ]
-            if not active_qnames:
-                active_qnames = self.flow_controller.get_query_names()
 
             unique_params: List[str] = []
             seen: set = set()
             for qn in active_qnames:
                 wq = self._get_working_query(qn)
                 if wq:
+                    if not wq.parameters and wq.file_path and wq.file_path.exists():
+                        try:
+                            from reporting_app.core.sql_parser import scan_query_parameters
+                            content = wq.file_path.read_text(encoding="utf-8", errors="replace")
+                            p_names = scan_query_parameters(content)
+                            wq.parameters = [QueryParameter(name=p) for p in p_names]
+                        except Exception:
+                            pass
                     for p in wq.parameters:
                         if p.name not in seen:
                             seen.add(p.name)
@@ -853,7 +905,16 @@ class ProcessFlowEditorWindow(QMainWindow):
                 current_defaults=self.flow_controller.parameter_defaults,
                 date_option_defaults=date_opt_defaults,
             )
+            self.param_overlay.move(14, 14)
             self.param_overlay.raise_()
+
+    def showEvent(self, event: QShowEvent) -> None:
+        """Ensure parameter overlay is refreshed and positioned when editor is shown."""
+        super().showEvent(event)
+        if hasattr(self, "param_overlay"):
+            self.param_overlay.move(14, 14)
+            self.param_overlay.raise_()
+        self._refresh_parameter_overlay()
 
     def changeEvent(self, event: QEvent) -> None:
         """Detect window focus/activation to sync any external query file edits immediately."""
@@ -896,22 +957,7 @@ class ProcessFlowEditorWindow(QMainWindow):
                         item.reset()
 
                 # Refresh parameter overlay for active queries in the flow
-                if hasattr(self, "param_overlay"):
-                    active_qnames = [
-                        n.get_property("query_name") or n.name()
-                        for n in self.graph.all_nodes()
-                        if isinstance(n, QueryNode) or getattr(n, "type_", "") == "reporting.nodes.QueryNode"
-                    ]
-                    if not active_qnames:
-                        active_qnames = self.flow_controller.get_query_names()
-                    unique_params = self.flow_controller.get_unique_parameters(active_qnames)
-                    date_opt_defaults = self.flow_controller.flow_data.get("parameter_date_options", {})
-                    self.param_overlay.set_parameters(
-                        unique_params,
-                        current_defaults=self.flow_controller.parameter_defaults,
-                        date_option_defaults=date_opt_defaults,
-                    )
-                    self.param_overlay.raise_()
+                self._refresh_parameter_overlay()
 
                 QtCore.QTimer.singleShot(100, apply_view_state)
                 return
@@ -933,22 +979,7 @@ class ProcessFlowEditorWindow(QMainWindow):
             )
 
         # Refresh parameter overlay for active queries in the flow
-        if hasattr(self, "param_overlay"):
-            active_qnames = [
-                n.get_property("query_name") or n.name()
-                for n in self.graph.all_nodes()
-                if isinstance(n, QueryNode) or getattr(n, "type_", "") == "reporting.nodes.QueryNode"
-            ]
-            if not active_qnames:
-                active_qnames = self.flow_controller.get_query_names()
-            unique_params = self.flow_controller.get_unique_parameters(active_qnames)
-            date_opt_defaults = self.flow_controller.flow_data.get("parameter_date_options", {})
-            self.param_overlay.set_parameters(
-                unique_params,
-                current_defaults=self.flow_controller.parameter_defaults,
-                date_option_defaults=date_opt_defaults,
-            )
-            self.param_overlay.raise_()
+        self._refresh_parameter_overlay()
 
         QtCore.QTimer.singleShot(100, apply_view_state)
 
@@ -1782,9 +1813,12 @@ class ProcessFlowEditorWindow(QMainWindow):
 
         viewport = viewer.viewport() if hasattr(viewer, "viewport") else None
         target_widgets = {viewer, viewport, getattr(self, "graph_widget", None)} - {None}
-
         if watched in target_widgets:
-            if event.type() == QEvent.KeyPress:
+            if event.type() == QEvent.Resize:
+                if hasattr(self, "param_overlay"):
+                    self.param_overlay.move(14, 14)
+                    self.param_overlay.raise_()
+            elif event.type() == QEvent.KeyPress:
                 if event.key() == Qt.Key_Delete:
                     self._on_delete_selected()
                     return True

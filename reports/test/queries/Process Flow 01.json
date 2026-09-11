@@ -5,7 +5,8 @@
     "new name11"
   ],
   "parameter_defaults": {
-    "repdate": "2026-09-11"
+    "repdate": "2026-09-11",
+    "testParam1": ""
   },
   "show_full_table_names": false,
   "csv_filenames": {
@@ -26,7 +27,7 @@
       "reject_connection_types": "{}"
     },
     "nodes": {
-      "0x7f8de57183e0": {
+      "0x7f95bc1f0c30": {
         "type_": "reporting.nodes.QueryNode",
         "icon": null,
         "name": "new name11",
@@ -52,10 +53,10 @@
         "selected": false,
         "visible": true,
         "width": 162.140625,
-        "height": 99.0,
+        "height": 152.3,
         "pos": [
-          -105.68477880358691,
-          5.98215729076907
+          405.06329113924045,
+          264.97890295358644
         ],
         "layout_direction": 0,
         "port_deletion_allowed": false,
@@ -64,10 +65,10 @@
           "query_name": "new name11",
           "query_path": "/home/ric/git/reporting-front-end/reports/test/queries/new name11.sql",
           "report_name": "test",
-          "parameters": "repdate"
+          "parameters": "repdate, testParam1"
         }
       },
-      "0x7f8de5718510": {
+      "0x7f95bc1f0d60": {
         "type_": "reporting.nodes.TableBoxNode",
         "icon": null,
         "name": "new name11 [CSV]",
@@ -90,13 +91,13 @@
           180
         ],
         "disabled": false,
-        "selected": false,
+        "selected": true,
         "visible": true,
         "width": 160,
         "height": 114.0,
         "pos": [
-          154.3152211964131,
-          5.98215729076907
+          665.0632911392404,
+          264.97890295358644
         ],
         "layout_direction": 0,
         "port_deletion_allowed": false,
@@ -111,21 +112,21 @@
     "connections": [
       {
         "out": [
-          "0x7f8de57183e0",
+          "0x7f95bc1f0c30",
           "csv_out"
         ],
         "in": [
-          "0x7f8de5718510",
+          "0x7f95bc1f0d60",
           "in_tables"
         ]
       }
     ]
   },
   "view_state": {
-    "zoom": 0.58,
+    "zoom": -0.41,
     "center": [
-      105.0606992325888,
-      64.99716227964005
+      425.0,
+      400.0
     ]
   },
   "splitter_sizes": [

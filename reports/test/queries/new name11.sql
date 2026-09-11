@@ -5,5 +5,5 @@ SELECT '{repdate}' as reporting_date, 1;
 
 
 # output: sel3.csv
-SELECT '{testParam2}' as reporting_date, 2;
+SELECT '{testParam1}' as reporting_date, 2;
 

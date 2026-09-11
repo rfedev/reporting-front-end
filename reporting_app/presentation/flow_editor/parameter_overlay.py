@@ -1,3 +1,5 @@
+"""Canvas Parameter Overlay widget for process flow editor."""
+
 from typing import Dict, List, Optional
 from PySide6.QtCore import QDate, QSize, Qt, Signal
 from PySide6.QtWidgets import (
@@ -9,7 +11,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
-    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -17,23 +18,8 @@ from PySide6.QtWidgets import (
 from reporting_app.utils.date_calc import DATE_OPTIONS, calculate_date_for_option, is_date_param
 
 
-class FitScrollArea(QScrollArea):
-    """Scroll area that adapts its size hint to its contents up to a maximum height."""
-
-    def sizeHint(self) -> QSize:
-        if not self.widget():
-            return super().sizeHint()
-        whint = self.widget().sizeHint()
-        w = max(whint.width() + 16, 260)
-        h = min(whint.height() + 8, 400)
-        return QSize(w, h)
-
-    def minimumSizeHint(self) -> QSize:
-        return self.sizeHint()
-
-
 class CanvasParameterOverlay(QFrame):
-    """Expandable/collapsible overlay displaying Flow Parameters on the flow canvas."""
+    """Expandable/collapsible overlay displaying Flow Parameters cleanly over the flow canvas."""
 
     parameter_changed = Signal(str, str)
 
@@ -41,10 +27,9 @@ class CanvasParameterOverlay(QFrame):
         super().__init__(parent)
         self.setObjectName("canvas_parameter_overlay")
         self.setFrameShape(QFrame.StyledPanel)
-        self.setFrameShadow(QFrame.Raised)
         self.setStyleSheet("""
             QFrame#canvas_parameter_overlay {
-                background-color: rgba(36, 40, 48, 220);
+                background-color: rgba(30, 34, 42, 235);
                 border: 1px solid #4a5568;
                 border-radius: 6px;
             }
@@ -86,7 +71,7 @@ class CanvasParameterOverlay(QFrame):
 
     def _build_ui(self) -> None:
         self.main_layout = QVBoxLayout(self)
-        self.main_layout.setContentsMargins(6, 4, 6, 6)
+        self.main_layout.setContentsMargins(8, 6, 8, 8)
         self.main_layout.setSpacing(4)
 
         # Header bar with toggle arrow and title
@@ -102,42 +87,43 @@ class CanvasParameterOverlay(QFrame):
         header_layout.addStretch()
         self.main_layout.addLayout(header_layout)
 
-        # Container for the parameter form
+        # Content container
         self.content_widget = QWidget(self)
         self.form_layout = QFormLayout(self.content_widget)
-        self.form_layout.setContentsMargins(2, 2, 2, 2)
-        self.form_layout.setSpacing(4)
+        self.form_layout.setContentsMargins(0, 4, 0, 4)
+        self.form_layout.setSpacing(6)
         self.form_layout.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.form_layout.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
 
-        self.scroll_area = FitScrollArea(self)
-        self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setFrameShape(QFrame.NoFrame)
-        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.scroll_area.setStyleSheet("background: transparent;")
-        self.scroll_area.setWidget(self.content_widget)
+        self.main_layout.addWidget(self.content_widget)
 
-        self.main_layout.addWidget(self.scroll_area)
-
-    def _update_geometry(self) -> None:
-        """Inform the scroll area and overlay layout to update geometry and repaint."""
-        if hasattr(self, "content_widget"):
-            self.content_widget.adjustSize()
-        if hasattr(self, "scroll_area"):
-            self.scroll_area.updateGeometry()
-        self.main_layout.invalidate()
-        self.adjustSize()
+    def _update_overlay_size(self) -> None:
+        """Resize the overlay to fit content cleanly without empty space or clipping."""
+        self.content_widget.setVisible(not self._is_collapsed)
+        if not self._is_collapsed:
+            for i in range(self.form_layout.count()):
+                item = self.form_layout.itemAt(i)
+                if item and item.widget():
+                    item.widget().show()
+        self.content_widget.adjustSize()
+        hint = self.layout().sizeHint()
+        self.resize(hint)
         self.raise_()
-        self.update()
-        self.repaint()
+
+    def showEvent(self, event) -> None:
+        """Ensure overlay recalculates its snug size when parent or window is displayed."""
+        super().showEvent(event)
+        self._update_overlay_size()
 
     def toggle_collapsed(self) -> None:
         """Expand or collapse the parameter list."""
         self._is_collapsed = not self._is_collapsed
-        self.scroll_area.setVisible(not self._is_collapsed)
         arrow = "▶" if self._is_collapsed else "▼"
-        self.toggle_btn.setText(f"{arrow} Flow Parameters ({len(self._param_names)})" if self._is_collapsed else f"{arrow} Flow Parameters")
-        self._update_geometry()
+        count = len(self._param_names)
+        self.toggle_btn.setText(
+            f"{arrow} Flow Parameters ({count})" if self._is_collapsed else f"{arrow} Flow Parameters"
+        )
+        self._update_overlay_size()
 
     def set_parameters(
         self,
@@ -145,149 +131,134 @@ class CanvasParameterOverlay(QFrame):
         current_defaults: Optional[Dict[str, str]] = None,
         date_option_defaults: Optional[Dict[str, str]] = None,
     ) -> None:
-        """Populate the parameters in the list without intermediate flicker or collapse."""
+        """Populate the parameters in the list cleanly with exact sizing and state preservation."""
         new_names = list(param_names)
-        # If parameters haven't changed and no new defaults provided, skip rebuilding
-        if new_names == self._param_names and not current_defaults and not date_option_defaults:
-            return
 
-        self._param_names = new_names
+        # Preserve current values from UI
+        for pname, edit in self._param_edits.items():
+            txt = edit.text().strip()
+            if txt:
+                self._param_values[pname] = txt
+        for pname, combo in self._date_combos.items():
+            self._last_selected_date_options[pname] = combo.currentText()
+            if combo.currentText() == "pick date" and pname in self._date_pickers:
+                self._param_values[pname] = self._date_pickers[pname].date().toString("yyyy-MM-dd")
+
         if current_defaults:
             self._param_values.update(current_defaults)
         if date_option_defaults:
             self._last_selected_date_options.update(date_option_defaults)
 
-        # Freeze updates while modifying widgets
-        self.setUpdatesEnabled(False)
-        try:
-            # Clear existing rows
-            while self.form_layout.count() > 0:
-                child = self.form_layout.takeAt(0)
-                if child.widget():
-                    child.widget().deleteLater()
-                elif child.layout():
-                    while child.layout().count() > 0:
-                        subchild = child.layout().takeAt(0)
-                        if subchild.widget():
-                            subchild.widget().deleteLater()
+        self._param_names = new_names
 
-            self._param_edits.clear()
-            self._date_combos.clear()
-            self._date_pickers.clear()
+        # Completely remove existing widgets from layout immediately
+        while self.form_layout.count():
+            item = self.form_layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.setParent(None)
+                w.deleteLater()
 
-            if not self._param_names:
-                empty_lbl = QLabel("<i>No parameters used in flow</i>")
-                empty_lbl.setStyleSheet("color: #a0aec0;")
-                self.form_layout.addRow(empty_lbl)
-                self.toggle_btn.setText("▼ Flow Parameters (0)")
-                return
+        self._param_edits.clear()
+        self._date_combos.clear()
+        self._date_pickers.clear()
 
-            arrow = "▶" if self._is_collapsed else "▼"
-            self.toggle_btn.setText(f"{arrow} Flow Parameters ({len(self._param_names)})" if self._is_collapsed else f"{arrow} Flow Parameters")
+        arrow = "▶" if self._is_collapsed else "▼"
+        count = len(self._param_names)
+        self.toggle_btn.setText(
+            f"{arrow} Flow Parameters ({count})" if self._is_collapsed else f"{arrow} Flow Parameters"
+        )
 
-            for pname in self._param_names:
-                lbl = QLabel(f"{pname}:")
-                lbl.setStyleSheet("font-weight: bold; color: #cbd5e0;")
+        if not self._param_names:
+            empty_lbl = QLabel("<i>No parameters used in flow</i>")
+            empty_lbl.setStyleSheet("color: #a0aec0; padding: 4px;")
+            self.form_layout.addRow(empty_lbl)
+            self._update_overlay_size()
+            return
 
-                init_val = self._param_values.get(pname, "")
+        for pname in self._param_names:
+            lbl = QLabel(f"{pname}:")
+            lbl.setStyleSheet("font-weight: bold; color: #cbd5e0;")
+            init_val = self._param_values.get(pname, "")
 
-                if is_date_param(pname):
-                    row_widget = QWidget()
-                    row_layout = QHBoxLayout(row_widget)
-                    row_layout.setContentsMargins(0, 0, 0, 0)
-                    row_layout.setSpacing(3)
+            if is_date_param(pname):
+                row_widget = QWidget()
+                row_layout = QHBoxLayout(row_widget)
+                row_layout.setContentsMargins(0, 0, 0, 0)
+                row_layout.setSpacing(4)
 
-                    combo = QComboBox(row_widget)
-                    for opt in DATE_OPTIONS:
-                        combo.addItem(opt)
+                combo = QComboBox(row_widget)
+                combo.setMinimumWidth(105)
+                for opt in DATE_OPTIONS:
+                    combo.addItem(opt)
 
-                    saved_opt = self._last_selected_date_options.get(pname, "pick date")
-                    idx = combo.findText(saved_opt)
-                    if idx >= 0:
-                        combo.setCurrentIndex(idx)
-                    else:
-                        combo.setCurrentIndex(0)
+                saved_opt = self._last_selected_date_options.get(pname, "pick date")
+                idx = combo.findText(saved_opt)
+                combo.setCurrentIndex(idx if idx >= 0 else 0)
 
-                    date_picker = QDateEdit(row_widget)
-                    date_picker.setCalendarPopup(True)
-                    date_picker.setDisplayFormat("yyyy-MM-dd")
+                date_picker = QDateEdit(row_widget)
+                date_picker.setMinimumWidth(105)
+                date_picker.setCalendarPopup(True)
+                date_picker.setDisplayFormat("yyyy-MM-dd")
 
-                    parsed_date = QDate.fromString(init_val, "yyyy-MM-dd")
-                    if parsed_date.isValid():
-                        date_picker.setDate(parsed_date)
-                    else:
-                        date_picker.setDate(QDate.currentDate())
+                parsed_date = QDate.fromString(init_val, "yyyy-MM-dd")
+                date_picker.setDate(parsed_date if parsed_date.isValid() else QDate.currentDate())
 
-                    self._date_combos[pname] = combo
-                    self._date_pickers[pname] = date_picker
+                self._date_combos[pname] = combo
+                self._date_pickers[pname] = date_picker
 
-                    # Value holder
-                    edit = QLineEdit(init_val, row_widget)
-                    edit.setVisible(False)
-                    self._param_edits[pname] = edit
+                def make_combo_handler(p=pname, c=combo, dp=date_picker):
+                    def on_opt_changed(text):
+                        self._last_selected_date_options[p] = text
+                        if text == "pick date":
+                            dp.setVisible(True)
+                            val = dp.date().toString("yyyy-MM-dd")
+                        else:
+                            dp.setVisible(False)
+                            val = calculate_date_for_option(text)
+                        self._param_values[p] = val
+                        self._update_overlay_size()
+                        self.parameter_changed.emit(p, val)
+                    return on_opt_changed
 
-                    def make_combo_handler(p=pname, c=combo, dp=date_picker, ed=edit):
-                        def on_opt_changed(text):
-                            self._last_selected_date_options[p] = text
-                            if text == "pick date":
-                                dp.setVisible(True)
-                                val = dp.date().toString("yyyy-MM-dd")
-                                ed.setText(val)
-                                self._param_values[p] = val
-                                self._update_geometry()
-                                self.parameter_changed.emit(p, val)
-                            else:
-                                dp.setVisible(False)
-                                val = calculate_date_for_option(text)
-                                ed.setText(val)
-                                self._param_values[p] = val
-                                self._update_geometry()
-                                self.parameter_changed.emit(p, val)
-                        return on_opt_changed
+                def make_dp_handler(p=pname):
+                    def on_date_changed(new_date):
+                        val = new_date.toString("yyyy-MM-dd")
+                        self._param_values[p] = val
+                        self.parameter_changed.emit(p, val)
+                    return on_date_changed
 
-                    def make_dp_handler(p=pname, ed=edit):
-                        def on_date_changed(new_date):
-                            val = new_date.toString("yyyy-MM-dd")
-                            ed.setText(val)
-                            self._param_values[p] = val
-                            self.parameter_changed.emit(p, val)
-                        return on_date_changed
+                combo.currentTextChanged.connect(make_combo_handler())
+                date_picker.dateChanged.connect(make_dp_handler())
 
-                    combo.currentTextChanged.connect(make_combo_handler())
-                    date_picker.dateChanged.connect(make_dp_handler())
+                row_layout.addWidget(combo)
+                row_layout.addWidget(date_picker)
 
-                    row_layout.addWidget(combo)
-                    row_layout.addWidget(date_picker)
-
-                    # Initialize state
-                    cur_opt = combo.currentText()
-                    if cur_opt == "pick date":
-                        date_picker.setVisible(True)
-                        val = date_picker.date().toString("yyyy-MM-dd")
-                        edit.setText(val)
-                        self._param_values[pname] = val
-                    else:
-                        date_picker.setVisible(False)
-                        val = calculate_date_for_option(cur_opt)
-                        edit.setText(val)
-                        self._param_values[pname] = val
-
-                    self.form_layout.addRow(lbl, row_widget)
+                cur_opt = combo.currentText()
+                if cur_opt == "pick date":
+                    date_picker.setVisible(True)
+                    val = date_picker.date().toString("yyyy-MM-dd")
                 else:
-                    edit = QLineEdit(init_val)
-                    self._param_edits[pname] = edit
+                    date_picker.setVisible(False)
+                    val = calculate_date_for_option(cur_opt)
+                self._param_values[pname] = val
 
-                    def make_edit_handler(p=pname, ed=edit):
-                        def on_text_changed(val):
-                            self._param_values[p] = val
-                            self.parameter_changed.emit(p, val)
-                        return on_text_changed
+                self.form_layout.addRow(lbl, row_widget)
+            else:
+                edit = QLineEdit(init_val)
+                edit.setMinimumWidth(130)
+                self._param_edits[pname] = edit
 
-                    edit.textChanged.connect(make_edit_handler())
-                    self.form_layout.addRow(lbl, edit)
-        finally:
-            self._update_geometry()
-            self.setUpdatesEnabled(True)
+                def make_edit_handler(p=pname):
+                    def on_text_changed(val):
+                        self._param_values[p] = val
+                        self.parameter_changed.emit(p, val)
+                    return on_text_changed
+
+                edit.textChanged.connect(make_edit_handler())
+                self.form_layout.addRow(lbl, edit)
+
+        self._update_overlay_size()
 
     def get_parameter_values(self) -> Dict[str, str]:
         """Return currently entered values for all parameters."""
@@ -302,3 +273,4 @@ class CanvasParameterOverlay(QFrame):
     def get_date_option_selections(self) -> Dict[str, str]:
         """Return selected option names for date parameters."""
         return dict(self._last_selected_date_options)
+

@@ -28,7 +28,7 @@ class ProcessFlowGraphBuilder:
         graph: NodeGraph,
         queries: List[QueryInfo],
         existing_positions: Optional[Dict[str, Tuple[float, float]]] = None,
-        show_full_table_names: bool = True,
+        show_full_table_names: bool = False,
         csv_filenames: Optional[Dict[str, str]] = None,
         import_csv_data: Optional[List[dict]] = None,
     ) -> Dict[str, Tuple[float, float]]:
@@ -141,8 +141,22 @@ class ProcessFlowGraphBuilder:
                     name=csv_key,
                     pos=[csv_pos[0], csv_pos[1]],
                 )
-                csv_file_name = csv_filenames.get(q.name, f"{q.name}.csv") if csv_filenames else f"{q.name}.csv"
-                csv_box.setup_as_csv_output(csv_file_name)
+                files_to_show = []
+                if q.output_csv_tables:
+                    files_to_show = [f for f in q.output_csv_tables if f]
+                elif csv_filenames and q.name in csv_filenames:
+                    val = csv_filenames[q.name]
+                    if isinstance(val, (list, tuple)):
+                        files_to_show = list(val)
+                    elif "," in str(val):
+                        files_to_show = [s.strip() for s in str(val).split(",") if s.strip()]
+                    elif val:
+                        files_to_show = [str(val).strip()]
+
+                if not files_to_show:
+                    files_to_show = [f"{q.name}.csv"]
+
+                csv_box.setup_as_csv_output(files_to_show)
                 csv_box.set_property("query_owner", q.name)
                 csv_box.set_display_mode(show_full_table_names)
                 try:

@@ -113,7 +113,7 @@ class TestUISmoke(unittest.TestCase):
         # Header title rendered has no numeric suffix
         self.assertEqual(csv_node.view.custom_title, "Output CSV")
         # Displays CSV filename
-        self.assertIn("• csv_query.csv", csv_node.view.table_lines)
+        self.assertIn("• table_01.csv", csv_node.view.table_lines)
         # Dark purple color
         self.assertEqual(csv_node.color(), (110, 45, 130))
 

@@ -57,15 +57,23 @@ class ProcessFlowController(QObject):
                 "report_name": self.report.name,
                 "query_names": [],
                 "parameter_defaults": {},
-                "show_full_table_names": True,
+                "show_full_table_names": False,
                 "csv_filenames": {},
                 "graph_session": {},
             }
             self.parameter_defaults = {}
 
+    def get_parameter_defaults(self) -> Dict[str, str]:
+        """Return parameter defaults for this flow."""
+        return dict(self.parameter_defaults)
+
+    def get_parameter_date_options(self) -> Dict[str, str]:
+        """Return selected date options for date parameters in this flow."""
+        return self.flow_data.get("parameter_date_options", {})
+
     def get_show_full_table_names(self) -> bool:
         """Return persisted toggle state for full vs short table names."""
-        return self.flow_data.get("show_full_table_names", True)
+        return self.flow_data.get("show_full_table_names", False)
 
     def get_csv_filenames(self) -> Dict[str, str]:
         """Return dictionary mapping query_name to custom CSV filename."""
@@ -92,6 +100,19 @@ class ProcessFlowController(QObject):
     def get_view_state(self) -> Dict[str, Any]:
         """Return persisted canvas view state (zoom, scene_center)."""
         return self.flow_data.get("view_state", {})
+
+    def get_splitter_sizes(self) -> Optional[List[int]]:
+        """Return persisted splitter sizes for panels."""
+        return self.flow_data.get("splitter_sizes")
+
+    def rename_query(self, old_name: str, new_name: str) -> None:
+        """Update query references in this flow when a query is renamed."""
+        if "query_names" in self.flow_data:
+            self.flow_data["query_names"] = [
+                new_name if q == old_name else q for q in self.flow_data["query_names"]
+            ]
+        if "csv_filenames" in self.flow_data and old_name in self.flow_data["csv_filenames"]:
+            self.flow_data["csv_filenames"][new_name] = self.flow_data["csv_filenames"].pop(old_name)
 
     def get_query_names(self) -> List[str]:
         """Return list of query names used in this flow."""
@@ -167,10 +188,12 @@ class ProcessFlowController(QObject):
         active_query_names: List[str],
         parameter_defaults: Dict[str, str],
         graph_session: Dict[str, Any],
-        show_full_table_names: bool = True,
+        show_full_table_names: bool = False,
         csv_filenames: Optional[Dict[str, str]] = None,
         csv_imports: Optional[List[dict]] = None,
         view_state: Optional[Dict[str, Any]] = None,
+        splitter_sizes: Optional[List[int]] = None,
+        parameter_date_options: Optional[Dict[str, str]] = None,
     ) -> None:
         """Save process flow to JSON and update database parameter defaults."""
         self.parameter_defaults.update(parameter_defaults)
@@ -184,6 +207,10 @@ class ProcessFlowController(QObject):
         self.flow_data["graph_session"] = graph_session
         if view_state is not None:
             self.flow_data["view_state"] = view_state
+        if splitter_sizes is not None:
+            self.flow_data["splitter_sizes"] = splitter_sizes
+        if parameter_date_options is not None:
+            self.flow_data["parameter_date_options"] = parameter_date_options
 
         FlowStorage.save(
             file_path=self.file_path,
@@ -196,6 +223,8 @@ class ProcessFlowController(QObject):
             csv_filenames=self.flow_data.get("csv_filenames", {}),
             csv_imports=self.flow_data.get("csv_imports", []),
             view_state=self.flow_data.get("view_state", {}),
+            splitter_sizes=self.flow_data.get("splitter_sizes"),
+            parameter_date_options=self.flow_data.get("parameter_date_options", {}),
         )
 
         # Update persistence layer defaults if repository is provided

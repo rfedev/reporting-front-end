@@ -83,7 +83,7 @@ class AppController(QObject):
                 "report_name": report.name,
                 "query_names": [],
                 "parameter_defaults": {},
-                "show_full_table_names": True,
+                "show_full_table_names": False,
                 "csv_filenames": {},
                 "graph_session": {},
             }
@@ -209,13 +209,22 @@ class AppController(QObject):
         if not clean_name:
             return None
 
-        # Determine target directory
+        # Determine target directory: reports folder inside working directory
         working_dir = self.get_working_directory()
         reports_sub = working_dir / "reports"
-        target_dir = reports_sub if (reports_sub.exists() and reports_sub.is_dir()) else working_dir
+        if reports_sub.exists() and reports_sub.is_dir():
+            target_dir = reports_sub
+        elif working_dir.name == "reports":
+            target_dir = working_dir
+        else:
+            reports_sub.mkdir(parents=True, exist_ok=True)
+            target_dir = reports_sub
+
         rep_folder = target_dir / clean_name
         rep_folder.mkdir(parents=True, exist_ok=True)
         (rep_folder / "queries").mkdir(parents=True, exist_ok=True)
+        (rep_folder / "outputs").mkdir(parents=True, exist_ok=True)
+        (rep_folder / "inputs").mkdir(parents=True, exist_ok=True)
 
         self.scan()
         self.select_report(clean_name)
@@ -258,7 +267,7 @@ class AppController(QObject):
                 "report_name": self.active_report.name,
                 "query_names": [],
                 "parameter_defaults": {},
-                "show_full_table_names": True,
+                "show_full_table_names": False,
                 "csv_filenames": {},
                 "graph_session": {},
             }

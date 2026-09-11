@@ -2,12 +2,13 @@
 
 from typing import List, Optional
 from PySide6.QtCore import QMimeData, QPoint, Qt, Signal
-from PySide6.QtGui import QDrag, QKeySequence, QShortcut
+from PySide6.QtGui import QDrag
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QInputDialog,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QMessageBox,
     QPushButton,
     QVBoxLayout,
@@ -24,16 +25,9 @@ class DraggableQueryList(QListWidget):
         self.setSelectionMode(QListWidget.SingleSelection)
         self._drag_start_pos: Optional[QPoint] = None
 
-    def keyPressEvent(self, event):
-        if event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
-            parent_panel = self.parent()
-            while parent_panel and not hasattr(parent_panel, "_on_remove"):
-                parent_panel = parent_panel.parent()
-            if parent_panel and hasattr(parent_panel, "_on_remove"):
-                parent_panel._on_remove()
-                event.accept()
-                return
-        super().keyPressEvent(event)
+    def minimumSizeHint(self):
+        from PySide6.QtCore import QSize
+        return QSize(0, 0)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -79,14 +73,23 @@ class QueryManagementPanel(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setMinimumWidth(0)
         self._build_ui()
 
+    def minimumSizeHint(self):
+        from PySide6.QtCore import QSize
+        return QSize(0, 0)
+
     def _build_ui(self) -> None:
+        self.setMinimumWidth(0)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
 
         # Query list
         self.list_widget = DraggableQueryList(self)
+        self.list_widget.setMinimumWidth(0)
+        self.list_widget.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.list_widget.customContextMenuRequested.connect(self._show_context_menu)
         self.list_widget.itemDoubleClicked.connect(
             lambda item: self.query_double_clicked.emit(item.text())
         )
@@ -94,28 +97,48 @@ class QueryManagementPanel(QWidget):
 
         # Action Buttons
         btn_layout = QHBoxLayout()
-        self.add_btn = QPushButton("+ Add")
-        self.add_btn.setToolTip("Create a new query for this report")
+        self.add_btn = QPushButton("➕")
+        self.add_btn.setToolTip("Add Query")
+        self.add_btn.setMinimumWidth(0)
         self.add_btn.clicked.connect(self._on_add)
 
-        self.rename_btn = QPushButton("Rename")
-        self.rename_btn.setToolTip("Rename the selected query")
+        self.rename_btn = QPushButton("✏️")
+        self.rename_btn.setToolTip("Rename Query")
+        self.rename_btn.setMinimumWidth(0)
         self.rename_btn.clicked.connect(self._on_rename)
 
-        self.remove_btn = QPushButton("Delete")
-        self.remove_btn.setToolTip("Delete the selected query")
+        self.remove_btn = QPushButton("🗑️")
+        self.remove_btn.setToolTip("Delete Query")
+        self.remove_btn.setMinimumWidth(0)
         self.remove_btn.clicked.connect(self._on_remove)
-
-        # Shortcuts on query list
-        self.del_shortcut = QShortcut(QKeySequence.Delete, self.list_widget)
-        self.del_shortcut.activated.connect(self._on_remove)
-        self.backspace_shortcut = QShortcut(QKeySequence(Qt.Key_Backspace), self.list_widget)
-        self.backspace_shortcut.activated.connect(self._on_remove)
 
         btn_layout.addWidget(self.add_btn)
         btn_layout.addWidget(self.rename_btn)
         btn_layout.addWidget(self.remove_btn)
         layout.addLayout(btn_layout)
+
+    def _show_context_menu(self, pos: QPoint) -> None:
+        """Show context menu on right-click with Add, Rename, Delete options."""
+        item = self.list_widget.itemAt(pos)
+        if item:
+            self.list_widget.setCurrentItem(item)
+
+        menu = QMenu(self)
+        add_action = menu.addAction("Add")
+        add_action.triggered.connect(self._on_add)
+
+        if item:
+            rename_action = menu.addAction("Rename")
+            rename_action.triggered.connect(self._on_rename)
+
+            delete_action = menu.addAction("Delete")
+            delete_action.triggered.connect(self._on_remove)
+
+        self._exec_context_menu(menu, self.list_widget.mapToGlobal(pos))
+
+    def _exec_context_menu(self, menu: QMenu, global_pos: QPoint) -> None:
+        """Execute context menu."""
+        menu.exec(global_pos)
 
     def set_queries(self, query_names: List[str]) -> None:
         """Populate the list of queries."""

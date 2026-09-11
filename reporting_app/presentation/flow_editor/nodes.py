@@ -320,8 +320,15 @@ class TableBoxNode(BaseNode):
                     pass
 
         lines = []
+        is_csv = (
+            self.get_property("box_type") == "Output CSV"
+            or getattr(getattr(self, "view", None), "table_box_type", "") == "Output CSV"
+        )
         for t in self.raw_tables:
-            name = t if self.show_full_path else t.split(".")[-1]
+            if is_csv or t.lower().endswith(".csv"):
+                name = t
+            else:
+                name = t if self.show_full_path else t.split(".")[-1]
             lines.append(f"• {name}")
 
         self.view.set_table_lines(lines)

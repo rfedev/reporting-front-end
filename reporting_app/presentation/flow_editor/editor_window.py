@@ -41,8 +41,10 @@ from reporting_app.controllers.app_controller import AppController
 from reporting_app.controllers.flow_controller import ProcessFlowController
 from reporting_app.core.bigquery_run import run_bigquery_script, run_bigquery_import_csv
 from reporting_app.core.models import ProcessFlowInfo, QueryInfo, QueryParameter, Report
+from reporting_app.core.sql_parser import sync_query_csv_comments, update_query_csv_comment
 from reporting_app.presentation.flow_editor.graph_builder import ProcessFlowGraphBuilder
 from reporting_app.presentation.flow_editor.nodes import ImportCsvNode, QueryNode, TableBoxNode
+from reporting_app.presentation.flow_editor.parameter_overlay import CanvasParameterOverlay
 from reporting_app.presentation.flow_editor.query_tree_widget import QueryManagementPanel
 from reporting_app.presentation.query_dialog import QueryRunDialog
 
@@ -302,11 +304,13 @@ class ProcessFlowEditorWindow(QMainWindow):
             parent=self,
         )
 
-        self.setWindowTitle(f"Process Flow Editor - {self.flow_controller.flow_name} [{report.name}]")
+        self.setWindowTitle(f"Process Flow - {report.name} - {self.flow_controller.flow_name}")
         self.resize(1200, 750)
 
         self._node_counter = 0
         self._node_positions: Dict[str, Tuple[float, float]] = {}
+        # Track pending query renames (original_disk_name -> current_working_name)
+        self._pending_query_renames: Dict[str, str] = {}
         # Load persisted show_full_table_names state
         self.show_full_table_names = self.flow_controller.get_show_full_table_names()
 
@@ -328,6 +332,55 @@ class ProcessFlowEditorWindow(QMainWindow):
 
         # Wire node double click
         self.graph.node_double_clicked.connect(self._on_node_double_clicked)
+
+        # Safeguard NodeGraphQt's _on_nodes_moved against KeyError if a node view was removed or recreated
+        orig_on_nodes_moved = self.graph._on_nodes_moved
+
+        def safe_on_nodes_moved(node_data):
+            safe_data = {
+                nv: prev_pos for nv, prev_pos in node_data.items()
+                if getattr(nv, "id", None) in self.graph._model.nodes
+            }
+            if safe_data:
+                orig_on_nodes_moved(safe_data)
+
+        self.graph._on_nodes_moved = safe_on_nodes_moved
+        try:
+            self.graph.viewer().moved_nodes.disconnect()
+            self.graph.viewer().moved_nodes.connect(safe_on_nodes_moved)
+        except Exception:
+            pass
+
+        # Handle in-place title editing on the node
+        def handle_query_title_change(target_node, new_name):
+            if getattr(self, "_is_renaming_query", False):
+                return
+            if not target_node or not new_name:
+                return
+            old_name = target_node.get_property("query_name") or target_node.name()
+            new_name = new_name.strip()
+            if not new_name or new_name == old_name:
+                return
+            if isinstance(target_node, QueryNode) or getattr(target_node, "type_", "") == "reporting.nodes.QueryNode":
+                self._on_query_renamed(old_name, new_name)
+
+        def on_graph_property_changed(node, prop_name, value):
+            if prop_name == "name":
+                handle_query_title_change(node, str(value))
+
+        def on_viewer_node_name_changed(node_id, new_name):
+            target_node = None
+            for n in self.graph.all_nodes():
+                if n.id == node_id or (hasattr(n, "view") and getattr(n.view, "id", None) == node_id):
+                    target_node = n
+                    break
+            handle_query_title_change(target_node, str(new_name))
+
+        self.graph.property_changed.connect(on_graph_property_changed)
+        try:
+            self.graph.viewer().node_name_changed.connect(on_viewer_node_name_changed)
+        except Exception as e:
+            logger.debug(f"Could not connect viewer node_name_changed: {e}")
 
     def _setup_canvas_pan_and_select(self) -> None:
         """Configure left-click empty space panning, smooth resize, and Ctrl+drag multi-select on NodeViewer."""
@@ -588,6 +641,13 @@ class ProcessFlowEditorWindow(QMainWindow):
         self.graph_widget.setAcceptDrops(True)
         self.graph_widget.installEventFilter(self)
         self.graph.data_dropped.connect(self._on_graph_data_dropped)
+
+        # Top-left expandable parameter overlay on the canvas (parented to viewer so canvas paint events do not occlude it)
+        self.param_overlay = CanvasParameterOverlay(viewer)
+        self.param_overlay.move(14, 14)
+        self.param_overlay.show()
+        self.param_overlay.raise_()
+
         self.splitter.addWidget(self.graph_widget)
 
         # Right Panel (Currently unused / placeholder)
@@ -599,8 +659,19 @@ class ProcessFlowEditorWindow(QMainWindow):
         right_layout.addWidget(right_label)
         self.splitter.addWidget(self.right_panel)
 
-        # Set initial splitter sizes
-        self.splitter.setSizes([240, 800, 160])
+        # Set initial splitter sizes (load from flow_controller or repository if present)
+        saved_sizes = self.flow_controller.get_splitter_sizes()
+        if not saved_sizes and self.app_controller and self.app_controller.repo:
+            repo_sizes = self.app_controller.repo.get_setting("flow_editor_splitter_sizes", "")
+            if repo_sizes:
+                try:
+                    saved_sizes = [int(s) for s in repo_sizes.split(",") if s.strip()]
+                except Exception:
+                    saved_sizes = None
+        if saved_sizes and len(saved_sizes) == 3:
+            self.splitter.setSizes(saved_sizes)
+        else:
+            self.splitter.setSizes([240, 800, 160])
         self.setCentralWidget(self.splitter)
 
         # Status bar
@@ -613,8 +684,6 @@ class ProcessFlowEditorWindow(QMainWindow):
         self.save_shortcut.activated.connect(self._on_save)
         self.del_shortcut = QShortcut(QKeySequence.Delete, self)
         self.del_shortcut.activated.connect(self._on_delete_selected)
-        self.backspace_shortcut = QShortcut(QKeySequence(Qt.Key_Backspace), self)
-        self.backspace_shortcut.activated.connect(self._on_delete_selected)
 
     def _toggle_left_panel(self) -> None:
         """Collapse or expand left queries panel."""
@@ -672,13 +741,129 @@ class ProcessFlowEditorWindow(QMainWindow):
         viewer._scene_range = QtCore.QRectF(padded_rect)
         viewer._update_scene()
 
+    def _get_working_query(self, query_name: str) -> Optional[QueryInfo]:
+        """Find a QueryInfo by current working name or original name, respecting pending renames."""
+        # Check direct lookup first
+        qinfo = self.report.get_query(query_name)
+        if qinfo:
+            return qinfo
+        # Check if query_name is a working new name mapped from an original name
+        for orig_name, curr_name in self._pending_query_renames.items():
+            if curr_name == query_name:
+                orig_q = self.report.get_query(orig_name)
+                if orig_q:
+                    # Return shallow copy with working name
+                    from dataclasses import replace
+                    return replace(orig_q, name=curr_name)
+        return None
+
     def _refresh_left_queries(self) -> None:
-        """Update the list of available queries in the left panel."""
-        query_names = [q.name for q in self.report.queries]
+        """Update the list of available queries in the left panel, respecting pending renames."""
+        query_names = []
+        for q in self.report.queries:
+            name = self._pending_query_renames.get(q.name, q.name)
+            query_names.append(name)
         self.left_panel.set_queries(query_names)
+
+    def _sync_all_query_csv_comments(self) -> None:
+        """Ensure all query files have synchronized # ouput: comments for standalone SELECT statements."""
+        if not self.report or not self.report.folder_path:
+            return
+        existing_csvs: Set[str] = set()
+        outputs_dir = self.report.folder_path / "outputs"
+        if outputs_dir.exists() and outputs_dir.is_dir():
+            for cf in outputs_dir.glob("*.csv"):
+                existing_csvs.add(cf.name)
+
+        for q in self.report.queries:
+            if q.file_path and q.file_path.exists():
+                csv_files = sync_query_csv_comments(q.file_path, existing_csvs)
+                existing_csvs.update(csv_files)
+                if csv_files:
+                    q.output_csv_tables = csv_files
+                    self.flow_controller.set_csv_filename(q.name, ", ".join(csv_files))
+
+        # Update any active CSV nodes on canvas immediately
+        for node in self.graph.all_nodes():
+            if isinstance(node, TableBoxNode) or getattr(node, "type_", "") == "reporting.nodes.TableBoxNode":
+                btype = node.get_property("box_type") or getattr(getattr(node, "view", None), "table_box_type", "")
+                if btype == "Output CSV":
+                    qname = node.get_property("query_owner") or node.name().replace(" [CSV]", "").strip()
+                    qinfo = self.report.get_query(qname)
+                    if qinfo and qinfo.output_csv_tables:
+                        node.setup_as_csv_output(qinfo.output_csv_tables)
+                        node.set_display_mode(self.show_full_table_names)
+
+    def _sync_query_files_and_parameters(self) -> None:
+        """Sync CSV comments and reload query parameters from disk if modified, updating canvas nodes and overlay."""
+        self._sync_all_query_csv_comments()
+        if not self.report:
+            return
+
+        # Check for query file modifications and re-parse parameters
+        from reporting_app.core.sql_parser import scan_query_parameters, scan_query_tables
+        for q in self.report.queries:
+            if q.file_path and q.file_path.exists():
+                try:
+                    mtime = q.file_path.stat().st_mtime
+                    if mtime != getattr(q, "mtime", None) or not q.parameters:
+                        content = q.file_path.read_text(encoding="utf-8", errors="replace")
+                        param_names = scan_query_parameters(content)
+                        input_tables, output_tables, _ = scan_query_tables(content)
+                        q.parameters = [QueryParameter(name=p) for p in param_names]
+                        q.input_tables = input_tables
+                        q.output_tables = output_tables
+                        q.mtime = mtime
+
+                        # Update node on canvas if present
+                        for node in self.graph.all_nodes():
+                            if isinstance(node, QueryNode) or getattr(node, "type_", "") == "reporting.nodes.QueryNode":
+                                n_qname = node.get_property("query_name") or node.name()
+                                if n_qname == q.name:
+                                    node.set_parameters(param_names)
+                except Exception as e:
+                    logger.debug(f"Error syncing query file {q.file_path}: {e}")
+
+        self._refresh_parameter_overlay()
+
+    def _refresh_parameter_overlay(self) -> None:
+        """Refresh flow parameter overlay with all unique parameters from active canvas queries."""
+        if hasattr(self, "param_overlay"):
+            active_qnames = [
+                n.get_property("query_name") or n.name()
+                for n in self.graph.all_nodes()
+                if isinstance(n, QueryNode) or getattr(n, "type_", "") == "reporting.nodes.QueryNode"
+            ]
+            if not active_qnames:
+                active_qnames = self.flow_controller.get_query_names()
+
+            unique_params: List[str] = []
+            seen: set = set()
+            for qn in active_qnames:
+                wq = self._get_working_query(qn)
+                if wq:
+                    for p in wq.parameters:
+                        if p.name not in seen:
+                            seen.add(p.name)
+                            unique_params.append(p.name)
+
+            date_opt_defaults = self.flow_controller.flow_data.get("parameter_date_options", {})
+            self.param_overlay.set_parameters(
+                unique_params,
+                current_defaults=self.flow_controller.parameter_defaults,
+                date_option_defaults=date_opt_defaults,
+            )
+            self.param_overlay.raise_()
+
+    def changeEvent(self, event: QEvent) -> None:
+        """Detect window focus/activation to sync any external query file edits immediately."""
+        super().changeEvent(event)
+        if event.type() == QEvent.ActivationChange and self.isActiveWindow():
+            self._sync_query_files_and_parameters()
 
     def _load_initial_graph(self) -> None:
         """Load saved session or automatically add flow queries if brand new."""
+        self._sync_query_files_and_parameters()
         session_data = self.flow_controller.get_graph_session()
         view_state = self.flow_controller.get_view_state()
         viewer = self.graph.viewer()
@@ -689,16 +874,45 @@ class ProcessFlowEditorWindow(QMainWindow):
         if session_data and "nodes" in session_data and session_data["nodes"]:
             try:
                 self.graph.deserialize_session(session_data)
-                # Re-apply text and display mode to restored TableBoxNodes
+                # Re-apply text, display mode, and query parameters to restored nodes
                 for node in self.graph.all_nodes():
                     if isinstance(node, TableBoxNode) or node.type_ == "reporting.nodes.TableBoxNode":
                         btype = node.get_property("box_type") or "Table Box"
                         node.view.set_custom_title(btype)
+                        if btype == "Output CSV":
+                            qname = node.get_property("query_owner") or node.name().replace(" [CSV]", "").strip()
+                            qinfo = self.report.get_query(qname)
+                            if qinfo and qinfo.output_csv_tables:
+                                node.setup_as_csv_output(qinfo.output_csv_tables)
                         node.set_display_mode(self.show_full_table_names)
+                    elif isinstance(node, QueryNode) or getattr(node, "type_", "") == "reporting.nodes.QueryNode":
+                        qname = node.get_property("query_name") or node.name()
+                        qinfo = self.report.get_query(qname)
+                        if qinfo:
+                            node.set_parameters(qinfo.parameter_names)
                 # Re-apply custom noodle colors to all pipes in the restored scene
                 for item in self.graph.viewer().scene().items():
                     if isinstance(item, PipeItem):
                         item.reset()
+
+                # Refresh parameter overlay for active queries in the flow
+                if hasattr(self, "param_overlay"):
+                    active_qnames = [
+                        n.get_property("query_name") or n.name()
+                        for n in self.graph.all_nodes()
+                        if isinstance(n, QueryNode) or getattr(n, "type_", "") == "reporting.nodes.QueryNode"
+                    ]
+                    if not active_qnames:
+                        active_qnames = self.flow_controller.get_query_names()
+                    unique_params = self.flow_controller.get_unique_parameters(active_qnames)
+                    date_opt_defaults = self.flow_controller.flow_data.get("parameter_date_options", {})
+                    self.param_overlay.set_parameters(
+                        unique_params,
+                        current_defaults=self.flow_controller.parameter_defaults,
+                        date_option_defaults=date_opt_defaults,
+                    )
+                    self.param_overlay.raise_()
+
                 QtCore.QTimer.singleShot(100, apply_view_state)
                 return
             except Exception as e:
@@ -717,6 +931,24 @@ class ProcessFlowEditorWindow(QMainWindow):
                 self.flow_controller.get_csv_filenames(),
                 import_csv_data=csv_imports,
             )
+
+        # Refresh parameter overlay for active queries in the flow
+        if hasattr(self, "param_overlay"):
+            active_qnames = [
+                n.get_property("query_name") or n.name()
+                for n in self.graph.all_nodes()
+                if isinstance(n, QueryNode) or getattr(n, "type_", "") == "reporting.nodes.QueryNode"
+            ]
+            if not active_qnames:
+                active_qnames = self.flow_controller.get_query_names()
+            unique_params = self.flow_controller.get_unique_parameters(active_qnames)
+            date_opt_defaults = self.flow_controller.flow_data.get("parameter_date_options", {})
+            self.param_overlay.set_parameters(
+                unique_params,
+                current_defaults=self.flow_controller.parameter_defaults,
+                date_option_defaults=date_opt_defaults,
+            )
+            self.param_overlay.raise_()
 
         QtCore.QTimer.singleShot(100, apply_view_state)
 
@@ -797,6 +1029,7 @@ class ProcessFlowEditorWindow(QMainWindow):
 
     def _sync_graph_topology(self, additional_query: Optional[str] = None) -> None:
         """Reconcile and synchronize the graph topology for all active query nodes on the canvas."""
+        self._sync_query_files_and_parameters()
         # Find all active query names currently on the canvas
         active_query_names: List[str] = []
         for node in self.graph.all_nodes():
@@ -808,7 +1041,7 @@ class ProcessFlowEditorWindow(QMainWindow):
         if additional_query and additional_query not in active_query_names:
             active_query_names.append(additional_query)
 
-        active_queries = [self.report.get_query(name) for name in active_query_names if self.report.get_query(name)]
+        active_queries = [self._get_working_query(name) for name in active_query_names if self._get_working_query(name)]
         csv_imports = self._collect_csv_import_data()
 
         # Reconstruct graph according to Process Flow Graph Logic
@@ -821,9 +1054,12 @@ class ProcessFlowEditorWindow(QMainWindow):
             import_csv_data=csv_imports,
         )
 
+        # Refresh parameter overlay for active queries in the flow
+        self._refresh_parameter_overlay()
+
     def add_query_to_canvas(self, query_name: str, pos: Optional[tuple] = None) -> Optional[QueryNode]:
         """Add a query to the canvas and recalculate the process flow graph topology."""
-        qinfo = self.report.get_query(query_name)
+        qinfo = self._get_working_query(query_name)
         if not qinfo:
             logger.warning(f"Query {query_name} not found in report.")
             return None
@@ -833,6 +1069,9 @@ class ProcessFlowEditorWindow(QMainWindow):
             if (isinstance(node, QueryNode) or getattr(node, "type_", "") == "reporting.nodes.QueryNode"):
                 existing_name = node.get_property("query_name") or node.name()
                 if existing_name == query_name:
+                    if pos is not None:
+                        node.set_pos(pos[0], pos[1])
+                        self._node_positions[query_name] = (pos[0], pos[1])
                     return node
 
         if pos is None:
@@ -987,10 +1226,13 @@ class ProcessFlowEditorWindow(QMainWindow):
 
     def _on_report_updated_from_controller(self, new_report: Optional[Report]) -> None:
         """Handle disk modifications detected by the application controller/file watcher."""
+        if getattr(self, "_is_renaming_query", False):
+            return
         if not new_report or new_report.name != self.report.name:
             return
 
         self.report = new_report
+        self.flow_controller.report = new_report
         self._refresh_left_queries()
         self._sync_graph_topology()
 
@@ -1009,8 +1251,8 @@ class ProcessFlowEditorWindow(QMainWindow):
             if btype == "Output CSV":
                 self._show_csv_rename_dialog(node)
 
-    def _show_csv_rename_dialog(self, target_node: TableBoxNode) -> None:
-        """Show a dialog with text inputs for all output CSVs created in this process flow."""
+    def _show_csv_rename_dialog(self, target_node: Optional[TableBoxNode] = None) -> None:
+        """Show a dialog with text inputs for output CSVs (scoped to target_node if provided, or all active CSV nodes)."""
         dialog = QDialog(self)
         dialog.setWindowTitle("Output CSV Filenames")
         dialog.resize(480, 320)
@@ -1018,22 +1260,26 @@ class ProcessFlowEditorWindow(QMainWindow):
 
         desc = QLabel(
             "<b>Output CSV Filenames:</b><br>"
-            "<i>Update the CSV filenames for queries exporting to CSV in this process flow:</i>"
+            "<i>Files are saved to the report's outputs/ folder:</i>"
         )
         desc.setWordWrap(True)
         dlg_layout.addWidget(desc)
 
-        # Collect all queries that export to CSV
-        active_csv_nodes = [
-            n for n in self.graph.all_nodes()
-            if (isinstance(n, TableBoxNode) or n.type_ == "reporting.nodes.TableBoxNode")
-            and (n.get_property("box_type") == "Output CSV" or getattr(getattr(n, "view", None), "table_box_type", "") == "Output CSV")
-        ]
+        # If target_node is passed, only show CSVs for that specific Output CSV box; otherwise all active CSV nodes
+        if target_node:
+            active_csv_nodes = [target_node]
+        else:
+            active_csv_nodes = [
+                n for n in self.graph.all_nodes()
+                if (isinstance(n, TableBoxNode) or n.type_ == "reporting.nodes.TableBoxNode")
+                and (n.get_property("box_type") == "Output CSV" or getattr(getattr(n, "view", None), "table_box_type", "") == "Output CSV")
+            ]
 
         # Form layout of CSV inputs
         form_widget = QWidget()
         form_layout = QVBoxLayout(form_widget)
-        edits: Dict[str, QLineEdit] = {}
+        row_edits: List[dict] = []
+        row_counter = 1
 
         for cnode in active_csv_nodes:
             qname = cnode.get_property("query_owner")
@@ -1041,42 +1287,24 @@ class ProcessFlowEditorWindow(QMainWindow):
                 raw_name = cnode.name()
                 qname = raw_name.replace(" [CSV]", "").strip()
 
-            current_csv = self.flow_controller.get_csv_filenames().get(qname)
-            if not current_csv and cnode.raw_tables:
-                current_csv = cnode.raw_tables[0]
-            if not current_csv:
-                current_csv = f"{qname}.csv"
+            tables = list(cnode.raw_tables) if cnode.raw_tables else [f"{qname}.csv"]
+            for idx_in_node, cur_file in enumerate(tables):
+                clean_name = Path(cur_file).name
+                row = QHBoxLayout()
+                lbl = QLabel(f"<b>Query{row_counter:02d}:</b>")
+                lbl.setToolTip(f"{qname} (Output #{idx_in_node + 1})")
+                ledit = QLineEdit(clean_name)
+                row.addWidget(lbl)
+                row.addWidget(ledit)
+                form_layout.addLayout(row)
 
-            row = QHBoxLayout()
-            row.addWidget(QLabel(f"<b>{qname}:</b>"))
-            ledit = QLineEdit(current_csv)
-            edits[qname] = ledit
-            row.addWidget(ledit)
-
-            browse_btn = QPushButton("Browse...")
-            browse_btn.setToolTip("Select output file or folder destination")
-
-            def make_browse_handler(edit_w=ledit, qn=qname):
-                def on_browse():
-                    cur = edit_w.text().strip()
-                    initial_dir = str(Path(cur).parent) if cur and Path(cur).parent.exists() else str(Path.home())
-                    initial_name = Path(cur).name if cur else f"{qn}.csv"
-                    initial_path = str(Path(initial_dir) / initial_name)
-                    selected_file, _ = QFileDialog.getSaveFileName(
-                        dialog,
-                        f"Select Output CSV Destination for {qn}",
-                        initial_path,
-                        "CSV Files (*.csv);;All Files (*)",
-                    )
-                    if selected_file:
-                        if not selected_file.endswith(".csv"):
-                            selected_file += ".csv"
-                        edit_w.setText(selected_file)
-                return on_browse
-
-            browse_btn.clicked.connect(make_browse_handler(ledit, qname))
-            row.addWidget(browse_btn)
-            form_layout.addLayout(row)
+                row_edits.append({
+                    "cnode": cnode,
+                    "qname": qname,
+                    "idx_in_node": idx_in_node,
+                    "edit": ledit,
+                })
+                row_counter += 1
 
         dlg_layout.addWidget(form_widget)
         dlg_layout.addStretch()
@@ -1094,27 +1322,47 @@ class ProcessFlowEditorWindow(QMainWindow):
         cancel_btn.clicked.connect(dialog.reject)
 
         if dialog.exec() == QDialog.Accepted:
-            csv_map = self.flow_controller.get_csv_filenames()
-            for qname, edit in edits.items():
-                new_val = edit.text().strip()
-                if new_val:
-                    if not new_val.endswith(".csv"):
-                        new_val = f"{new_val}.csv"
-                    csv_map[qname] = new_val
-                    self.flow_controller.set_csv_filename(qname, new_val)
+            node_files_map: Dict[Any, List[str]] = {
+                cnode: list(cnode.raw_tables or [f"{cnode.name()}.csv"])
+                for cnode in active_csv_nodes
+            }
 
-            # Update nodes on canvas
-            for cnode in active_csv_nodes:
+            for item in row_edits:
+                new_val = item["edit"].text().strip()
+                if not new_val:
+                    continue
+                new_val = Path(new_val).name
+                if not new_val.lower().endswith(".csv"):
+                    new_val = f"{new_val}.csv"
+
+                cnode = item["cnode"]
+                idx_in_node = item["idx_in_node"]
+                qname = item["qname"]
+
+                if idx_in_node < len(node_files_map[cnode]):
+                    node_files_map[cnode][idx_in_node] = new_val
+                else:
+                    node_files_map[cnode].append(new_val)
+
+                # Synchronize comment in query .sql file
+                qinfo = self.report.get_query(qname)
+                if qinfo and qinfo.file_path and qinfo.file_path.exists():
+                    update_query_csv_comment(qinfo.file_path, select_index=idx_in_node, new_filename=new_val)
+                    if idx_in_node < len(qinfo.output_csv_tables):
+                        qinfo.output_csv_tables[idx_in_node] = new_val
+
+            # Update nodes on canvas and flow controller
+            for cnode, new_files in node_files_map.items():
+                cnode.setup_as_csv_output(new_files)
+                cnode.set_display_mode(self.show_full_table_names)
                 qname = cnode.get_property("query_owner") or cnode.name().replace(" [CSV]", "").strip()
-                if qname in csv_map:
-                    cnode.setup_as_csv_output(csv_map[qname])
-                    cnode.set_display_mode(self.show_full_table_names)
+                self.flow_controller.set_csv_filename(qname, ", ".join(new_files))
 
             self.status_bar.showMessage("Updated output CSV filenames.", 3000)
 
     def _open_query_file(self, query_name: str) -> None:
         """Open query .sql file with default system application."""
-        qinfo = self.report.get_query(query_name)
+        qinfo = self._get_working_query(query_name)
         if qinfo and qinfo.file_path.exists():
             file_str = str(qinfo.file_path.resolve())
             opened = QDesktopServices.openUrl(QUrl.fromLocalFile(file_str))
@@ -1257,6 +1505,15 @@ class ProcessFlowEditorWindow(QMainWindow):
             if param not in existing_defaults:
                 existing_defaults[param] = ""
 
+        # 1. Commit any pending query file renames to disk
+        if self.app_controller and self._pending_query_renames:
+            for orig_name, final_name in list(self._pending_query_renames.items()):
+                if orig_name != final_name:
+                    self.app_controller.rename_query(orig_name, final_name)
+            self._pending_query_renames.clear()
+            self.report = self.app_controller.active_report or self.report
+            self._refresh_left_queries()
+
         # Capture current zoom and pan center
         viewer = self.graph.viewer()
         sc = viewer.scene_center()
@@ -1267,6 +1524,18 @@ class ProcessFlowEditorWindow(QMainWindow):
         }
         csv_imports = self._collect_csv_import_data()
 
+        # Capture splitter sizes
+        cur_splitter_sizes = self.splitter.sizes()
+        if self.app_controller and self.app_controller.repo:
+            self.app_controller.repo.set_setting("flow_editor_splitter_sizes", ",".join(str(s) for s in cur_splitter_sizes))
+
+        # Collect parameters and date options from overlay if present
+        date_options = {}
+        if hasattr(self, "param_overlay"):
+            overlay_vals = self.param_overlay.get_parameter_values()
+            existing_defaults.update(overlay_vals)
+            date_options = self.param_overlay.get_date_option_selections()
+
         self.flow_controller.save_flow(
             active_query_names=active_query_names,
             parameter_defaults=existing_defaults,
@@ -1275,13 +1544,28 @@ class ProcessFlowEditorWindow(QMainWindow):
             csv_filenames=self.flow_controller.get_csv_filenames(),
             csv_imports=csv_imports,
             view_state=view_state,
+            splitter_sizes=cur_splitter_sizes,
+            parameter_date_options=date_options,
         )
 
         if self.app_controller:
             self.app_controller.scan()
+            self.report = self.app_controller.active_report or self.report
+            self._refresh_left_queries()
 
         self.status_bar.showMessage("Process flow saved successfully.", 4000)
         QMessageBox.information(self, "Saved", f"Process flow '{self.flow_controller.flow_name}' saved.")
+
+    def closeEvent(self, event) -> None:
+        """Remember splitter dimensions when closing process flow editor window."""
+        try:
+            if hasattr(self, "splitter"):
+                cur_sizes = self.splitter.sizes()
+                if self.app_controller and self.app_controller.repo:
+                    self.app_controller.repo.set_setting("flow_editor_splitter_sizes", ",".join(str(s) for s in cur_sizes))
+        except Exception as e:
+            logger.debug(f"Error saving splitter sizes on close: {e}")
+        super().closeEvent(event)
 
     def _on_run_flow(self) -> None:
         """Execute all CSV imports and queries in the process flow."""
@@ -1298,30 +1582,11 @@ class ProcessFlowEditorWindow(QMainWindow):
             QMessageBox.information(self, "Empty Flow", "There are no queries or CSV imports in this process flow to run.")
             return
 
-        # Consolidate all unique parameters across the queries
-        unique_params = self.flow_controller.get_unique_parameters(queries_order) if queries_order else []
+        # Consolidate parameters from parameter overlay directly
         param_values = dict(self.flow_controller.parameter_defaults)
-
-        if unique_params:
-            # Build mock QueryInfo to reuse the QueryRunDialog
-            combined_qinfo = QueryInfo(
-                name=f"Flow: {self.flow_controller.flow_name}",
-                file_path=self.flow_controller.file_path,
-                report_name=self.report.name,
-                parameters=[QueryParameter(name=p, default_value=param_values.get(p, "")) for p in unique_params],
-            )
-            dialog = QueryRunDialog(
-                query_info=combined_qinfo,
-                initial_defaults=param_values,
-                parent=self,
-            )
-            dialog.setWindowTitle(f"Run Process Flow - {self.flow_controller.flow_name}")
-            dialog.run_btn.setText("Run Process Flow")
-
-            if dialog.exec() != QueryRunDialog.Accepted:
-                return
-
-            param_values = dialog.get_parameter_values()
+        if hasattr(self, "param_overlay"):
+            overlay_vals = self.param_overlay.get_parameter_values()
+            param_values.update(overlay_vals)
             self.flow_controller.parameter_defaults.update(param_values)
 
         outputs_dir = self.report.folder_path / "outputs"
@@ -1415,8 +1680,6 @@ class ProcessFlowEditorWindow(QMainWindow):
             qinfo = self.app_controller.add_query(query_name)
             self.report = self.app_controller.active_report or self.report
             self._refresh_left_queries()
-            if qinfo:
-                self.add_query_to_canvas(qinfo.name)
 
     def _on_query_removed(self, query_name: str) -> None:
         if self.app_controller:
@@ -1432,14 +1695,54 @@ class ProcessFlowEditorWindow(QMainWindow):
             self._sync_graph_topology()
 
     def _on_query_renamed(self, old_name: str, new_name: str) -> None:
-        if self.app_controller:
-            self.app_controller.rename_query(old_name, new_name)
-            self.report = self.app_controller.active_report or self.report
+        self._is_renaming_query = True
+        try:
+            # Track pending rename (chain if previously renamed: orig -> intermediate -> new)
+            orig_name = old_name
+            for k, v in list(self._pending_query_renames.items()):
+                if v == old_name:
+                    orig_name = k
+                    break
+            if orig_name == new_name:
+                self._pending_query_renames.pop(orig_name, None)
+            else:
+                self._pending_query_renames[orig_name] = new_name
+
+            # Immediately update the left panel to reflect the new name
             self._refresh_left_queries()
+
+            # Update flow_controller references in memory
+            if self.flow_controller:
+                self.flow_controller.rename_query(old_name, new_name)
+
+            # Update existing positions map
+            if old_name in self._node_positions:
+                self._node_positions[new_name] = self._node_positions.pop(old_name)
+            for suffix in ("[Out]", "[CSV]", "[In]"):
+                old_key = f"{old_name} {suffix}"
+                new_key = f"{new_name} {suffix}"
+                if old_key in self._node_positions:
+                    self._node_positions[new_key] = self._node_positions.pop(old_key)
+
+            # Update live nodes on canvas (names and custom properties)
             for n in self.graph.all_nodes():
-                if n.name() == old_name:
+                curr_qname = n.get_property("query_name")
+                if n.name() == old_name or curr_qname == old_name or n.name() == new_name:
                     n.set_name(new_name)
                     n.set_property("query_name", new_name)
+                    qinfo = self._get_working_query(new_name)
+                    if qinfo and qinfo.file_path:
+                        n.set_property("query_path", str(qinfo.file_path.resolve()))
+                elif n.name().startswith(f"{old_name} ["):
+                    suffix = n.name()[len(old_name):]
+                    n.set_name(f"{new_name}{suffix}")
+                    if n.get_property("query_owner") == old_name:
+                        n.set_property("query_owner", new_name)
+
+            # Re-sync graph topology to preserve all connections and table boxes
+            self._sync_graph_topology()
+        finally:
+            self._is_renaming_query = False
 
     def _handle_query_drop(self, query_name: str, scene_x: float, scene_y: float) -> None:
         """Add dropped query node at scene position with deduplication."""
@@ -1482,7 +1785,7 @@ class ProcessFlowEditorWindow(QMainWindow):
 
         if watched in target_widgets:
             if event.type() == QEvent.KeyPress:
-                if event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
+                if event.key() == Qt.Key_Delete:
                     self._on_delete_selected()
                     return True
             elif event.type() in (QEvent.DragEnter, QEvent.DragMove):

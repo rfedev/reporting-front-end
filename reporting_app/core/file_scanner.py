@@ -18,7 +18,11 @@ from reporting_app.core.models import (
     QueryParameter,
     Report,
 )
-from reporting_app.core.sql_parser import scan_query_parameters, scan_query_tables
+from reporting_app.core.sql_parser import (
+    scan_query_parameters,
+    scan_query_tables,
+    sync_query_csv_comments,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -130,9 +134,20 @@ class FileScanner:
             if p not in sql_files:
                 sql_files.append(p)
 
+        # Collect existing CSV names in report outputs directory
+        existing_report_csvs: Set[str] = set()
+        outputs_dir = report_dir / "outputs"
+        if outputs_dir.exists() and outputs_dir.is_dir():
+            for cf in outputs_dir.glob("*.csv"):
+                existing_report_csvs.add(cf.name)
+
         queries: List[QueryInfo] = []
         for file_path in sorted(sql_files, key=lambda x: x.name):
             try:
+                # Sync # ouput: comments for standalone SELECT statements
+                csv_files = sync_query_csv_comments(file_path, existing_report_csvs)
+                existing_report_csvs.update(csv_files)
+
                 mtime = file_path.stat().st_mtime
                 cache_key = str(file_path.resolve())
 
@@ -146,6 +161,8 @@ class FileScanner:
                 content = file_path.read_text(encoding="utf-8", errors="replace")
                 param_names = scan_query_parameters(content)
                 input_tables, output_tables, output_csv_tables = scan_query_tables(content)
+                if csv_files:
+                    output_csv_tables = csv_files
 
                 query_info = QueryInfo(
                     name=file_path.stem,

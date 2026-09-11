@@ -5,6 +5,8 @@ from typing import Dict, List, Optional
 from PySide6.QtCore import QDate
 from PySide6.QtWidgets import (
     QCalendarWidget,
+    QComboBox,
+    QDateEdit,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -43,8 +45,14 @@ class DatePickerPopup(QDialog):
         return qdate.toString("yyyy-MM-dd")
 
 
+from reporting_app.utils.date_calc import DATE_OPTIONS, calculate_date_for_option, is_date_param
+
+
 class QueryRunDialog(QDialog):
-    """Shows all query parameters with default values and date pickers."""
+    """Shows all query parameters with default values, date calculation options, and date pickers."""
+
+    # Static dictionary to remember last selected option across dialog openings
+    _last_selected_date_options: Dict[str, str] = {}
 
     def __init__(
         self,
@@ -56,9 +64,11 @@ class QueryRunDialog(QDialog):
         self.query_info = query_info
         self.initial_defaults = initial_defaults or {}
         self.param_edits: Dict[str, QLineEdit] = {}
+        self.date_combos: Dict[str, QComboBox] = {}
+        self.date_pickers: Dict[str, QDateEdit] = {}
 
         self.setWindowTitle(f"Run Query - {query_info.name}")
-        self.resize(550, 400)
+        self.resize(580, 420)
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -67,7 +77,7 @@ class QueryRunDialog(QDialog):
         # Header description
         desc_label = QLabel(
             f"<b>Query:</b> {self.query_info.filename}<br>"
-            f"<i>Configure the parameters below before running. Use the date picker button or enter any custom text.</i>"
+            f"<i>Configure the parameters below before running. Date parameters provide quick period calculations and date picking.</i>"
         )
         desc_label.setWordWrap(True)
         main_layout.addWidget(desc_label)
@@ -85,19 +95,77 @@ class QueryRunDialog(QDialog):
                 pname = param.name
                 row_layout = QHBoxLayout()
 
-                # Default value priority: passed in initial_defaults, then param model
                 default_val = self.initial_defaults.get(pname, param.default_value)
-                edit = QLineEdit(default_val)
-                self.param_edits[pname] = edit
-                row_layout.addWidget(edit)
 
-                # Date picker button
-                date_btn = QPushButton("📅 Pick Date")
-                date_btn.setToolTip("Insert selected date in YYYY-MM-DD format")
-                date_btn.clicked.connect(self._create_date_picker_callback(edit))
-                row_layout.addWidget(date_btn)
+                if is_date_param(pname):
+                    combo = QComboBox(self)
+                    for opt in DATE_OPTIONS:
+                        combo.addItem(opt)
 
-                form_layout.addRow(f"{{{pname}}}:", row_layout)
+                    # Remember last selected option or default to "pick date"
+                    last_opt = self._last_selected_date_options.get(pname, "pick date")
+                    idx = combo.findText(last_opt)
+                    if idx >= 0:
+                        combo.setCurrentIndex(idx)
+                    else:
+                        combo.setCurrentIndex(0)
+
+                    # Hidden or read-only text edit to hold the resulting date
+                    edit = QLineEdit(default_val)
+                    self.param_edits[pname] = edit
+                    self.date_combos[pname] = combo
+
+                    # Date picker widget
+                    date_picker = QDateEdit(self)
+                    date_picker.setCalendarPopup(True)
+                    date_picker.setDisplayFormat("yyyy-MM-dd")
+
+                    # Initialize date_picker with default_val if valid, else today
+                    cur_qdate = QDate.fromString(default_val, "yyyy-MM-dd")
+                    if cur_qdate.isValid():
+                        date_picker.setDate(cur_qdate)
+                    else:
+                        date_picker.setDate(QDate.currentDate())
+                    self.date_pickers[pname] = date_picker
+
+                    def make_combo_handler(p=pname, c=combo, dp=date_picker, ed=edit):
+                        def on_option_changed(text):
+                            self._last_selected_date_options[p] = text
+                            if text == "pick date":
+                                dp.setVisible(True)
+                                ed.setText(dp.date().toString("yyyy-MM-dd"))
+                            else:
+                                dp.setVisible(False)
+                                calculated = calculate_date_for_option(text)
+                                ed.setText(calculated)
+                        return on_option_changed
+
+                    def make_date_handler(ed=edit):
+                        def on_date_changed(new_date):
+                            ed.setText(new_date.toString("yyyy-MM-dd"))
+                        return on_date_changed
+
+                    combo.currentTextChanged.connect(make_combo_handler())
+                    date_picker.dateChanged.connect(make_date_handler())
+
+                    row_layout.addWidget(combo)
+                    row_layout.addWidget(date_picker)
+
+                    # Initial trigger
+                    cur_opt = combo.currentText()
+                    if cur_opt == "pick date":
+                        date_picker.setVisible(True)
+                        edit.setText(date_picker.date().toString("yyyy-MM-dd"))
+                    else:
+                        date_picker.setVisible(False)
+                        edit.setText(calculate_date_for_option(cur_opt))
+
+                    form_layout.addRow(f"{{{pname}}}:", row_layout)
+                else:
+                    edit = QLineEdit(default_val)
+                    self.param_edits[pname] = edit
+                    row_layout.addWidget(edit)
+                    form_layout.addRow(f"{{{pname}}}:", row_layout)
 
         content_widget.setLayout(form_layout)
         scroll_area.setWidget(content_widget)
@@ -117,15 +185,6 @@ class QueryRunDialog(QDialog):
         btn_layout.addWidget(self.run_btn)
 
         main_layout.addLayout(btn_layout)
-
-    def _create_date_picker_callback(self, target_edit: QLineEdit):
-        """Returns a handler to pop up the calendar and populate the target QLineEdit."""
-        def handler():
-            popup = DatePickerPopup(self)
-            if popup.exec() == QDialog.Accepted:
-                date_str = popup.get_selected_date_str()
-                target_edit.setText(date_str)
-        return handler
 
     def get_parameter_values(self) -> Dict[str, str]:
         """Return user entered key/value pairs for all parameters."""

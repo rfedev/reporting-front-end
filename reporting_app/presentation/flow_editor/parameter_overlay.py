@@ -71,8 +71,8 @@ class CanvasParameterOverlay(QFrame):
 
     def _build_ui(self) -> None:
         self.main_layout = QVBoxLayout(self)
-        self.main_layout.setContentsMargins(8, 6, 8, 8)
-        self.main_layout.setSpacing(4)
+        self.main_layout.setContentsMargins(10, 8, 12, 10)
+        self.main_layout.setSpacing(6)
 
         # Header bar with toggle arrow and title
         header_layout = QHBoxLayout()
@@ -90,8 +90,8 @@ class CanvasParameterOverlay(QFrame):
         # Content container
         self.content_widget = QWidget(self)
         self.form_layout = QFormLayout(self.content_widget)
-        self.form_layout.setContentsMargins(0, 4, 0, 4)
-        self.form_layout.setSpacing(6)
+        self.form_layout.setContentsMargins(2, 2, 2, 2)
+        self.form_layout.setSpacing(8)
         self.form_layout.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.form_layout.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
 
@@ -107,7 +107,8 @@ class CanvasParameterOverlay(QFrame):
                     item.widget().show()
         self.content_widget.adjustSize()
         hint = self.layout().sizeHint()
-        self.resize(hint)
+        # Add a few pixels buffer to prevent border clipping or antialiasing subpixel rounding
+        self.resize(hint.width() + 2, hint.height() + 2)
         self.raise_()
 
     def showEvent(self, event) -> None:

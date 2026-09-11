@@ -6,7 +6,9 @@
   ],
   "parameter_defaults": {
     "repdate": "2026-09-11",
-    "testParam1": ""
+    "testParam1": "",
+    "testParam": "",
+    "testParam2": ""
   },
   "show_full_table_names": false,
   "csv_filenames": {
@@ -27,7 +29,7 @@
       "reject_connection_types": "{}"
     },
     "nodes": {
-      "0x7fe85540eb10": {
+      "0x7f031b792510": {
         "type_": "reporting.nodes.QueryNode",
         "icon": null,
         "name": "new name11",
@@ -50,10 +52,10 @@
           180
         ],
         "disabled": false,
-        "selected": false,
+        "selected": true,
         "visible": true,
         "width": 162.140625,
-        "height": 152.3,
+        "height": 171.3,
         "pos": [
           536.3751375137514,
           310.3993399339934
@@ -65,10 +67,10 @@
           "query_name": "new name11",
           "query_path": "/home/ric/git/reporting-front-end/reports/test/queries/new name11.sql",
           "report_name": "test",
-          "parameters": "repdate, testParam1"
+          "parameters": "repdate, testParam, testParam2"
         }
       },
-      "0x7fe85540ec40": {
+      "0x7f031b7c9bd0": {
         "type_": "reporting.nodes.TableBoxNode",
         "icon": null,
         "name": "new name11 [CSV]",
@@ -112,26 +114,26 @@
     "connections": [
       {
         "out": [
-          "0x7fe85540eb10",
+          "0x7f031b792510",
           "csv_out"
         ],
         "in": [
-          "0x7fe85540ec40",
+          "0x7f031b7c9bd0",
           "in_tables"
         ]
       }
     ]
   },
   "view_state": {
-    "zoom": 0.02,
+    "zoom": 0.85,
     "center": [
-      815.0852280333762,
-      463.6569583769694
+      746.3751375137514,
+      396.04933993399345
     ]
   },
   "splitter_sizes": [
     117,
-    1079,
+    1075,
     0
   ],
   "parameter_date_options": {

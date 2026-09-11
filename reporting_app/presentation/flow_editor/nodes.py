@@ -196,6 +196,12 @@ class QueryNode(BaseNode):
         # Visual styling - Blue
         self.set_color(COLOR_BLUE[0], COLOR_BLUE[1], COLOR_BLUE[2])
 
+    def set_property(self, name, value, push_undo=True):
+        if name not in self.model.properties and not self.has_property(name):
+            self.create_property(name, value)
+        else:
+            super().set_property(name, value, push_undo=push_undo)
+
     def set_parameters(self, param_list: List[str]):
         """Set query parameters to display in the node body."""
         self.set_property("parameters", ", ".join(param_list))
@@ -244,6 +250,12 @@ class ImportCsvNode(BaseNode):
         # Visual styling - Purple
         self.set_color(COLOR_DARK_PURPLE[0], COLOR_DARK_PURPLE[1], COLOR_DARK_PURPLE[2])
 
+    def set_property(self, name, value, push_undo=True):
+        if name not in self.model.properties and not self.has_property(name):
+            self.create_property(name, value)
+        else:
+            super().set_property(name, value, push_undo=push_undo)
+
     def get_imports(self) -> List[dict]:
         import json
         raw = self.get_property("imports_json") or "[]"
@@ -279,10 +291,17 @@ class TableBoxNode(BaseNode):
 
         self.create_property("box_type", "Input Tables")
         self.create_property("raw_tables_json", "")
+        self.create_property("query_owner", "")
         self.raw_tables: List[str] = []
         self.show_full_path: bool = True
 
         self.set_color(COLOR_GREEN[0], COLOR_GREEN[1], COLOR_GREEN[2])
+
+    def set_property(self, name, value, push_undo=True):
+        if name not in self.model.properties and not self.has_property(name):
+            self.create_property(name, value)
+        else:
+            super().set_property(name, value, push_undo=push_undo)
 
     def set_display_mode(self, show_full_path: bool):
         """Switch between full path (e.g. project.dataset.table) and short name (table)."""

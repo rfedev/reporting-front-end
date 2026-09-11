@@ -5,11 +5,14 @@ from typing import List, Optional
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
+    QDialog,
     QGroupBox,
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -27,6 +30,71 @@ from reporting_app.presentation.query_dialog import QueryRunDialog
 from reporting_app.presentation.settings_dialog import SettingsDialog
 
 logger = logging.getLogger(__name__)
+
+
+class NewProcessFlowDialog(QDialog):
+    """Dialog for creating a new process flow, optionally cloning an existing flow."""
+
+    def __init__(self, default_name: str, existing_flows: List[str], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("New Process Flow")
+        self.resize(380, 160)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        # Name row
+        name_layout = QHBoxLayout()
+        name_layout.addWidget(QLabel("Flow Name:"))
+        self.name_edit = QLineEdit(default_name)
+        name_layout.addWidget(self.name_edit)
+        layout.addLayout(name_layout)
+
+        # Clone flow checkbox
+        self.clone_cb = QCheckBox("Clone flow")
+        layout.addWidget(self.clone_cb)
+
+        # Clone dropdown row
+        clone_layout = QHBoxLayout()
+        self.clone_label = QLabel("Source flow:")
+        self.clone_combo = QComboBox()
+        self.clone_combo.addItems(existing_flows)
+        clone_layout.addWidget(self.clone_label)
+        clone_layout.addWidget(self.clone_combo, 1)
+        layout.addLayout(clone_layout)
+
+        # Initial visibility/enablement of clone dropdown
+        has_existing = bool(existing_flows)
+        self.clone_cb.setEnabled(has_existing)
+        self.clone_label.setVisible(False)
+        self.clone_combo.setVisible(False)
+
+        def toggle_clone(checked: bool):
+            self.clone_label.setVisible(checked)
+            self.clone_combo.setVisible(checked)
+            self.adjustSize()
+
+        self.clone_cb.toggled.connect(toggle_clone)
+
+        # Buttons
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        ok_btn = QPushButton("OK")
+        ok_btn.setStyleSheet("font-weight: bold; background-color: #2b78e4; color: white;")
+        ok_btn.clicked.connect(self.accept)
+        btn_layout.addWidget(cancel_btn)
+        btn_layout.addWidget(ok_btn)
+        layout.addLayout(btn_layout)
+
+    def get_flow_name(self) -> str:
+        return self.name_edit.text().strip()
+
+    def get_source_flow(self) -> Optional[str]:
+        if self.clone_cb.isChecked():
+            return self.clone_combo.currentText().strip() or None
+        return None
 
 
 class MainWindow(QMainWindow):
@@ -405,29 +473,36 @@ class MainWindow(QMainWindow):
         self.editor_windows.append(editor)
         editor.show()
 
+
+
+
     def _on_new_process_flow(self) -> None:
         report = self.controller.active_report
         if not report:
             QMessageBox.information(self, "No Report Selected", "Please select a report first.")
             return
 
-        flow_name, ok = QInputDialog.getText(
-            self,
-            "New Process Flow",
-            "Enter name for the new process flow:",
-            text=f"Process-{len(report.process_flows) + 1:02d}",
+        existing_flows = [f.name for f in report.process_flows]
+        default_name = f"Process-{len(report.process_flows) + 1:02d}"
+        dlg = NewProcessFlowDialog(default_name, existing_flows, self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        flow_name = dlg.get_flow_name()
+        if not flow_name:
+            return
+
+        source_flow = dlg.get_source_flow()
+        flow_info = self.controller.add_process_flow(flow_name, source_flow_name=source_flow)
+        editor = ProcessFlowEditorWindow(
+            report=report,
+            flow_info=flow_info,
+            flow_name=flow_name,
+            app_controller=self.controller,
+            parent=self,
         )
-        if ok and flow_name.strip():
-            flow_name = flow_name.strip()
-            editor = ProcessFlowEditorWindow(
-                report=report,
-                flow_info=None,
-                flow_name=flow_name,
-                app_controller=self.controller,
-                parent=self,
-            )
-            self.editor_windows.append(editor)
-            editor.show()
+        self.editor_windows.append(editor)
+        editor.show()
 
     def _on_edit_query(self) -> None:
         query_name = self.queries_combo.currentText()

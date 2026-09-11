@@ -143,7 +143,7 @@ class ProcessFlowGraphBuilder:
                 )
                 csv_file_name = csv_filenames.get(q.name, f"{q.name}.csv") if csv_filenames else f"{q.name}.csv"
                 csv_box.setup_as_csv_output(csv_file_name)
-                csv_box.create_property("query_owner", q.name)
+                csv_box.set_property("query_owner", q.name)
                 csv_box.set_display_mode(show_full_table_names)
                 try:
                     csv_port = qnode.get_output("csv_out") or qnode.get_output("tables_out")

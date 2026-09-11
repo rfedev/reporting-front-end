@@ -13,8 +13,11 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -32,6 +35,7 @@ from PySide6.QtWidgets import (
 from NodeGraphQt import BaseNode, NodeGraph
 from NodeGraphQt.constants import PipeEnum
 from NodeGraphQt.qgraphics.pipe import PipeItem
+from NodeGraphQt.qgraphics.port import PortItem
 
 from reporting_app.controllers.app_controller import AppController
 from reporting_app.controllers.flow_controller import ProcessFlowController
@@ -43,6 +47,48 @@ from reporting_app.presentation.flow_editor.query_tree_widget import QueryManage
 from reporting_app.presentation.query_dialog import QueryRunDialog
 
 logger = logging.getLogger(__name__)
+
+
+class SelectOutputTablesDialog(QDialog):
+    """Dialog for selecting which tables to export to CSV when multiple tables exist in an output TableBox."""
+
+    def __init__(self, raw_tables: List[str], parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setWindowTitle("Select Tables")
+        self.resize(360, 280)
+        self.raw_tables = list(raw_tables)
+        self.items: List[Tuple[str, QListWidgetItem]] = []
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        header = QLabel("<b>Select tables to output:</b>")
+        layout.addWidget(header)
+
+        self.list_widget = QListWidget(self)
+        for t in self.raw_tables:
+            clean_name = t.split(".")[-1] if "." in t else t
+            item = QListWidgetItem(clean_name)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked)
+            self.list_widget.addItem(item)
+            self.items.append((t, item))
+        layout.addWidget(self.list_widget)
+
+        # Buttons
+        btn_bar = QHBoxLayout()
+        btn_bar.addStretch()
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        ok_btn = QPushButton("OK")
+        ok_btn.setStyleSheet("font-weight: bold; background-color: #2b78e4; color: white;")
+        ok_btn.clicked.connect(self.accept)
+        btn_bar.addWidget(cancel_btn)
+        btn_bar.addWidget(ok_btn)
+        layout.addLayout(btn_bar)
+
+    def get_selected_tables(self) -> List[str]:
+        return [raw_t for raw_t, item in self.items if item.checkState() == Qt.Checked]
 
 
 class ImportCsvDialog(QDialog):
@@ -88,6 +134,7 @@ class ImportCsvDialog(QDialog):
         scroll.setWidgetResizable(True)
         self.container = QWidget()
         self.container_layout = QVBoxLayout(self.container)
+        self.container_layout.setAlignment(Qt.AlignTop)
         self.container_layout.setSpacing(12)
         scroll.setWidget(self.container)
         main_layout.addWidget(scroll)
@@ -121,6 +168,10 @@ class ImportCsvDialog(QDialog):
             self._add_row()
 
     def _add_row(self, csv_path: str = "", has_headers: bool = True, output_table: str = ""):
+        if not isinstance(csv_path, str):
+            csv_path = ""
+        if not isinstance(output_table, str):
+            output_table = ""
         sec_num = len(self.rows) + 1
         section_box = QGroupBox(f"CSV Import #{sec_num}", self.container)
         section_box.setStyleSheet(
@@ -352,6 +403,35 @@ class ProcessFlowEditorWindow(QMainWindow):
 
         viewer.start_live_connection = custom_start_live_connection
 
+        # Intercept live connection release on empty space
+        orig_apply_live_connection = viewer.apply_live_connection
+
+        def custom_apply_live_connection(event):
+            start_port = getattr(viewer, "_start_port", None)
+            pipe_visible = getattr(viewer, "_LIVE_PIPE", None) and viewer._LIVE_PIPE.isVisible()
+            if pipe_visible and start_port is not None:
+                # Check if mouse release lands on any existing port
+                scene_pos = event.scenePos()
+                end_port = None
+                for item in viewer.scene().items(scene_pos):
+                    if isinstance(item, PortItem):
+                        end_port = item
+                        break
+
+                if end_port is None:
+                    # Connection dropped onto empty canvas space
+                    p_name = getattr(start_port, "name", "")
+                    p_node_item = getattr(start_port, "node", None)
+                    p_base_node = next((n for n in self.graph.all_nodes() if getattr(n, "view", None) == p_node_item), None)
+                    orig_apply_live_connection(event)
+                    if p_base_node is not None:
+                        self._handle_empty_space_port_drop(p_base_node, p_name, scene_pos.x(), scene_pos.y())
+                    return
+
+            orig_apply_live_connection(event)
+
+        viewer.apply_live_connection = custom_apply_live_connection
+
         # Direct Drag & Drop event handling on the viewer and its viewport
         def custom_drag_enter(event):
             mime = event.mimeData()
@@ -388,10 +468,9 @@ class ProcessFlowEditorWindow(QMainWindow):
                     query_name = text
 
             if query_name:
-                global_pos = event.globalPosition().toPoint() if hasattr(event, "globalPosition") else (event.globalPos() if hasattr(event, "globalPos") else QCursor.pos())
+                local_pt = event.position().toPoint() if hasattr(event, "position") else event.pos()
                 vp = viewer.viewport() if hasattr(viewer, "viewport") and viewer.viewport() else viewer
-                vp_pos = vp.mapFromGlobal(global_pos)
-                scene_pos = viewer.mapToScene(vp_pos)
+                scene_pos = viewer.mapToScene(local_pt)
                 self._handle_query_drop(query_name, scene_pos.x(), scene_pos.y())
                 event.acceptProposedAction()
             else:
@@ -425,7 +504,7 @@ class ProcessFlowEditorWindow(QMainWindow):
         toolbar.addSeparator()
 
         save_btn = QPushButton("💾 Save")
-        save_btn.setToolTip("Save Process Flow")
+        save_btn.setToolTip("Save Process Flow (Ctrl+S)")
         save_btn.clicked.connect(self._on_save)
         toolbar.addWidget(save_btn)
 
@@ -436,13 +515,6 @@ class ProcessFlowEditorWindow(QMainWindow):
         self.run_flow_btn.setToolTip("Execute process flow queries in dependency order")
         self.run_flow_btn.clicked.connect(self._on_run_flow)
         toolbar.addWidget(self.run_flow_btn)
-
-        toolbar.addSeparator()
-
-        delete_btn = QPushButton("🗑 Delete Selected")
-        delete_btn.setToolTip("Delete selected query nodes (or press Delete key)")
-        delete_btn.clicked.connect(self._on_delete_selected)
-        toolbar.addWidget(delete_btn)
 
         toolbar.addSeparator()
 
@@ -536,7 +608,9 @@ class ProcessFlowEditorWindow(QMainWindow):
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("Pan: Drag empty space | Multi-select: Ctrl+Drag | Double-click node to edit SQL.")
 
-        # Shortcuts for Delete
+        # Shortcuts for Save and Delete
+        self.save_shortcut = QShortcut(QKeySequence.Save, self)
+        self.save_shortcut.activated.connect(self._on_save)
         self.del_shortcut = QShortcut(QKeySequence.Delete, self)
         self.del_shortcut.activated.connect(self._on_delete_selected)
         self.backspace_shortcut = QShortcut(QKeySequence(Qt.Key_Backspace), self)
@@ -595,9 +669,8 @@ class ProcessFlowEditorWindow(QMainWindow):
 
         # Add generous padding so nodes are never cut off by canvas edges
         padded_rect = combined_rect.adjusted(-60, -60, 60, 60)
-        all_items_rect = viewer.scene().itemsBoundingRect().adjusted(-1000, -1000, 1000, 1000)
-        viewer.setSceneRect(all_items_rect.united(padded_rect))
-        viewer.fitInView(padded_rect, Qt.KeepAspectRatio)
+        viewer._scene_range = QtCore.QRectF(padded_rect)
+        viewer._update_scene()
 
     def _refresh_left_queries(self) -> None:
         """Update the list of available queries in the left panel."""
@@ -611,15 +684,7 @@ class ProcessFlowEditorWindow(QMainWindow):
         viewer = self.graph.viewer()
 
         def apply_view_state():
-            if view_state and "zoom" in view_state:
-                zoom = view_state.get("zoom")
-                center = view_state.get("center")
-                if zoom is not None:
-                    viewer.set_zoom(zoom)
-                if center and len(center) == 2:
-                    viewer.centerOn(float(center[0]), float(center[1]))
-            else:
-                self._fit_graph_to_canvas()
+            self._fit_graph_to_canvas()
 
         if session_data and "nodes" in session_data and session_data["nodes"]:
             try:
@@ -655,7 +720,7 @@ class ProcessFlowEditorWindow(QMainWindow):
 
         QtCore.QTimer.singleShot(100, apply_view_state)
 
-    def _on_add_import_csv(self) -> None:
+    def _on_add_import_csv(self, pos: Optional[Tuple[float, float]] = None) -> Optional[ImportCsvNode]:
         """Add an Import Query node to the canvas."""
         existing_names = {
             n.name() for n in self.graph.all_nodes()
@@ -667,23 +732,41 @@ class ProcessFlowEditorWindow(QMainWindow):
             node_name = f"Import csv {idx}"
             idx += 1
 
-        all_nodes = self.graph.all_nodes()
-        if all_nodes:
-            max_x = max((n.pos()[0] for n in all_nodes), default=0.0)
-            min_y = min((n.pos()[1] for n in all_nodes), default=0.0)
-            pos = [max_x + 500.0, min_y]
+        if pos is None:
+            all_nodes = self.graph.all_nodes()
+            if all_nodes:
+                max_x = max((n.pos()[0] for n in all_nodes), default=0.0)
+                min_y = min((n.pos()[1] for n in all_nodes), default=0.0)
+                node_pos = [max_x + 500.0, min_y]
+            else:
+                node_pos = [0.0, 0.0]
         else:
-            pos = [0.0, 0.0]
+            node_pos = [pos[0], pos[1]]
 
         inode: ImportCsvNode = self.graph.create_node(
             "reporting.nodes.ImportCsvNode",
             name=node_name,
-            pos=pos,
+            pos=node_pos,
         )
-        self._node_positions[node_name] = (pos[0], pos[1])
-        self._show_import_csv_dialog(inode)
+        self._node_positions[node_name] = (node_pos[0], node_pos[1])
+        accepted = self._show_import_csv_dialog(inode)
+        if not accepted:
+            self.graph.delete_node(inode)
+            self._node_positions.pop(node_name, None)
+            return None
 
-    def _show_import_csv_dialog(self, node: ImportCsvNode) -> None:
+        # Retrieve live node after topology sync
+        live_inode = next(
+            (
+                n for n in self.graph.all_nodes()
+                if (isinstance(n, ImportCsvNode) or getattr(n, "type_", "") == "reporting.nodes.ImportCsvNode")
+                and n.name() == node_name
+            ),
+            None,
+        )
+        return live_inode or inode
+
+    def _show_import_csv_dialog(self, node: ImportCsvNode) -> bool:
         """Show configuration dialog for ImportCsvNode."""
         current_imports = node.get_imports()
         wb_dataset = ""
@@ -698,6 +781,8 @@ class ProcessFlowEditorWindow(QMainWindow):
             node.set_imports(new_imports)
             self._sync_graph_topology()
             self.status_bar.showMessage("Updated CSV import configuration.", 3000)
+            return True
+        return False
 
     def _collect_csv_import_data(self) -> List[dict]:
         """Collect all CSV import definitions from canvas nodes."""
@@ -768,6 +853,137 @@ class ProcessFlowEditorWindow(QMainWindow):
                 if (node.get_property("query_name") or node.name()) == query_name:
                     return node
         return None
+
+    def _handle_empty_space_port_drop(self, source_node: BaseNode, port_name: str, drop_x: float, drop_y: float) -> None:
+        """Handle dragging a connector noodle and releasing it onto empty canvas space."""
+        # 1. QueryNode run_out -> Add Query dialog, create query at drop pos, wire run_out to new query run_in
+        if isinstance(source_node, QueryNode) or getattr(source_node, "type_", "") == "reporting.nodes.QueryNode":
+            if port_name == "run_out":
+                name, ok = QInputDialog.getText(
+                    self,
+                    "Add Query",
+                    "Enter new query name (without .sql extension):",
+                )
+                if ok and name.strip():
+                    query_name = name.strip()
+                    if self.app_controller:
+                        self.app_controller.add_query(query_name)
+                        self.report = self.app_controller.active_report or self.report
+                        self._refresh_left_queries()
+                    new_qnode = self.add_query_to_canvas(query_name, pos=(drop_x, drop_y))
+                    if new_qnode:
+                        # Re-fetch source node after topology sync
+                        src = next((n for n in self.graph.all_nodes() if n.name() == source_node.name()), None)
+                        if src and src.get_output("run_out") and new_qnode.get_input("run_in"):
+                            try:
+                                src.get_output("run_out").connect_to(new_qnode.get_input("run_in"))
+                            except Exception as e:
+                                logger.debug(f"Could not connect run_out to run_in: {e}")
+                return
+
+            # 2. QueryNode run_in -> Import csv configuration dialog, create ImportCsvNode at drop pos, wire to run_in
+            elif port_name == "run_in":
+                orig_node_name = source_node.name()
+                inode = self._on_add_import_csv(pos=(drop_x, drop_y))
+                if inode:
+                    # Update SQL of the downstream query node to include queries for created tables
+                    qinfo = self.report.get_query(orig_node_name)
+                    if qinfo and qinfo.file_path and qinfo.file_path.exists():
+                        existing_sql = qinfo.file_path.read_text(encoding="utf-8")
+                        new_snippets = []
+                        for item in inode.get_imports():
+                            tbl = item.get("output_table", "").strip()
+                            if tbl and tbl not in existing_sql:
+                                snippet = f"# imported csv {tbl}\nselect * from `{tbl}`;"
+                                new_snippets.append(snippet)
+                        if new_snippets:
+                            separator = "\n\n" if existing_sql.strip() else ""
+                            updated_sql = existing_sql.rstrip() + separator + "\n\n".join(new_snippets) + "\n"
+                            qinfo.file_path.write_text(updated_sql, encoding="utf-8")
+                            if self.app_controller:
+                                self.app_controller.scan()
+                                self.report = self.app_controller.active_report or self.report
+                            self._sync_graph_topology()
+
+                    src = next((n for n in self.graph.all_nodes() if n.name() == orig_node_name), None)
+                    live_inode = next(
+                        (
+                            n for n in self.graph.all_nodes()
+                            if (isinstance(n, ImportCsvNode) or getattr(n, "type_", "") == "reporting.nodes.ImportCsvNode")
+                            and n.name() == inode.name()
+                        ),
+                        inode,
+                    )
+                    if src and live_inode and live_inode.get_output("run_out") and src.get_input("run_in"):
+                        try:
+                            live_inode.get_output("run_out").connect_to(src.get_input("run_in"))
+                        except Exception as e:
+                            logger.debug(f"Could not connect import run_out to query run_in: {e}")
+                return
+
+        # 3. Output Table TableBoxNode out_tables -> create output-csv query node
+        if isinstance(source_node, TableBoxNode) or getattr(source_node, "type_", "") == "reporting.nodes.TableBoxNode":
+            box_type = source_node.get_property("box_type") or getattr(getattr(source_node, "view", None), "table_box_type", "")
+            if port_name == "out_tables" and box_type == "Output Tables":
+                raw_tables = getattr(source_node, "raw_tables", [])
+                if not raw_tables:
+                    # Try from property
+                    raw_json = source_node.get_property("raw_tables_json") or "[]"
+                    try:
+                        raw_tables = json.loads(raw_json)
+                    except Exception:
+                        raw_tables = []
+
+                if not raw_tables:
+                    return
+
+                selected_tables: List[str] = []
+                if len(raw_tables) > 1:
+                    dlg = SelectOutputTablesDialog(raw_tables, self)
+                    if dlg.exec() != QDialog.Accepted:
+                        return
+                    selected_tables = dlg.get_selected_tables()
+                    if not selected_tables:
+                        return
+                else:
+                    selected_tables = [raw_tables[0]]
+
+                # Create query node(s) for the selected table(s)
+                created_nodes: List[QueryNode] = []
+                curr_y = drop_y
+                for idx, tbl in enumerate(selected_tables):
+                    clean_tbl_name = tbl.split(".")[-1] if "." in tbl else tbl
+                    # Determine base query name
+                    if len(raw_tables) > 1:
+                        target_name = f"output-csv-{clean_tbl_name}"
+                    else:
+                        target_name = "output-csv"
+
+                    # Ensure unique query name across report
+                    existing_qnames = {q.name for q in self.report.queries}
+                    final_qname = target_name
+                    c = 1
+                    while final_qname in existing_qnames:
+                        c += 1
+                        final_qname = f"{target_name}-{c:02d}"
+
+                    template_sql = (
+                        "# Ouput table to csv\n"
+                        "select * \n"
+                        f"from `{tbl}`\n"
+                        ";\n"
+                    )
+
+                    if self.app_controller:
+                        self.app_controller.add_query(final_qname, template_sql=template_sql)
+                        self.report = self.app_controller.active_report or self.report
+                        self._refresh_left_queries()
+
+                    qnode = self.add_query_to_canvas(final_qname, pos=(drop_x, curr_y))
+                    if qnode:
+                        created_nodes.append(qnode)
+                    curr_y += 180.0
+                return
 
     def _on_report_updated_from_controller(self, new_report: Optional[Report]) -> None:
         """Handle disk modifications detected by the application controller/file watcher."""
@@ -1230,9 +1446,8 @@ class ProcessFlowEditorWindow(QMainWindow):
         import time
         now = time.time()
         last_info = getattr(self, "_last_drop_info", None)
-        if last_info == (query_name, round(scene_x, -1), round(scene_y, -1)):
-            if now - getattr(self, "_last_drop_time", 0) < 0.5:
-                return
+        if last_info and last_info[0] == query_name and (now - getattr(self, "_last_drop_time", 0) < 0.8):
+            return
         self._last_drop_info = (query_name, round(scene_x, -1), round(scene_y, -1))
         self._last_drop_time = now
 
@@ -1292,9 +1507,12 @@ class ProcessFlowEditorWindow(QMainWindow):
                         query_name = text
 
                 if query_name:
-                    global_pos = event.globalPosition().toPoint() if hasattr(event, "globalPosition") else (event.globalPos() if hasattr(event, "globalPos") else QCursor.pos())
+                    local_pt = event.position().toPoint() if hasattr(event, "position") else event.pos()
                     vp = viewport if viewport else viewer
-                    vp_pos = vp.mapFromGlobal(global_pos)
+                    if watched != vp and hasattr(vp, "mapFrom"):
+                        vp_pos = vp.mapFrom(watched, local_pt)
+                    else:
+                        vp_pos = local_pt
                     scene_pos = viewer.mapToScene(vp_pos)
                     self._handle_query_drop(query_name, scene_pos.x(), scene_pos.y())
                     event.acceptProposedAction()

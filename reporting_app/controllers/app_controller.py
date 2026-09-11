@@ -236,8 +236,8 @@ class AppController(QObject):
             logger.error(f"Failed to remove report folder {rep.folder_path}: {e}")
             return False
 
-    def add_process_flow(self, flow_name: str) -> Optional[ProcessFlowInfo]:
-        """Create a new process flow in the active report."""
+    def add_process_flow(self, flow_name: str, source_flow_name: Optional[str] = None) -> Optional[ProcessFlowInfo]:
+        """Create a new process flow in the active report, optionally cloning from an existing flow."""
         if not self.active_report:
             return None
 
@@ -262,6 +262,16 @@ class AppController(QObject):
                 "csv_filenames": {},
                 "graph_session": {},
             }
+            if source_flow_name:
+                src_info = self.active_report.get_process_flow(source_flow_name)
+                if src_info and src_info.file_path.exists():
+                    try:
+                        src_data = json.loads(src_info.file_path.read_text(encoding="utf-8"))
+                        data.update(src_data)
+                        data["flow_name"] = clean_name
+                        data["report_name"] = self.active_report.name
+                    except Exception as e:
+                        logger.error(f"Failed to clone flow data from {source_flow_name}: {e}")
             flow_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
         self.scan()

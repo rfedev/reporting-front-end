@@ -1,2 +1,2 @@
 -- Query: test-query
-SELECT * from `link-to-cloud.test-dataset.test-import`;
+SELECT * from `link-to-cloud.test_dataset.test_import_csv`;

@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
     QFileDialog,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -28,7 +29,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from NodeGraphQt import NodeGraph
+from NodeGraphQt import BaseNode, NodeGraph
 from NodeGraphQt.constants import PipeEnum
 from NodeGraphQt.qgraphics.pipe import PipeItem
 
@@ -47,12 +48,30 @@ logger = logging.getLogger(__name__)
 class ImportCsvDialog(QDialog):
     """Dialog window to configure CSV file import(s) into BigQuery table(s)."""
 
-    def __init__(self, initial_imports: Optional[List[dict]] = None, parent: Optional[QWidget] = None):
+    def __init__(
+        self,
+        initial_imports: Optional[List[dict]] = None,
+        workbench_dataset: str = "",
+        parent: Optional[QWidget] = None,
+    ):
         super().__init__(parent)
         self.setWindowTitle("Import CSV Configuration")
-        self.resize(650, 420)
+        self.resize(650, 480)
+        self.workbench_dataset = workbench_dataset.strip()
         self.rows: List[dict] = []
         self._build_ui(initial_imports or [])
+
+    def _compute_auto_table(self, file_path: str) -> str:
+        """Derive projectid.dataset.csvtablename from the CSV file path and workbench dataset."""
+        if not file_path:
+            return ""
+        stem = Path(file_path).stem
+        clean_stem = "".join(c if c.isalnum() or c == "_" else "_" for c in stem)
+        if self.workbench_dataset:
+            wb_prefix = self.workbench_dataset.rstrip(".") + "."
+        else:
+            wb_prefix = "projectid.dataset."
+        return f"{wb_prefix}{clean_stem}"
 
     def _build_ui(self, initial_imports: List[dict]):
         main_layout = QVBoxLayout(self)
@@ -76,8 +95,8 @@ class ImportCsvDialog(QDialog):
         # Bottom buttons
         bottom_bar = QHBoxLayout()
         add_btn = QPushButton("➕ Add csv")
-        add_btn.setToolTip("Add another CSV import file")
-        add_btn.clicked.connect(self._add_row)
+        add_btn.setToolTip("Add another CSV import section")
+        add_btn.clicked.connect(lambda: self._add_row())
         bottom_bar.addWidget(add_btn)
         bottom_bar.addStretch()
 
@@ -102,17 +121,43 @@ class ImportCsvDialog(QDialog):
             self._add_row()
 
     def _add_row(self, csv_path: str = "", has_headers: bool = True, output_table: str = ""):
-        row_widget = QWidget()
-        row_layout = QVBoxLayout(row_widget)
-        row_layout.setContentsMargins(8, 8, 8, 8)
-        row_widget.setStyleSheet("border: 1px solid #555; border-radius: 4px;")
+        sec_num = len(self.rows) + 1
+        section_box = QGroupBox(f"CSV Import #{sec_num}", self.container)
+        section_box.setStyleSheet(
+            "QGroupBox { font-weight: bold; border: 1px solid #555; border-radius: 6px; margin-top: 10px; padding: 12px; }"
+            "QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; color: #ddd; }"
+        )
+        row_layout = QVBoxLayout(section_box)
+        row_layout.setSpacing(10)
 
-        # Row 1: CSV file path + Browse + Headers checkbox + Delete (if not first row)
+        # Row 1: CSV file path + Browse + Headers checkbox + Delete
         r1 = QHBoxLayout()
         r1.addWidget(QLabel("CSV File:"))
         path_edit = QLineEdit(csv_path)
         path_edit.setPlaceholderText("Select or enter CSV file path...")
         r1.addWidget(path_edit)
+
+        headers_cb = QCheckBox("Headers")
+        headers_cb.setChecked(has_headers)
+
+        # Row 2: Output table text box
+        r2 = QHBoxLayout()
+        r2.addWidget(QLabel("Output Table:"))
+        table_edit = QLineEdit(output_table)
+        table_edit.setPlaceholderText("projectid.dataset.tablename")
+        r2.addWidget(table_edit)
+
+        # Auto-population when CSV file is selected or changed
+        def on_path_changed(new_path: str):
+            curr_table = table_edit.text().strip()
+            # If table is empty or matches previous auto-populated value, update it
+            if not curr_table or getattr(table_edit, "_is_auto_populated", False):
+                auto_val = self._compute_auto_table(new_path)
+                if auto_val:
+                    table_edit.setText(auto_val)
+                    table_edit._is_auto_populated = True
+
+        path_edit.textChanged.connect(on_path_changed)
 
         browse_btn = QPushButton("Browse...")
         def pick_file():
@@ -121,45 +166,50 @@ class ImportCsvDialog(QDialog):
             )
             if selected:
                 path_edit.setText(selected)
+                auto_val = self._compute_auto_table(selected)
+                if auto_val:
+                    table_edit.setText(auto_val)
+                    table_edit._is_auto_populated = True
         browse_btn.clicked.connect(pick_file)
         r1.addWidget(browse_btn)
-
-        headers_cb = QCheckBox("Headers")
-        headers_cb.setChecked(has_headers)
         r1.addWidget(headers_cb)
 
-        del_btn = None
-        if len(self.rows) > 0:
-            del_btn = QPushButton("🗑")
-            del_btn.setToolTip("Delete this import row")
-            del_btn.setFixedWidth(32)
-            r1.addWidget(del_btn)
+        del_btn = QPushButton("🗑")
+        del_btn.setToolTip("Remove this CSV import section")
+        del_btn.setFixedWidth(32)
+        r1.addWidget(del_btn)
 
         row_layout.addLayout(r1)
-
-        # Row 2: Output table text box
-        r2 = QHBoxLayout()
-        r2.addWidget(QLabel("Output Table:"))
-        table_edit = QLineEdit(output_table)
-        table_edit.setPlaceholderText("project-id.dataset_id.table_id")
-        r2.addWidget(table_edit)
         row_layout.addLayout(r2)
 
         row_data = {
-            "widget": row_widget,
+            "widget": section_box,
             "path_edit": path_edit,
             "headers_cb": headers_cb,
             "table_edit": table_edit,
+            "del_btn": del_btn,
         }
         self.rows.append(row_data)
-        self.container_layout.addWidget(row_widget)
+        self.container_layout.addWidget(section_box)
+        section_box.show()
+        self.container.adjustSize()
 
-        if del_btn:
-            def remove_this_row():
-                if row_data in self.rows:
-                    self.rows.remove(row_data)
-                    row_widget.deleteLater()
-            del_btn.clicked.connect(remove_this_row)
+        def remove_this_row():
+            if row_data in self.rows:
+                self.rows.remove(row_data)
+                section_box.setParent(None)
+                section_box.deleteLater()
+                self._update_section_titles()
+                self.container.adjustSize()
+
+        del_btn.clicked.connect(remove_this_row)
+        self._update_section_titles()
+
+    def _update_section_titles(self):
+        for idx, r in enumerate(self.rows):
+            r["widget"].setTitle(f"CSV Import #{idx + 1}")
+            # Only allow deleting if more than 1 section
+            r["del_btn"].setEnabled(len(self.rows) > 1)
 
     def get_imports(self) -> List[dict]:
         results = []
@@ -338,8 +388,10 @@ class ProcessFlowEditorWindow(QMainWindow):
                     query_name = text
 
             if query_name:
-                pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
-                scene_pos = viewer.mapToScene(pos)
+                global_pos = event.globalPosition().toPoint() if hasattr(event, "globalPosition") else (event.globalPos() if hasattr(event, "globalPos") else QCursor.pos())
+                vp = viewer.viewport() if hasattr(viewer, "viewport") and viewer.viewport() else viewer
+                vp_pos = vp.mapFromGlobal(global_pos)
+                scene_pos = viewer.mapToScene(vp_pos)
                 self._handle_query_drop(query_name, scene_pos.x(), scene_pos.y())
                 event.acceptProposedAction()
             else:
@@ -403,7 +455,8 @@ class ProcessFlowEditorWindow(QMainWindow):
 
         # Appearance dropdown menu button
         self.appearance_btn = QToolButton(self)
-        self.appearance_btn.setText("Appearance")
+        self.appearance_btn.setText("Appearance ☰")
+        self.appearance_btn.setStyleSheet("QToolButton::menu-indicator { image: none; width: 0px; }")
         self.appearance_btn.setPopupMode(QToolButton.InstantPopup)
         appearance_menu = QMenu(self.appearance_btn)
 
@@ -521,21 +574,29 @@ class ProcessFlowEditorWindow(QMainWindow):
                 node.set_display_mode(self.show_full_table_names)
 
     def _fit_graph_to_canvas(self) -> None:
-        """Fit all nodes into the available canvas taking into account panel visibility."""
+        """Fit nodes into the available canvas.
+
+        If nodes are selected, fits around selected nodes.
+        If nothing is selected, fits around all nodes.
+        """
         viewer = self.graph.viewer()
-        nodes = self.graph.selected_nodes() or self.graph.all_nodes()
+        selected = self.graph.selected_nodes()
+        nodes = selected if selected else self.graph.all_nodes()
         if not nodes:
             return
 
-        node_items = [n.view for n in nodes]
+        node_items = [n.view for n in nodes if hasattr(n, "view") and n.view]
+        if not node_items:
+            return
+
         combined_rect = viewer._combined_rect(node_items)
         if combined_rect.isNull() or combined_rect.isEmpty():
             return
 
         # Add generous padding so nodes are never cut off by canvas edges
         padded_rect = combined_rect.adjusted(-60, -60, 60, 60)
-        viewer._scene_range = QtCore.QRectF(padded_rect)
-        viewer.setSceneRect(padded_rect)
+        all_items_rect = viewer.scene().itemsBoundingRect().adjusted(-1000, -1000, 1000, 1000)
+        viewer.setSceneRect(all_items_rect.united(padded_rect))
         viewer.fitInView(padded_rect, Qt.KeepAspectRatio)
 
     def _refresh_left_queries(self) -> None:
@@ -625,7 +686,13 @@ class ProcessFlowEditorWindow(QMainWindow):
     def _show_import_csv_dialog(self, node: ImportCsvNode) -> None:
         """Show configuration dialog for ImportCsvNode."""
         current_imports = node.get_imports()
-        dialog = ImportCsvDialog(initial_imports=current_imports, parent=self)
+        wb_dataset = ""
+        if self.flow_controller and getattr(self.flow_controller, "repo", None):
+            wb_dataset = self.flow_controller.repo.get_workbench_dataset()
+        elif self.app_controller and getattr(self.app_controller, "repo", None):
+            wb_dataset = self.app_controller.repo.get_workbench_dataset()
+
+        dialog = ImportCsvDialog(initial_imports=current_imports, workbench_dataset=wb_dataset, parent=self)
         if dialog.exec() == QDialog.Accepted:
             new_imports = dialog.get_imports()
             node.set_imports(new_imports)
@@ -633,7 +700,7 @@ class ProcessFlowEditorWindow(QMainWindow):
             self.status_bar.showMessage("Updated CSV import configuration.", 3000)
 
     def _collect_csv_import_data(self) -> List[dict]:
-        """Collect all CSV import definitions from canvas nodes or persisted flow controller data."""
+        """Collect all CSV import definitions from canvas nodes."""
         data = []
         for node in self.graph.all_nodes():
             if isinstance(node, ImportCsvNode) or getattr(node, "type_", "") == "reporting.nodes.ImportCsvNode":
@@ -641,10 +708,6 @@ class ProcessFlowEditorWindow(QMainWindow):
                     "node_name": node.name(),
                     "items": node.get_imports(),
                 })
-        if not data:
-            saved = self.flow_controller.get_csv_imports()
-            if saved:
-                data = saved
         return data
 
     def _sync_graph_topology(self, additional_query: Optional[str] = None) -> None:
@@ -773,6 +836,30 @@ class ProcessFlowEditorWindow(QMainWindow):
             ledit = QLineEdit(current_csv)
             edits[qname] = ledit
             row.addWidget(ledit)
+
+            browse_btn = QPushButton("Browse...")
+            browse_btn.setToolTip("Select output file or folder destination")
+
+            def make_browse_handler(edit_w=ledit, qn=qname):
+                def on_browse():
+                    cur = edit_w.text().strip()
+                    initial_dir = str(Path(cur).parent) if cur and Path(cur).parent.exists() else str(Path.home())
+                    initial_name = Path(cur).name if cur else f"{qn}.csv"
+                    initial_path = str(Path(initial_dir) / initial_name)
+                    selected_file, _ = QFileDialog.getSaveFileName(
+                        dialog,
+                        f"Select Output CSV Destination for {qn}",
+                        initial_path,
+                        "CSV Files (*.csv);;All Files (*)",
+                    )
+                    if selected_file:
+                        if not selected_file.endswith(".csv"):
+                            selected_file += ".csv"
+                        edit_w.setText(selected_file)
+                return on_browse
+
+            browse_btn.clicked.connect(make_browse_handler(ledit, qname))
+            row.addWidget(browse_btn)
             form_layout.addLayout(row)
 
         dlg_layout.addWidget(form_widget)
@@ -823,26 +910,49 @@ class ProcessFlowEditorWindow(QMainWindow):
                     logger.warning(f"Failed to open with xdg-open: {e}")
 
     def _on_delete_selected(self) -> None:
-        """Delete currently selected query nodes and resynchronize topology.
-        
+        """Delete currently selected query or CSV import nodes and resynchronize topology.
+
         Tables are automatically managed and cannot be directly deleted.
         """
         selected_nodes = self.graph.selected_nodes()
-        query_nodes = [
+        deletable_nodes = [
             n for n in selected_nodes
-            if isinstance(n, QueryNode) or getattr(n, "type_", "") == "reporting.nodes.QueryNode"
+            if isinstance(n, (QueryNode, ImportCsvNode))
+            or getattr(n, "type_", "") in ("reporting.nodes.QueryNode", "reporting.nodes.ImportCsvNode")
         ]
-        if query_nodes:
-            self.graph.delete_nodes(query_nodes)
+        if deletable_nodes:
+            # If any ImportCsvNode is deleted, update saved csv_imports
+            deleted_import_names = {
+                n.name() for n in deletable_nodes
+                if isinstance(n, ImportCsvNode) or getattr(n, "type_", "") == "reporting.nodes.ImportCsvNode"
+            }
+            if deleted_import_names:
+                current_imports = self.flow_controller.get_csv_imports()
+                remaining_imports = [
+                    imp for imp in current_imports
+                    if imp.get("node_name") not in deleted_import_names
+                ]
+                self.flow_controller.set_csv_imports(remaining_imports)
+
+            self.graph.delete_nodes(deletable_nodes)
             self._sync_graph_topology()
-            self.status_bar.showMessage(f"Deleted {len(query_nodes)} query node(s).", 3000)
+            self.status_bar.showMessage(f"Deleted {len(deletable_nodes)} node(s).", 3000)
         elif selected_nodes:
             self.status_bar.showMessage(
-                "Table boxes are managed automatically; only query nodes can be deleted.", 3000
+                "Table boxes are managed automatically; only query and CSV import nodes can be deleted.", 3000
             )
 
     def _auto_layout(self, direction: str = "horizontal") -> None:
-        """Auto-format process flow layout horizontally (left to right) or vertically (top to bottom)."""
+        """Auto-format layout or align objects horizontally or vertically.
+
+        If objects are selected, only aligns the selected objects.
+        If nothing is selected, aligns all objects (queries, table boxes, import nodes).
+        """
+        selected_nodes = self.graph.selected_nodes()
+        if len(selected_nodes) >= 2:
+            self._align_selected_nodes(selected_nodes, direction)
+            return
+
         active_query_names: List[str] = []
         for node in self.graph.all_nodes():
             if isinstance(node, QueryNode) or getattr(node, "type_", "") == "reporting.nodes.QueryNode":
@@ -851,18 +961,67 @@ class ProcessFlowEditorWindow(QMainWindow):
                     active_query_names.append(qname)
 
         active_queries = [self.report.get_query(name) for name in active_query_names if self.report.get_query(name)]
-        if not active_queries:
-            return
+        csv_imports = self._collect_csv_import_data()
 
         new_positions = ProcessFlowGraphBuilder.auto_layout(
             self.graph,
             active_queries,
             direction=direction,
+            import_csv_data=csv_imports,
         )
         self._node_positions.update(new_positions)
         self._fit_graph_to_canvas()
         dir_name = "Horizontal (Left-to-Right)" if direction == "horizontal" else "Vertical (Top-to-Bottom)"
-        self.status_bar.showMessage(f"Auto-formatted layout: {dir_name}", 3000)
+        self.status_bar.showMessage(f"Auto-formatted all objects: {dir_name}", 3000)
+
+    def _align_selected_nodes(self, nodes: List[BaseNode], direction: str) -> None:
+        """Align only the selected objects (tables, query boxes, import nodes)."""
+        if len(nodes) < 2:
+            self.status_bar.showMessage("Please select 2 or more objects to align.", 3000)
+            return
+
+        if direction == "horizontal":
+            sorted_nodes = sorted(nodes, key=lambda n: (n.pos()[0], n.pos()[1]))
+            center_y = sum(n.pos()[1] for n in nodes) / len(nodes)
+            cur_x = min(n.pos()[0] for n in nodes)
+
+            for node in sorted_nodes:
+                w = max(node.view.boundingRect().width() if hasattr(node, "view") and node.view else 180.0, 180.0)
+                actual_x = max(node.pos()[0], cur_x)
+                node.set_pos(actual_x, center_y)
+                self._node_positions[node.name()] = (actual_x, center_y)
+                qname = node.get_property("query_name") if hasattr(node, "get_property") else None
+                if qname:
+                    self._node_positions[qname] = (actual_x, center_y)
+                cur_x = actual_x + w + 50.0
+
+            dir_msg = "Horizontally"
+        else:
+            sorted_nodes = sorted(nodes, key=lambda n: (n.pos()[1], n.pos()[0]))
+            center_x = sum(n.pos()[0] for n in nodes) / len(nodes)
+            cur_y = min(n.pos()[1] for n in nodes)
+
+            for node in sorted_nodes:
+                h = max(node.view.boundingRect().height() if hasattr(node, "view") and node.view else 60.0, 60.0)
+                actual_y = max(node.pos()[1], cur_y)
+                node.set_pos(center_x, actual_y)
+                self._node_positions[node.name()] = (center_x, actual_y)
+                qname = node.get_property("query_name") if hasattr(node, "get_property") else None
+                if qname:
+                    self._node_positions[qname] = (center_x, actual_y)
+                cur_y = actual_y + h + 30.0
+
+            dir_msg = "Vertically"
+
+        # Redraw pipes
+        for item in self.graph.viewer().scene().items():
+            if hasattr(item, "reset"):
+                try:
+                    item.reset()
+                except Exception:
+                    pass
+
+        self.status_bar.showMessage(f"Aligned {len(nodes)} selected object(s) {dir_msg}.", 3000)
 
     def _on_save(self) -> None:
         """Save process flow graph state, parameter defaults, and table display mode."""
@@ -884,9 +1043,11 @@ class ProcessFlowEditorWindow(QMainWindow):
 
         # Capture current zoom and pan center
         viewer = self.graph.viewer()
+        sc = viewer.scene_center()
+        center_coords = [float(sc[0]), float(sc[1])] if isinstance(sc, (list, tuple)) else [float(sc.x()), float(sc.y())]
         view_state = {
             "zoom": viewer.get_zoom(),
-            "center": [viewer.scene_center().x(), viewer.scene_center().y()],
+            "center": center_coords,
         }
         csv_imports = self._collect_csv_import_data()
 
@@ -1075,9 +1236,6 @@ class ProcessFlowEditorWindow(QMainWindow):
         self._last_drop_info = (query_name, round(scene_x, -1), round(scene_y, -1))
         self._last_drop_time = now
 
-        if self.app_controller:
-            self.report = self.app_controller.active_report or self.report
-
         self.add_query_to_canvas(query_name, pos=(scene_x, scene_y))
 
     def _on_graph_data_dropped(self, mimedata, pos) -> None:
@@ -1134,14 +1292,10 @@ class ProcessFlowEditorWindow(QMainWindow):
                         query_name = text
 
                 if query_name:
-                    pos = event.pos()
-                    if watched == viewport:
-                        scene_pos = viewer.mapToScene(pos)
-                    elif viewport:
-                        scene_pos = viewer.mapToScene(viewport.mapFromGlobal(watched.mapToGlobal(pos)))
-                    else:
-                        scene_pos = viewer.mapToScene(pos)
-
+                    global_pos = event.globalPosition().toPoint() if hasattr(event, "globalPosition") else (event.globalPos() if hasattr(event, "globalPos") else QCursor.pos())
+                    vp = viewport if viewport else viewer
+                    vp_pos = vp.mapFromGlobal(global_pos)
+                    scene_pos = viewer.mapToScene(vp_pos)
                     self._handle_query_drop(query_name, scene_pos.x(), scene_pos.y())
                     event.acceptProposedAction()
                     return True

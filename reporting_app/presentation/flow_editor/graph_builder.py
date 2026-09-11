@@ -302,32 +302,45 @@ class ProcessFlowGraphBuilder:
         graph: NodeGraph,
         queries: List[QueryInfo],
         direction: str = "horizontal",
+        import_csv_data: Optional[List[dict]] = None,
     ) -> Dict[str, Tuple[float, float]]:
         """Format the process flow layout horizontally (left to right) or vertically (top to bottom).
 
-        Ensures boxes are spaced apart cleanly according to dependencies without any overlapping.
+        Ensures all boxes (queries, tables, CSV imports) are spaced apart cleanly according to dependencies.
         """
-        if not queries:
-            return {}
-
         # 1. Map nodes by identifier
         all_nodes = graph.all_nodes()
         nodes_by_name = {n.name(): n for n in all_nodes}
 
+        import_nodes = [
+            n for n in all_nodes
+            if getattr(n, "type_", "") == "reporting.nodes.ImportCsvNode"
+            or n.__class__.__name__ == "ImportCsvNode"
+        ]
+
+        if not queries and not import_nodes:
+            return {}
+
         # 2. Build dependency graph (data provenance + execution flow)
         table_producers: Dict[str, str] = {}
+        for inode in import_nodes:
+            out_tables = inode.get_output_tables() if hasattr(inode, "get_output_tables") else []
+            for t in out_tables:
+                table_producers[t] = inode.name()
+
         for q in queries:
             for out_t in q.output_tables:
                 table_producers[out_t] = q.name
 
         query_names = {q.name for q in queries}
+        all_producers = set(query_names) | {inode.name() for inode in import_nodes}
         upstreams: Dict[str, Set[str]] = {q.name: set() for q in queries}
 
         for q in queries:
             # Data dependencies
             for in_t in q.input_tables:
                 prod = table_producers.get(in_t)
-                if prod and prod in query_names and prod != q.name:
+                if prod and prod in all_producers and prod != q.name:
                     upstreams[q.name].add(prod)
 
             # Direct run connection dependencies
@@ -338,7 +351,7 @@ class ProcessFlowGraphBuilder:
                     for port in run_in.connected_ports():
                         up_node = port.node()
                         up_name = up_node.get_property("query_name") if hasattr(up_node, "get_property") else up_node.name()
-                        if up_name in query_names and up_name != q.name:
+                        if up_name in all_producers and up_name != q.name:
                             upstreams[q.name].add(up_name)
 
         # 3. Compute topological ranks for each query (0, 1, 2...)
@@ -348,7 +361,7 @@ class ProcessFlowGraphBuilder:
             for q in queries:
                 ups = upstreams[q.name]
                 if ups:
-                    max_up = max(ranks[u] for u in ups)
+                    max_up = max(ranks.get(u, 0) for u in ups)
                     if ranks[q.name] <= max_up:
                         ranks[q.name] = max_up + 1
                         changed = True
@@ -383,6 +396,24 @@ class ProcessFlowGraphBuilder:
             intra_gap_x = 70.0
             intra_gap_y = 20.0
             query_gap_y = 60.0
+
+            # Place import CSV nodes at rank 0 column if present
+            if import_nodes:
+                imp_cur_y = 0.0
+                max_imp_w = 0.0
+                for inode in import_nodes:
+                    out_box = nodes_by_name.get(f"{inode.name()} [Out]")
+                    w_inode, h_inode = get_node_dims(inode, 180.0, 70.0)
+                    w_out, h_out = get_node_dims(out_box, 200.0, 60.0)
+                    cluster_h = max(h_inode, h_out)
+                    cluster_w = w_inode + (intra_gap_x + w_out if out_box else 0.0)
+                    max_imp_w = max(max_imp_w, cluster_w)
+
+                    new_positions[inode.name()] = (cur_x, imp_cur_y)
+                    if out_box:
+                        new_positions[out_box.name()] = (cur_x + w_inode + intra_gap_x, imp_cur_y)
+                    imp_cur_y += cluster_h + query_gap_y
+                cur_x += max_imp_w + col_gap_x
 
             for r in sorted_ranks:
                 queries_in_rank = rank_groups[r]
@@ -474,6 +505,24 @@ class ProcessFlowGraphBuilder:
             intra_gap_y = 40.0
             query_gap_x = 70.0
 
+            # Place import CSV nodes at rank 0 row if present
+            if import_nodes:
+                imp_cur_x = 0.0
+                max_imp_h = 0.0
+                for inode in import_nodes:
+                    out_box = nodes_by_name.get(f"{inode.name()} [Out]")
+                    w_inode, h_inode = get_node_dims(inode, 180.0, 70.0)
+                    w_out, h_out = get_node_dims(out_box, 200.0, 60.0)
+                    cluster_w = max(w_inode, w_out)
+                    cluster_h = h_inode + (intra_gap_y + h_out if out_box else 0.0)
+                    max_imp_h = max(max_imp_h, cluster_h)
+
+                    new_positions[inode.name()] = (imp_cur_x, cur_y)
+                    if out_box:
+                        new_positions[out_box.name()] = (imp_cur_x, cur_y + h_inode + intra_gap_y)
+                    imp_cur_x += cluster_w + query_gap_x
+                cur_y += max_imp_h + row_gap_y
+
             for r in sorted_ranks:
                 queries_in_rank = rank_groups[r]
                 max_rank_h = 0.0
@@ -561,6 +610,11 @@ class ProcessFlowGraphBuilder:
             node = nodes_by_name.get(node_name)
             if node:
                 node.set_pos(nx, ny)
+
+        # Ensure all existing nodes are tracked in new_positions
+        for node in all_nodes:
+            if node.name() not in new_positions:
+                new_positions[node.name()] = (node.pos()[0], node.pos()[1])
 
         # 5. Redraw pipes
         for item in graph.viewer().scene().items():

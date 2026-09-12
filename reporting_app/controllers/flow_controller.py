@@ -141,24 +141,31 @@ class ProcessFlowController(QObject):
 
         return unique_params
 
-    def get_execution_order(self, graph_session: Optional[Dict[str, Any]] = None) -> List[str]:
-        """Determine topological execution order of queries in the process flow."""
+    def get_node_execution_order(self, graph_session: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        """Determine topological execution order of all executable nodes (queries and import csv nodes).
+        
+        Returns a list of dicts:
+        [{"type": "query", "id": nid, "name": qname}, {"type": "import_csv", "id": nid, "name": iname}]
+        """
         session = graph_session or self.get_graph_session()
         nodes_dict = session.get("nodes", {})
         connections = session.get("connections", [])
 
-        # Map node id to query name
-        id_to_qname: Dict[str, str] = {}
+        exec_nodes: Dict[str, Dict[str, Any]] = {}
         for nid, ndata in nodes_dict.items():
-            if ndata.get("type_") == "reporting.nodes.QueryNode":
+            ntype = ndata.get("type_")
+            if ntype == "reporting.nodes.QueryNode":
                 qname = ndata.get("custom", {}).get("query_name") or ndata.get("name")
-                id_to_qname[nid] = qname
+                exec_nodes[nid] = {"type": "query", "id": nid, "name": qname}
+            elif ntype == "reporting.nodes.ImportCsvNode":
+                iname = ndata.get("name")
+                exec_nodes[nid] = {"type": "import_csv", "id": nid, "name": iname}
 
-        if not id_to_qname:
-            return self.get_query_names()
+        if not exec_nodes:
+            return [{"type": "query", "id": q, "name": q} for q in self.get_query_names()]
 
         # Build dependency graph
-        in_degree: Dict[str, int] = {nid: 0 for nid in id_to_qname}
+        in_degree: Dict[str, int] = {nid: 0 for nid in exec_nodes}
         adj_list: Dict[str, List[str]] = defaultdict(list)
 
         for conn in connections:
@@ -168,7 +175,7 @@ class ProcessFlowController(QObject):
                 out_id, out_port = out_info[0], out_info[1]
                 in_id, in_port = in_info[0], in_info[1]
                 if out_port == "run_out" and in_port == "run_in":
-                    if out_id in id_to_qname and in_id in id_to_qname:
+                    if out_id in exec_nodes and in_id in exec_nodes:
                         adj_list[out_id].append(in_id)
                         in_degree[in_id] += 1
 
@@ -185,11 +192,16 @@ class ProcessFlowController(QObject):
                     queue.append(neighbor)
 
         # Include any remaining nodes (in case of cycles or disconnected components)
-        for nid in id_to_qname:
+        for nid in exec_nodes:
             if nid not in ordered_ids:
                 ordered_ids.append(nid)
 
-        return [id_to_qname[nid] for nid in ordered_ids]
+        return [exec_nodes[nid] for nid in ordered_ids]
+
+    def get_execution_order(self, graph_session: Optional[Dict[str, Any]] = None) -> List[str]:
+        """Determine topological execution order of queries in the process flow."""
+        node_order = self.get_node_execution_order(graph_session)
+        return [item["name"] for item in node_order if item["type"] == "query"]
 
     def save_flow(
         self,

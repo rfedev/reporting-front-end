@@ -3,10 +3,10 @@
 import json
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-from PySide6 import QtCore, QtWidgets
+from typing import Any, Dict, List, Optional, Tuple
+from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import QEvent, QFileSystemWatcher, QObject, QPoint, QPointF, QRectF, QTimer, QUrl, Qt
-from PySide6.QtGui import QCursor, QDesktopServices, QKeySequence, QShortcut, QShowEvent
+from PySide6.QtGui import QAction, QCursor, QDesktopServices, QKeySequence, QShortcut, QShowEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -23,12 +23,14 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QPlainTextEdit,
     QProgressDialog,
     QPushButton,
     QScrollArea,
     QSizePolicy,
     QSplitter,
     QStatusBar,
+    QTextEdit,
     QToolBar,
     QToolButton,
     QVBoxLayout,
@@ -415,6 +417,12 @@ class ProcessFlowEditorWindow(QMainWindow):
         except Exception:
             pass
 
+        try:
+            if self.graph.viewer().scene():
+                self.graph.viewer().scene().selectionChanged.connect(self._update_run_button_state)
+        except Exception as e:
+            logger.debug(f"Could not connect scene selectionChanged: {e}")
+
         # Handle in-place title editing on the node
         def handle_query_title_change(target_node, new_name):
             if getattr(self, "_is_renaming_query", False):
@@ -458,9 +466,18 @@ class ProcessFlowEditorWindow(QMainWindow):
             viewer._last_size = viewer.size()
             QtWidgets.QGraphicsView.resizeEvent(viewer, event)
 
-        viewer.resizeEvent = custom_viewer_resize
+        # Disable default context menu policy on viewer so our custom right click menu takes precedence
+        viewer.setContextMenuPolicy(Qt.CustomContextMenu)
+        if hasattr(viewer, "viewport") and viewer.viewport():
+            viewer.viewport().setContextMenuPolicy(Qt.CustomContextMenu)
 
         def custom_mouse_press(event):
+            if event.button() == Qt.RightButton:
+                map_pos = viewer.mapToScene(event.pos())
+                self._show_canvas_context_menu(event.pos(), map_pos)
+                event.accept()
+                return
+
             if event.button() == Qt.LeftButton:
                 mods = event.modifiers()
                 # If Ctrl held: multi-select marquee mode
@@ -490,6 +507,10 @@ class ProcessFlowEditorWindow(QMainWindow):
             return orig_mouse_press(event)
 
         def custom_mouse_release(event):
+            if event.button() == Qt.RightButton:
+                event.accept()
+                return
+
             if event.button() == Qt.LeftButton and viewer.MMB_state:
                 viewer.MMB_state = False
                 viewer.viewport().unsetCursor()
@@ -598,12 +619,98 @@ class ProcessFlowEditorWindow(QMainWindow):
         viewer.dragMoveEvent = custom_drag_move
         viewer.dropEvent = custom_drop
 
-        if hasattr(viewer, "viewport") and viewer.viewport():
-            viewport = viewer.viewport()
-            viewport.setAcceptDrops(True)
-            viewport.dragEnterEvent = custom_drag_enter
-            viewport.dragMoveEvent = custom_drag_move
-            viewport.dropEvent = custom_drop
+    def _find_executable_node_near(self, scene_pos: QtCore.QPointF) -> Optional[BaseNode]:
+        """Find a QueryNode or ImportCsvNode directly under the given scene point."""
+        viewer = self.graph.viewer()
+        items = viewer.scene().items(scene_pos) if viewer.scene() else []
+        for item in items:
+            # Check if item corresponds to a node view
+            for node in self.graph.all_nodes():
+                if isinstance(node, (QueryNode, ImportCsvNode)) or getattr(node, "type_", "") in ("reporting.nodes.QueryNode", "reporting.nodes.ImportCsvNode"):
+                    if getattr(node, "view", None) == item or (hasattr(item, "topLevelItem") and item.topLevelItem() == getattr(node, "view", None)):
+                        return node
+                    # Also check parents
+                    cur = item
+                    while cur:
+                        if cur == getattr(node, "view", None):
+                            return node
+                        cur = cur.parentItem() if hasattr(cur, "parentItem") else None
+        return None
+
+    def _show_canvas_context_menu(self, viewport_pos: QPoint, scene_pos: QtCore.QPointF) -> None:
+        """Display context menu on canvas right-click with tabulated shortcut keys."""
+        viewer = self.graph.viewer()
+        target_node = self._find_executable_node_near(scene_pos)
+        selected_nodes = self._get_selected_query_nodes()
+
+        menu = QMenu(self)
+
+        def add_menu_item(label: str, shortcut: str, callback) -> QAction:
+            action = menu.addAction(label)
+            if shortcut:
+                action.setShortcut(QKeySequence(shortcut))
+                action.setShortcutVisibleInContextMenu(True)
+            action.triggered.connect(callback)
+            return action
+
+        if target_node:
+            # Right-clicking on a query/import CSV node selects it
+            if target_node not in selected_nodes:
+                self.graph.clear_selection()
+                target_node.set_selected(True)
+                selected_nodes = [target_node]
+                self._update_run_button_state()
+
+            # Query node context menu items
+            add_menu_item("Run Selected Queries", "F5", self.run_selected_queries)
+            run_from_act = menu.addAction("Run From Query")
+            run_from_act.triggered.connect(lambda: self.run_from_query(target_node))
+            add_menu_item("Edit Query", "e", lambda: self._on_node_double_clicked(target_node))
+
+        else:
+            # Empty space context menu
+            has_selected = len(selected_nodes) > 0
+            if not has_selected:
+                add_menu_item("Run Process Flow", "F5", self._on_run_flow)
+            else:
+                add_menu_item("Run Selected", "F5", self.run_selected_queries)
+
+            menu.addSeparator()
+            add_menu_item("Create Query", "q", lambda: self._on_create_query_at_pos(scene_pos))
+            add_menu_item("Import CSV", "i", lambda: self._on_add_import_csv(pos=(scene_pos.x(), scene_pos.y())))
+
+            menu.addSeparator()
+            add_menu_item("Auto Layout H", "h", lambda: self._auto_layout("horizontal"))
+            add_menu_item("Auto Layout V", "v", lambda: self._auto_layout("vertical"))
+            add_menu_item("Fit Graph", "f", self._fit_graph_to_canvas)
+
+            menu.addSeparator()
+            add_menu_item("Deselect", "d", self._on_deselect_all)
+
+        global_pt = viewer.viewport().mapToGlobal(viewport_pos) if hasattr(viewer, "viewport") and viewer.viewport() else viewer.mapToGlobal(viewport_pos)
+        menu.exec(global_pt)
+
+    def _on_create_query_at_pos(self, scene_pos: QtCore.QPointF) -> None:
+        """Prompt to create a new query node at specified scene position."""
+        name, ok = QInputDialog.getText(
+            self,
+            "Create Query",
+            "Enter new query name (without .sql extension):",
+        )
+        if ok and name.strip():
+            query_name = name.strip()
+            if self.app_controller:
+                self.app_controller.add_query(query_name)
+                self.report = self.app_controller.active_report or self.report
+                self._refresh_left_queries()
+            self.add_query_to_canvas(query_name, pos=(scene_pos.x(), scene_pos.y()))
+
+    def _on_deselect_all(self) -> None:
+        """Deselect all nodes and items in the scene."""
+        self.graph.clear_selection()
+        if self.graph.viewer().scene():
+            self.graph.viewer().scene().clearSelection()
+        self._update_run_button_state()
 
     def _build_ui(self) -> None:
         # Toolbar
@@ -629,8 +736,8 @@ class ProcessFlowEditorWindow(QMainWindow):
 
         self.run_flow_btn = QPushButton("▶ Run Flow")
         self.run_flow_btn.setStyleSheet("font-weight: bold; background-color: #2b78e4; color: white;")
-        self.run_flow_btn.setToolTip("Execute process flow queries in dependency order")
-        self.run_flow_btn.clicked.connect(self._on_run_flow)
+        self.run_flow_btn.setToolTip("Execute process flow queries in dependency order (F5)")
+        self.run_flow_btn.clicked.connect(self._on_run_flow_button_clicked)
         toolbar.addWidget(self.run_flow_btn)
 
         toolbar.addSeparator()
@@ -1744,19 +1851,83 @@ class ProcessFlowEditorWindow(QMainWindow):
             logger.debug(f"Error saving splitter sizes on close: {e}")
         super().closeEvent(event)
 
+    def _get_selected_query_nodes(self) -> List[BaseNode]:
+        """Return list of selected QueryNode and ImportCsvNode objects."""
+        return [
+            n for n in self.graph.selected_nodes()
+            if isinstance(n, (QueryNode, ImportCsvNode))
+            or getattr(n, "type_", "") in ("reporting.nodes.QueryNode", "reporting.nodes.ImportCsvNode")
+        ]
+
+    def _update_run_button_state(self) -> None:
+        """Update Run Flow button label based on whether query/import nodes are selected."""
+        if not hasattr(self, "run_flow_btn"):
+            return
+        selected_nodes = self._get_selected_query_nodes()
+        if selected_nodes:
+            self.run_flow_btn.setText("▶ Run Selected")
+            self.run_flow_btn.setToolTip("Execute only the selected queries/imports in dependency order (F5)")
+        else:
+            self.run_flow_btn.setText("▶ Run Flow")
+            self.run_flow_btn.setToolTip("Execute process flow queries in dependency order (F5)")
+
+    def _on_run_flow_button_clicked(self) -> None:
+        """Handler for toolbar Run button: runs selected if any are selected, else runs full flow."""
+        selected_nodes = self._get_selected_query_nodes()
+        if selected_nodes:
+            self.run_selected_queries()
+        else:
+            self._on_run_flow()
+
+    def run_selected_queries(self) -> None:
+        """Run only the currently selected query and import CSV nodes in topological dependency order."""
+        selected_nodes = self._get_selected_query_nodes()
+        if not selected_nodes:
+            QMessageBox.information(self, "No Selection", "Please select at least one query or CSV import node to run.")
+            return
+
+        session_data = self.graph.serialize_session()
+        node_order = self.flow_controller.get_node_execution_order(session_data)
+
+        # Filter topological order to only include selected nodes
+        selected_ids = {n.id for n in selected_nodes}
+        filtered_order = [item for item in node_order if item["id"] in selected_ids]
+        if not filtered_order:
+            # Fallback by name if id match fails
+            selected_names = {n.name() for n in selected_nodes}
+            filtered_order = [item for item in node_order if item["name"] in selected_names]
+
+        self._execute_ordered_nodes(filtered_order, context_title="Selected Queries")
+
+    def run_from_query(self, start_node: BaseNode) -> None:
+        """Run the flow onwards from start_node (inclusive), skipping prior nodes in topological order."""
+        session_data = self.graph.serialize_session()
+        node_order = self.flow_controller.get_node_execution_order(session_data)
+
+        # Find start index in topological order
+        start_idx = -1
+        for idx, item in enumerate(node_order):
+            if item["id"] == start_node.id or item["name"] == start_node.name():
+                start_idx = idx
+                break
+
+        if start_idx == -1:
+            QMessageBox.warning(self, "Error", f"Could not determine order for '{start_node.name()}'.")
+            return
+
+        downstream_order = node_order[start_idx:]
+        self._execute_ordered_nodes(downstream_order, context_title=f"Flow From '{start_node.name()}'")
+
     def _on_run_flow(self) -> None:
         """Execute all CSV imports and queries in the process flow."""
         session_data = self.graph.serialize_session()
-        queries_order = self.flow_controller.get_execution_order(session_data)
+        node_order = self.flow_controller.get_node_execution_order(session_data)
+        self._execute_ordered_nodes(node_order, context_title=f"Process flow '{self.flow_controller.flow_name}'")
 
-        # Check if there are any executable elements (queries or CSV imports)
-        has_imports = any(
-            isinstance(n, ImportCsvNode) or getattr(n, "type_", "") == "reporting.nodes.ImportCsvNode"
-            for n in self.graph.all_nodes()
-        )
-
-        if not queries_order and not has_imports:
-            QMessageBox.information(self, "Empty Flow", "There are no queries or CSV imports in this process flow to run.")
+    def _execute_ordered_nodes(self, ordered_items: List[Dict[str, Any]], context_title: str = "Process Flow") -> None:
+        """Execute the specified ordered list of nodes (both CSV imports and queries)."""
+        if not ordered_items:
+            QMessageBox.information(self, "Empty Flow", "There are no queries or CSV imports to run.")
             return
 
         # Consolidate parameters from parameter overlay directly
@@ -1768,7 +1939,6 @@ class ProcessFlowEditorWindow(QMainWindow):
             self.flow_controller.parameter_defaults.update(param_values)
             filename_date = self.param_overlay.get_filename_date()
         if not filename_date:
-            # Fallback: check selected_filename_date_param or any date param in param_values
             sel_param = self.flow_controller.get_selected_filename_date_param()
             if sel_param and sel_param in param_values:
                 filename_date = param_values[sel_param]
@@ -1785,27 +1955,37 @@ class ProcessFlowEditorWindow(QMainWindow):
         results_log = []
         errors = []
 
-        # 1. Run CSV Imports if present
-        for node in self.graph.all_nodes():
-            if isinstance(node, ImportCsvNode) or getattr(node, "type_", "") == "reporting.nodes.ImportCsvNode":
-                imp_items = node.get_imports()
-                for item in imp_items:
-                    c_path = item.get("csv_path", "").strip()
-                    d_table = item.get("output_table", "").strip()
-                    headers = item.get("has_headers", True)
+        total_steps = len(ordered_items)
+        self.status_bar.showMessage(f"Running {context_title} ({total_steps} step(s))...")
+
+        for idx, item in enumerate(ordered_items, start=1):
+            ntype = item.get("type")
+            nid = item.get("id")
+            nname = item.get("name")
+
+            if ntype == "import_csv":
+                # Find matching ImportCsvNode
+                inode = next((n for n in self.graph.all_nodes() if n.id == nid or n.name() == nname), None)
+                if not inode or not (isinstance(inode, ImportCsvNode) or getattr(inode, "type_", "") == "reporting.nodes.ImportCsvNode"):
+                    continue
+
+                imp_items = inode.get_imports()
+                for imp in imp_items:
+                    c_path = imp.get("csv_path", "").strip()
+                    d_table = imp.get("output_table", "").strip()
+                    headers = imp.get("has_headers", True)
                     if not c_path or not d_table:
                         continue
                     if filename_date:
                         c_path = format_filename_with_date(c_path, filename_date)
 
-                    # Resolve relative path or filename against report inputs directory
                     resolved_csv = Path(c_path)
                     if not resolved_csv.is_absolute() and self.report and self.report.folder_path:
                         candidate = self.report.folder_path / "inputs" / resolved_csv
                         if candidate.exists() or not resolved_csv.exists():
                             resolved_csv = candidate
 
-                    self.status_bar.showMessage(f"Importing {resolved_csv.name} -> {d_table}...")
+                    self.status_bar.showMessage(f"[{idx}/{total_steps}] Importing {resolved_csv.name} -> {d_table}...")
                     QtWidgets.QApplication.processEvents()
                     try:
                         imp_res = run_bigquery_import_csv(
@@ -1815,64 +1995,62 @@ class ProcessFlowEditorWindow(QMainWindow):
                         )
                         row_cnt = imp_res.get("row_count")
                         cnt_str = f"{row_cnt:,} rows" if row_cnt is not None else "completed"
-                        results_log.append(f"📥 Imported CSV '{c_path}' into '{d_table}' ({cnt_str})")
+                        results_log.append(f"[{idx}/{total_steps}] 📥 Imported CSV '{c_path}' into '{d_table}' ({cnt_str})")
                     except Exception as e:
                         err_msg = f"Import CSV failed for {d_table}: {e}"
                         errors.append(err_msg)
-                        results_log.append(f"❌ {err_msg}")
+                        results_log.append(f"[{idx}/{total_steps}] ❌ {err_msg}")
                         break
                 if errors:
                     break
 
-        if not errors:
-            self.status_bar.showMessage(f"Running process flow queries ({len(queries_order)} queries)...")
+            elif ntype == "query":
+                qname = nname
+                qinfo = self.report.get_query(qname)
+                if not qinfo or not qinfo.file_path.exists():
+                    err = f"Query '{qname}' SQL file not found."
+                    errors.append(err)
+                    results_log.append(f"[{idx}/{total_steps}] ❌ {qname}: {err}")
+                    break
 
-        for idx, qname in enumerate(queries_order, start=1):
-            qinfo = self.report.get_query(qname)
-            if not qinfo or not qinfo.file_path.exists():
-                err = f"Query '{qname}' SQL file not found."
-                errors.append(err)
-                results_log.append(f"[{idx}/{len(queries_order)}] ❌ {qname}: {err}")
-                break
+                self.status_bar.showMessage(f"[{idx}/{total_steps}] Running {qname}...")
+                QtWidgets.QApplication.processEvents()
 
-            self.status_bar.showMessage(f"[{idx}/{len(queries_order)}] Running {qname}...")
-            QtWidgets.QApplication.processEvents()
-
-            try:
-                custom_csv = csv_map.get(qname)
-                if custom_csv and filename_date:
-                    custom_csv = format_filename_with_date(custom_csv, filename_date)
-                res = run_bigquery_script(
-                    sql_script_path=qinfo.file_path,
-                    report_name=self.report.name,
-                    outputs_dir=outputs_dir,
-                    parameters=param_values,
-                    output_filename=custom_csv,
-                )
-                if res.get("is_export"):
-                    results_log.append(f"[{idx}/{len(queries_order)}] ✅ {qname}: Exported {res.get('row_count', 0):,} rows to {res.get('output_file')}")
-                else:
-                    results_log.append(f"[{idx}/{len(queries_order)}] ✅ {qname}: Executed table creation/update in BigQuery")
-            except Exception as e:
-                err_msg = str(e)
-                errors.append(f"{qname}: {err_msg}")
-                results_log.append(f"[{idx}/{len(queries_order)}] ❌ {qname}: Failed ({err_msg})")
-                break
+                try:
+                    custom_csv = csv_map.get(qname)
+                    if custom_csv and filename_date:
+                        custom_csv = format_filename_with_date(custom_csv, filename_date)
+                    res = run_bigquery_script(
+                        sql_script_path=qinfo.file_path,
+                        report_name=self.report.name,
+                        outputs_dir=outputs_dir,
+                        parameters=param_values,
+                        output_filename=custom_csv,
+                    )
+                    if res.get("is_export"):
+                        results_log.append(f"[{idx}/{total_steps}] ✅ {qname}: Exported {res.get('row_count', 0):,} rows to {res.get('output_file')}")
+                    else:
+                        results_log.append(f"[{idx}/{total_steps}] ✅ {qname}: Executed table creation/update in BigQuery")
+                except Exception as e:
+                    err_msg = str(e)
+                    errors.append(f"{qname}: {err_msg}")
+                    results_log.append(f"[{idx}/{total_steps}] ❌ {qname}: Failed ({err_msg})")
+                    break
 
         summary_text = "\n".join(results_log)
-        self.status_bar.showMessage("Process flow execution finished.", 5000)
+        self.status_bar.showMessage(f"{context_title} execution finished.", 5000)
 
         if errors:
             QMessageBox.critical(
                 self,
-                "Process Flow Execution Error",
+                f"{context_title} Execution Error",
                 f"Execution failed with errors:\n\n{summary_text}\n\nNote: If authentication failed, please run 'gcloud auth application-default login' in terminal.",
             )
         else:
             QMessageBox.information(
                 self,
-                "Process Flow Completed",
-                f"Process flow '{self.flow_controller.flow_name}' completed successfully!\n\n{summary_text}",
+                f"{context_title} Completed",
+                f"{context_title} completed successfully!\n\n{summary_text}",
             )
 
     # Left panel query management callbacks
@@ -2019,9 +2197,45 @@ class ProcessFlowEditorWindow(QMainWindow):
                     self.param_overlay.move(14, 14)
                     self.param_overlay.raise_()
             elif event.type() == QEvent.KeyPress:
-                if event.key() == Qt.Key_Delete:
+                key = event.key()
+                # Do not intercept typing if focus is on a text editor / line edit
+                focus_w = QtWidgets.QApplication.focusWidget()
+                if isinstance(focus_w, (QLineEdit, QTextEdit, QPlainTextEdit)):
+                    return super().eventFilter(watched, event)
+
+                if key == Qt.Key_Delete:
                     self._on_delete_selected()
                     return True
+                elif key == Qt.Key_F5:
+                    self._on_run_flow_button_clicked()
+                    return True
+                elif key == Qt.Key_Q:
+                    cursor_pos = viewer.mapFromGlobal(QCursor.pos())
+                    scene_pos = viewer.mapToScene(cursor_pos)
+                    self._on_create_query_at_pos(scene_pos)
+                    return True
+                elif key == Qt.Key_I:
+                    cursor_pos = viewer.mapFromGlobal(QCursor.pos())
+                    scene_pos = viewer.mapToScene(cursor_pos)
+                    self._on_add_import_csv(pos=(scene_pos.x(), scene_pos.y()))
+                    return True
+                elif key == Qt.Key_H:
+                    self._auto_layout("horizontal")
+                    return True
+                elif key == Qt.Key_V:
+                    self._auto_layout("vertical")
+                    return True
+                elif key == Qt.Key_F:
+                    self._fit_graph_to_canvas()
+                    return True
+                elif key == Qt.Key_D:
+                    self._on_deselect_all()
+                    return True
+                elif key == Qt.Key_E:
+                    selected = self._get_selected_query_nodes()
+                    if selected:
+                        self._on_node_double_clicked(selected[0])
+                        return True
             elif event.type() in (QEvent.DragEnter, QEvent.DragMove):
                 mime = event.mimeData()
                 if (

@@ -553,7 +553,7 @@ class ProcessFlowEditorWindow(QMainWindow):
                 pos = event.scenePos()
                 items = viewer._items_near(pos, None, 5, 5)
                 has_port = any(isinstance(it, PortItem) for it in items)
-                has_node = any(isinstance(it, AbstractNodeItem) for it in items)
+                has_node = any(hasattr(it, "node") or hasattr(it, "type_") for it in items if not isinstance(it, PipeItem))
                 pipe_item = next((it for it in items if isinstance(it, PipeItem)), None)
                 # If clicking on a pipe and NOT directly on a port or node, do not allow pipe detachment
                 if pipe_item and not has_port and not has_node:
@@ -577,9 +577,9 @@ class ProcessFlowEditorWindow(QMainWindow):
             if not isinstance(selected_port, PortItem):
                 return
 
-            # Only allow starting a manual connection from run_out or run_in ports!
+            # Allow starting a manual connection from run_out, run_in, or out_tables (for output table dragging)
             port_name = getattr(selected_port, "name", "")
-            if port_name not in ("run_out", "run_in"):
+            if port_name not in ("run_out", "run_in", "out_tables"):
                 return
 
             if viewer._origin_pos is None and selected_port:
@@ -604,8 +604,7 @@ class ProcessFlowEditorWindow(QMainWindow):
             pipe_visible = getattr(viewer, "_LIVE_PIPE", None) and viewer._LIVE_PIPE.isVisible()
             if pipe_visible and start_port is not None:
                 start_name = getattr(start_port, "name", "")
-                # Only run_out or run_in can initiate connections
-                if start_name not in ("run_out", "run_in"):
+                if start_name not in ("run_out", "run_in", "out_tables"):
                     viewer.end_live_connection()
                     return
 
@@ -628,7 +627,7 @@ class ProcessFlowEditorWindow(QMainWindow):
                     return
                 else:
                     # Connection dropped onto an existing port:
-                    # Enforce that user can ONLY connect run_out <-> run_in
+                    # Enforce that user can ONLY connect run_out <-> run_in (no connecting out_tables to random ports)
                     end_name = getattr(end_port, "name", "")
                     valid_connection = (
                         (start_name == "run_out" and end_name == "run_in")
@@ -637,7 +636,7 @@ class ProcessFlowEditorWindow(QMainWindow):
                     if not valid_connection:
                         # Reject disallowed connection
                         viewer.end_live_connection()
-                        self.status_bar.showMessage("Execution connections are only allowed between run_out and run_in.", 3000)
+                        self.status_bar.showMessage("Manual execution connections are only allowed between run_out and run_in.", 3000)
                         return
 
             orig_apply_live_connection(event)
@@ -1120,13 +1119,19 @@ class ProcessFlowEditorWindow(QMainWindow):
             for cf in outputs_dir.glob("*.csv"):
                 existing_csvs.add(cf.name)
 
+        csv_topology_changed = False
         for q in self.report.queries:
             if q.file_path and q.file_path.exists():
                 csv_files = sync_query_csv_comments(q.file_path, existing_csvs)
                 existing_csvs.update(csv_files)
-                if csv_files:
+                if csv_files != q.output_csv_tables:
                     q.output_csv_tables = csv_files
-                    self.flow_controller.set_csv_filename(q.name, ", ".join(csv_files))
+                    if csv_files:
+                        self.flow_controller.set_csv_filename(q.name, ", ".join(csv_files))
+                    else:
+                        flow_csvs = self.flow_controller.get_csv_filenames()
+                        flow_csvs.pop(q.name, None)
+                    csv_topology_changed = True
 
         # Update any active CSV nodes on canvas immediately
         for node in self.graph.all_nodes():
@@ -1138,6 +1143,10 @@ class ProcessFlowEditorWindow(QMainWindow):
                     if qinfo and qinfo.output_csv_tables:
                         node.setup_as_csv_output(qinfo.output_csv_tables)
                         node.set_display_mode(self.show_full_table_names)
+
+        if csv_topology_changed:
+            self._sync_graph_topology()
+
 
     def _sync_query_files_and_parameters(self) -> None:
         """Sync CSV comments and reload query parameters from disk if modified, updating canvas nodes and overlay."""
@@ -1729,62 +1738,142 @@ class ProcessFlowEditorWindow(QMainWindow):
                     logger.warning(f"Failed to open with xdg-open: {e}")
 
     def _on_copy_selected(self) -> None:
-        """Copy the selected query node."""
+        """Copy all selected query and CSV import nodes."""
         selected_nodes = self.graph.selected_nodes()
-        query_nodes = [
+        nodes_to_copy = [
             n for n in selected_nodes
-            if isinstance(n, QueryNode) or getattr(n, "type_", "") == "reporting.nodes.QueryNode"
+            if isinstance(n, (QueryNode, ImportCsvNode))
+            or getattr(n, "type_", "") in ("reporting.nodes.QueryNode", "reporting.nodes.ImportCsvNode")
         ]
-        if query_nodes:
-            target = query_nodes[0]
-            qname = target.get_property("query_name") or target.name()
-            self._clipboard_query_name = qname
-            self.status_bar.showMessage(f"Copied query '{qname}'.", 3000)
+        if not nodes_to_copy:
+            return
+
+        copied_items: List[Dict[str, Any]] = []
+        for n in nodes_to_copy:
+            is_query = isinstance(n, QueryNode) or getattr(n, "type_", "") == "reporting.nodes.QueryNode"
+            if is_query:
+                qname = n.get_property("query_name") or n.name()
+                pos = n.pos()
+                copied_items.append({
+                    "type": "query",
+                    "name": qname,
+                    "pos": (pos[0], pos[1]),
+                })
+            else:
+                pos = n.pos()
+                copied_items.append({
+                    "type": "import_csv",
+                    "name": n.name(),
+                    "imports": n.get_imports() if hasattr(n, "get_imports") else [],
+                    "pos": (pos[0], pos[1]),
+                })
+
+        self._clipboard_nodes = copied_items
+        count = len(copied_items)
+        self.status_bar.showMessage(f"Copied {count} node(s) to clipboard.", 3000)
 
     def _on_paste(self) -> None:
-        """Paste query node from clipboard, creating a copy of the query file on disk."""
-        if not self._clipboard_query_name or not self.report:
+        """Paste all copied query and CSV import nodes from clipboard."""
+        if not getattr(self, "_clipboard_nodes", None) or not self.report:
             return
 
-        src_qinfo = self._get_working_query(self._clipboard_query_name)
-        if not src_qinfo or not src_qinfo.file_path or not src_qinfo.file_path.exists():
-            return
-
-        # Determine unique new query name
-        base_orig = self._clipboard_query_name
         import re
-        m = re.match(r"^(.*?)(?:_copy(\d*))?$", base_orig)
-        root_name = m.group(1) if m else base_orig
-
-        existing_names = {q.name for q in self.report.queries}
-        candidate = f"{root_name}_copy"
-        idx = 2
-        while candidate in existing_names:
-            candidate = f"{root_name}_copy{idx}"
-            idx += 1
-
-        # Read template SQL from source
-        try:
-            sql_content = src_qinfo.file_path.read_text(encoding="utf-8", errors="replace")
-        except Exception:
-            sql_content = ""
-
-        if self.app_controller:
-            self.app_controller.add_query(candidate, template_sql=sql_content)
-            self.report = self.app_controller.active_report or self.report
-            self._refresh_left_queries()
-
-        # Place the new node near the mouse or with offset from original
         viewer = self.graph.viewer()
         cursor_pos = viewer.mapFromGlobal(QCursor.pos())
         scene_pos = viewer.mapToScene(cursor_pos)
-        pos = (scene_pos.x(), scene_pos.y())
+        target_center_x, target_center_y = scene_pos.x(), scene_pos.y()
 
-        new_node = self.add_query_to_canvas(candidate, pos=pos)
-        if new_node:
+        # Calculate bounding center of source copied nodes to offset them to target
+        min_x = min(item["pos"][0] for item in self._clipboard_nodes)
+        min_y = min(item["pos"][1] for item in self._clipboard_nodes)
+        max_x = max(item["pos"][0] for item in self._clipboard_nodes)
+        max_y = max(item["pos"][1] for item in self._clipboard_nodes)
+        center_orig_x = (min_x + max_x) / 2.0
+        center_orig_y = (min_y + max_y) / 2.0
+
+        offset_x = target_center_x - center_orig_x
+        offset_y = target_center_y - center_orig_y
+
+        # If pasted at almost the exact same location as original, offset slightly down-right
+        if abs(offset_x) < 20 and abs(offset_y) < 20:
+            offset_x += 40.0
+            offset_y += 40.0
+
+        new_nodes: List[BaseNode] = []
+        for item in self._clipboard_nodes:
+            new_pos = (item["pos"][0] + offset_x, item["pos"][1] + offset_y)
+            if item["type"] == "query":
+                orig_qname = item["name"]
+                src_qinfo = self._get_working_query(orig_qname)
+                if not src_qinfo or not src_qinfo.file_path or not src_qinfo.file_path.exists():
+                    continue
+
+                m = re.match(r"^(.*?)(?:_copy(\d*))?$", orig_qname)
+                root_name = m.group(1) if m else orig_qname
+                existing_names = {q.name for q in self.report.queries}
+                candidate = f"{root_name}_copy"
+                idx = 2
+                while candidate in existing_names:
+                    candidate = f"{root_name}_copy{idx}"
+                    idx += 1
+
+                try:
+                    sql_content = src_qinfo.file_path.read_text(encoding="utf-8", errors="replace")
+                    # Strip existing "# output: table_XX.csv" comments so the copied query gets freshly generated unique CSV tables
+                    clean_lines = [
+                        line for line in sql_content.splitlines(keepends=True)
+                        if not re.match(r"^\s*(?:#|--)\s*out?put\s*:\s*[^\s;]+", line, re.IGNORECASE)
+                    ]
+                    sql_content = "".join(clean_lines)
+                except Exception:
+                    sql_content = ""
+
+                if self.app_controller:
+                    self.app_controller.add_query(candidate, template_sql=sql_content)
+                    self.report = self.app_controller.active_report or self.report
+                    self._refresh_left_queries()
+
+                qnode = self.add_query_to_canvas(candidate, pos=new_pos)
+                if qnode:
+                    new_nodes.append(qnode)
+
+            elif item["type"] == "import_csv":
+                existing_names = {
+                    n.name() for n in self.graph.all_nodes()
+                    if isinstance(n, ImportCsvNode) or getattr(n, "type_", "") == "reporting.nodes.ImportCsvNode"
+                }
+                base_name = "Import csv"
+                candidate = base_name
+                idx = 2
+                while candidate in existing_names:
+                    candidate = f"{base_name} {idx}"
+                    idx += 1
+
+                inode: ImportCsvNode = self.graph.create_node(
+                    "reporting.nodes.ImportCsvNode",
+                    name=candidate,
+                    pos=[new_pos[0], new_pos[1]],
+                )
+                self._node_positions[candidate] = (new_pos[0], new_pos[1])
+                inode.set_imports(item.get("imports", []))
+                self._sync_graph_topology()
+
+                live_inode = next(
+                    (
+                        n for n in self.graph.all_nodes()
+                        if (isinstance(n, ImportCsvNode) or getattr(n, "type_", "") == "reporting.nodes.ImportCsvNode")
+                        and n.name() == candidate
+                    ),
+                    inode,
+                )
+                if live_inode:
+                    new_nodes.append(live_inode)
+
+        if new_nodes:
             self.graph.clear_selection()
-            new_node.set_selected(True)
-            self.status_bar.showMessage(f"Pasted query '{candidate}'.", 3000)
+            for n in new_nodes:
+                n.set_selected(True)
+            self.status_bar.showMessage(f"Pasted {len(new_nodes)} node(s).", 3000)
 
     def _on_delete_selected(self) -> None:
         """Delete currently selected query or CSV import nodes and resynchronize topology.

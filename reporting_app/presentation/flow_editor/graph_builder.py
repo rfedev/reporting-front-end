@@ -20,6 +20,19 @@ from reporting_app.presentation.flow_editor.nodes import ImportCsvNode, QueryNod
 logger = logging.getLogger(__name__)
 
 
+def get_node_dims(n, default_w: float = 180.0, default_h: float = 60.0) -> Tuple[float, float]:
+    if not n:
+        return default_w, default_h
+    try:
+        view = getattr(n, "view", None)
+        if view:
+            br = view.boundingRect()
+            return max(br.width(), default_w), max(br.height(), default_h)
+    except Exception:
+        pass
+    return default_w, default_h
+
+
 class ProcessFlowGraphBuilder:
     """Builds and updates the NodeGraph according to Process Flow Graph Logic."""
 
@@ -351,6 +364,18 @@ class ProcessFlowGraphBuilder:
         if not queries and not import_nodes:
             return {}
 
+        def get_node_dims(n, default_w: float = 180.0, default_h: float = 60.0) -> Tuple[float, float]:
+            if not n:
+                return default_w, default_h
+            try:
+                view = getattr(n, "view", None)
+                if view:
+                    br = view.boundingRect()
+                    return max(br.width(), default_w), max(br.height(), default_h)
+            except Exception:
+                pass
+            return default_w, default_h
+
         # 2. Build dependency graph (data provenance + execution flow)
         table_producers: Dict[str, str] = {}
         for inode in import_nodes:
@@ -437,6 +462,8 @@ class ProcessFlowGraphBuilder:
                             changed = True
             if not changed:
                 break
+
+        new_positions: Dict[str, Tuple[float, float]] = {}
 
         if direction == "horizontal":
             # Left to Right:

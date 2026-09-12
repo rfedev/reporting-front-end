@@ -30,6 +30,12 @@ class TableBoxItem(NodeItem):
         font = QtGui.QFont("sans-serif", 9, QtGui.QFont.Bold)
         self._arrow_item.setFont(font)
 
+    def paint(self, painter, option, widget):
+        if not self.viewer():
+            return
+        super().paint(painter, option, widget)
+
+
     def set_custom_title(self, title: str):
         self.custom_title = title
         if self._text_item:
@@ -121,6 +127,11 @@ class QueryNodeItem(NodeItem):
     def __init__(self, name="Query", parent=None):
         super().__init__(name, parent)
         self.parameter_list: List[str] = []
+
+    def paint(self, painter, option, widget):
+        if not self.viewer():
+            return
+        super().paint(painter, option, widget)
 
     def set_parameters(self, params: List[str]):
         self.parameter_list = list(params)
@@ -225,6 +236,12 @@ class ImportCsvItem(NodeItem):
 
     def __init__(self, name="Import csv", parent=None):
         super().__init__(name, parent)
+
+    def paint(self, painter, option, widget):
+        if not self.viewer():
+            return
+        super().paint(painter, option, widget)
+
 
 
 class ImportCsvNode(BaseNode):

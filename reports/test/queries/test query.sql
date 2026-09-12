@@ -9,6 +9,7 @@ create or replace table `table` (select * from `link-to-cloud.test_dataset.test-
 # output: sel2.csv
 select * from `link-to-cloud.test_dataset.test-import-202608`;
 
+
 # output: sel3.csv
 select * from `link-to-cloud.test_dataset.test-import`;
 

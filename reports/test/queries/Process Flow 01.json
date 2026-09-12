@@ -3,8 +3,7 @@
   "report_name": "test",
   "query_names": [
     "test query",
-    "test query_copy",
-    "test2"
+    "sesegtest query_copy3"
   ],
   "parameter_defaults": {
     "repdate": "2026-09-11",
@@ -25,9 +24,9 @@
       "node_name": "Import csv",
       "items": [
         {
-          "csv_path": "test-import-202609.csv",
+          "csv_path": "test-import-%YYYYMM%.csv",
           "has_headers": true,
-          "output_table": "link-to-cloud.test_dataset.test-import-202609"
+          "output_table": "link-to-cloud.test_dataset.test-import"
         }
       ]
     }
@@ -43,7 +42,7 @@
       "reject_connection_types": "{}"
     },
     "nodes": {
-      "0x7fa653649e80": {
+      "0x7f1c55c0c8a0": {
         "type_": "reporting.nodes.QueryNode",
         "icon": null,
         "name": "test query",
@@ -71,8 +70,8 @@
         "width": 162.140625,
         "height": 133.3,
         "pos": [
-          1742.5543637624935,
-          193.82642613242206
+          1737.0,
+          192.0
         ],
         "layout_direction": 0,
         "port_deletion_allowed": false,
@@ -84,7 +83,47 @@
           "parameters": "repdate"
         }
       },
-      "0x7fa651b4e0d0": {
+      "0x7f1c55c0c9d0": {
+        "type_": "reporting.nodes.TableBoxNode",
+        "icon": null,
+        "name": "test query [Out]",
+        "color": [
+          180,
+          85,
+          20,
+          255
+        ],
+        "border_color": [
+          74,
+          84,
+          85,
+          255
+        ],
+        "text_color": [
+          255,
+          255,
+          255,
+          180
+        ],
+        "disabled": false,
+        "selected": true,
+        "visible": true,
+        "width": 160.9375,
+        "height": 96.0,
+        "pos": [
+          1937.0,
+          0.0
+        ],
+        "layout_direction": 0,
+        "port_deletion_allowed": false,
+        "subgraph_session": {},
+        "custom": {
+          "box_type": "Output Tables",
+          "raw_tables_json": "[\"table\"]",
+          "query_owner": ""
+        }
+      },
+      "0x7f1c55c0cb00": {
         "type_": "reporting.nodes.TableBoxNode",
         "icon": null,
         "name": "test query [CSV]",
@@ -107,12 +146,12 @@
           180
         ],
         "disabled": false,
-        "selected": false,
+        "selected": true,
         "visible": true,
         "width": 160,
         "height": 132.0,
         "pos": [
-          2001.0,
+          2157.0,
           0.0
         ],
         "layout_direction": 0,
@@ -124,10 +163,10 @@
           "query_owner": "test query"
         }
       },
-      "0x7fa651b4e350": {
+      "0x7f1c55c0cc30": {
         "type_": "reporting.nodes.QueryNode",
         "icon": null,
-        "name": "test query_copy",
+        "name": "sesegtest query_copy3",
         "color": [
           45,
           80,
@@ -149,111 +188,30 @@
         "disabled": false,
         "selected": false,
         "visible": true,
-        "width": 162.140625,
-        "height": 133.3,
-        "pos": [
-          1136.0488922993443,
-          539.8775572004909
-        ],
-        "layout_direction": 0,
-        "port_deletion_allowed": false,
-        "subgraph_session": {},
-        "custom": {
-          "query_name": "test query_copy",
-          "query_path": "/home/ric/git/reporting-front-end/reports/test/queries/test query_copy.sql",
-          "report_name": "test",
-          "parameters": "repdate"
-        }
-      },
-      "0x7fa653683820": {
-        "type_": "reporting.nodes.TableBoxNode",
-        "icon": null,
-        "name": "test query_copy [CSV]",
-        "color": [
-          110,
-          45,
-          130,
-          255
-        ],
-        "border_color": [
-          74,
-          84,
-          85,
-          255
-        ],
-        "text_color": [
-          255,
-          255,
-          255,
-          180
-        ],
-        "disabled": false,
-        "selected": false,
-        "visible": true,
-        "width": 160,
-        "height": 132.0,
-        "pos": [
-          1391.108649554098,
-          623.1763434742606
-        ],
-        "layout_direction": 0,
-        "port_deletion_allowed": false,
-        "subgraph_session": {},
-        "custom": {
-          "box_type": "Output CSV",
-          "raw_tables_json": "[\"sel1.csv\", \"sel2.csv\", \"sel3.csv\"]",
-          "query_owner": "test query_copy"
-        }
-      },
-      "0x7fa653683950": {
-        "type_": "reporting.nodes.QueryNode",
-        "icon": null,
-        "name": "test2",
-        "color": [
-          45,
-          80,
-          130,
-          255
-        ],
-        "border_color": [
-          74,
-          84,
-          85,
-          255
-        ],
-        "text_color": [
-          255,
-          255,
-          255,
-          180
-        ],
-        "disabled": false,
-        "selected": false,
-        "visible": true,
-        "width": 162.140625,
+        "width": 172.671875,
         "height": 99.0,
         "pos": [
-          2281.0,
-          192.0
+          1007.0,
+          797.3
         ],
         "layout_direction": 0,
         "port_deletion_allowed": false,
         "subgraph_session": {},
         "custom": {
-          "query_name": "test2",
-          "query_path": "/home/ric/git/reporting-front-end/reports/test/queries/test2.sql",
+          "query_name": "sesegtest query_copy3",
+          "query_path": "/home/ric/git/reporting-front-end/reports/test/queries/sesegtest query_copy3.sql",
           "report_name": "test",
           "parameters": ""
         }
       },
-      "0x7fa653683a80": {
+      "0x7f1c55c0cd60": {
         "type_": "reporting.nodes.TableBoxNode",
         "icon": null,
-        "name": "test2 [CSV]",
+        "name": "sesegtest query_copy3 [Out]",
         "color": [
-          110,
-          45,
-          130,
+          180,
+          85,
+          20,
           255
         ],
         "border_color": [
@@ -269,24 +227,24 @@
           180
         ],
         "disabled": false,
-        "selected": false,
+        "selected": true,
         "visible": true,
-        "width": 163.0,
+        "width": 160.9375,
         "height": 96.0,
         "pos": [
-          2481.0,
-          0.0
+          1207.0,
+          605.3
         ],
         "layout_direction": 0,
         "port_deletion_allowed": false,
         "subgraph_session": {},
         "custom": {
-          "box_type": "Output CSV",
-          "raw_tables_json": "[\"table_01.csv\"]",
-          "query_owner": "test2"
+          "box_type": "Output Tables",
+          "raw_tables_json": "[\"table2\"]",
+          "query_owner": ""
         }
       },
-      "0x7fa653683bb0": {
+      "0x7f1c55c0ce90": {
         "type_": "reporting.nodes.ImportCsvNode",
         "icon": null,
         "name": "Import csv",
@@ -314,7 +272,7 @@
         "width": 162.140625,
         "height": 75.2,
         "pos": [
-          261.0,
+          277.0,
           192.0
         ],
         "layout_direction": 0,
@@ -322,10 +280,10 @@
         "subgraph_session": {},
         "custom": {
           "import_name": "Import csv",
-          "imports_json": "[{\"csv_path\": \"test-import-202609.csv\", \"has_headers\": true, \"output_table\": \"link-to-cloud.test_dataset.test-import-202609\"}]"
+          "imports_json": "[{\"csv_path\": \"test-import-%YYYYMM%.csv\", \"has_headers\": true, \"output_table\": \"link-to-cloud.test_dataset.test-import\"}]"
         }
       },
-      "0x7fa653683e10": {
+      "0x7f1c55c0cfc0": {
         "type_": "reporting.nodes.TableBoxNode",
         "icon": null,
         "name": "Import csv [In]",
@@ -348,9 +306,9 @@
           180
         ],
         "disabled": false,
-        "selected": false,
+        "selected": true,
         "visible": true,
-        "width": 251.0,
+        "width": 257.0,
         "height": 96.0,
         "pos": [
           0.0,
@@ -361,11 +319,11 @@
         "subgraph_session": {},
         "custom": {
           "box_type": "Input Tables",
-          "raw_tables_json": "[\"test-import-202609.csv\"]",
+          "raw_tables_json": "[\"test-import-%YYYYMM%.csv\"]",
           "query_owner": ""
         }
       },
-      "0x7fa651ba8180": {
+      "0x7f1c55c0d0f0": {
         "type_": "reporting.nodes.TableBoxNode",
         "icon": null,
         "name": "Import csv [Out]",
@@ -390,10 +348,10 @@
         "disabled": false,
         "selected": false,
         "visible": true,
-        "width": 220.0,
+        "width": 165.0,
         "height": 96.0,
         "pos": [
-          461.0,
+          477.0,
           0.0
         ],
         "layout_direction": 0,
@@ -401,11 +359,11 @@
         "subgraph_session": {},
         "custom": {
           "box_type": "Output Tables",
-          "raw_tables_json": "[\"link-to-cloud.test_dataset.test-import-202609\"]",
+          "raw_tables_json": "[\"link-to-cloud.test_dataset.test-import\"]",
           "query_owner": ""
         }
       },
-      "0x7fa651ba82b0": {
+      "0x7f1c55c0d220": {
         "type_": "reporting.nodes.TableBoxNode",
         "icon": null,
         "name": "test query [In]",
@@ -428,12 +386,12 @@
           180
         ],
         "disabled": false,
-        "selected": false,
+        "selected": true,
         "visible": true,
-        "width": 220.0,
-        "height": 114.0,
+        "width": 210.0,
+        "height": 96.0,
         "pos": [
-          1571.0,
+          1507.0,
           385.3
         ],
         "layout_direction": 0,
@@ -441,14 +399,14 @@
         "subgraph_session": {},
         "custom": {
           "box_type": "Input Tables",
-          "raw_tables_json": "[\"link-to-cloud.test_dataset.test-import-202608\", \"link-to-cloud.test_dataset.test-import\"]",
+          "raw_tables_json": "[\"link-to-cloud.test_dataset.test-import-202608\"]",
           "query_owner": ""
         }
       },
-      "0x7fa651ba83e0": {
+      "0x7f1c55c0d350": {
         "type_": "reporting.nodes.TableBoxNode",
         "icon": null,
-        "name": "test query_copy [In]",
+        "name": "sesegtest query_copy3 [In]",
         "color": [
           35,
           115,
@@ -468,20 +426,20 @@
           180
         ],
         "disabled": false,
-        "selected": false,
+        "selected": true,
         "visible": true,
-        "width": 220.0,
-        "height": 114.0,
+        "width": 210.0,
+        "height": 96.0,
         "pos": [
-          563.1767675765581,
-          615.5498939744257
+          777.0,
+          990.5999999999999
         ],
         "layout_direction": 0,
         "port_deletion_allowed": false,
         "subgraph_session": {},
         "custom": {
           "box_type": "Input Tables",
-          "raw_tables_json": "[\"link-to-cloud.test_dataset.test-import-202608\", \"link-to-cloud.test_dataset.test-import\"]",
+          "raw_tables_json": "[\"link-to-cloud.test_dataset.test-import-202608\"]",
           "query_owner": ""
         }
       }
@@ -489,106 +447,126 @@
     "connections": [
       {
         "in": [
-          "0x7fa653649e80",
+          "0x7f1c55c0c8a0",
           "run_in"
         ],
         "out": [
-          "0x7fa653683bb0",
+          "0x7f1c55c0cc30",
           "run_out"
         ]
       },
       {
         "in": [
-          "0x7fa653649e80",
-          "tables_in"
-        ],
-        "out": [
-          "0x7fa651ba82b0",
-          "out_tables"
-        ]
-      },
-      {
-        "out": [
-          "0x7fa653649e80",
-          "run_out"
-        ],
-        "in": [
-          "0x7fa653683950",
+          "0x7f1c55c0c8a0",
           "run_in"
-        ]
-      },
-      {
-        "out": [
-          "0x7fa653649e80",
-          "csv_out"
         ],
-        "in": [
-          "0x7fa651b4e0d0",
-          "in_tables"
+        "out": [
+          "0x7f1c55c0ce90",
+          "run_out"
         ]
       },
       {
         "in": [
-          "0x7fa651b4e350",
+          "0x7f1c55c0c8a0",
           "tables_in"
         ],
         "out": [
-          "0x7fa651ba83e0",
+          "0x7f1c55c0d220",
+          "out_tables"
+        ]
+      },
+      {
+        "in": [
+          "0x7f1c55c0c8a0",
+          "tables_in"
+        ],
+        "out": [
+          "0x7f1c55c0d0f0",
           "out_tables"
         ]
       },
       {
         "out": [
-          "0x7fa651b4e350",
-          "csv_out"
-        ],
-        "in": [
-          "0x7fa653683820",
-          "in_tables"
-        ]
-      },
-      {
-        "out": [
-          "0x7fa653683950",
-          "csv_out"
-        ],
-        "in": [
-          "0x7fa653683a80",
-          "in_tables"
-        ]
-      },
-      {
-        "in": [
-          "0x7fa653683bb0",
-          "tables_in"
-        ],
-        "out": [
-          "0x7fa653683e10",
-          "out_tables"
-        ]
-      },
-      {
-        "out": [
-          "0x7fa653683bb0",
+          "0x7f1c55c0c8a0",
           "tables_out"
         ],
         "in": [
-          "0x7fa651ba8180",
+          "0x7f1c55c0c9d0",
+          "in_tables"
+        ]
+      },
+      {
+        "out": [
+          "0x7f1c55c0c8a0",
+          "csv_out"
+        ],
+        "in": [
+          "0x7f1c55c0cb00",
+          "in_tables"
+        ]
+      },
+      {
+        "in": [
+          "0x7f1c55c0cc30",
+          "run_in"
+        ],
+        "out": [
+          "0x7f1c55c0ce90",
+          "run_out"
+        ]
+      },
+      {
+        "in": [
+          "0x7f1c55c0cc30",
+          "tables_in"
+        ],
+        "out": [
+          "0x7f1c55c0d350",
+          "out_tables"
+        ]
+      },
+      {
+        "out": [
+          "0x7f1c55c0cc30",
+          "tables_out"
+        ],
+        "in": [
+          "0x7f1c55c0cd60",
+          "in_tables"
+        ]
+      },
+      {
+        "in": [
+          "0x7f1c55c0ce90",
+          "tables_in"
+        ],
+        "out": [
+          "0x7f1c55c0cfc0",
+          "out_tables"
+        ]
+      },
+      {
+        "out": [
+          "0x7f1c55c0ce90",
+          "tables_out"
+        ],
+        "in": [
+          "0x7f1c55c0d0f0",
           "in_tables"
         ]
       }
     ]
   },
   "view_state": {
-    "zoom": -0.45,
+    "zoom": -0.07,
     "center": [
-      1364.5844934323823,
-      427.79623704764407
+      1158.5,
+      543.3
     ]
   },
   "splitter_sizes": [
-    117,
-    1075,
+    250,
+    2302,
     0
   ],
   "parameter_date_options": {

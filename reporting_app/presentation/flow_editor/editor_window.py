@@ -435,6 +435,9 @@ class ProcessFlowEditorWindow(QMainWindow):
                 return
             if isinstance(target_node, QueryNode) or getattr(target_node, "type_", "") == "reporting.nodes.QueryNode":
                 self._on_query_renamed(old_name, new_name)
+            elif isinstance(target_node, ImportCsvNode) or getattr(target_node, "type_", "") == "reporting.nodes.ImportCsvNode":
+                target_node.set_name(new_name)
+                self._sync_graph_topology()
 
         def on_graph_property_changed(node, prop_name, value):
             if prop_name == "name":
@@ -844,6 +847,22 @@ class ProcessFlowEditorWindow(QMainWindow):
             self.graph.viewer().scene().clearSelection()
         self._update_run_button_state()
 
+    def _on_select_all(self) -> None:
+        """Select all nodes on the canvas."""
+        # Do not select all nodes if user is currently typing in an input field
+        focus_w = QtWidgets.QApplication.focusWidget()
+        if isinstance(focus_w, (QLineEdit, QTextEdit, QPlainTextEdit)):
+            if hasattr(focus_w, "selectAll"):
+                focus_w.selectAll()
+            return
+        scene = self.graph.viewer().scene() if self.graph.viewer() else None
+        if scene and scene.focusItem() and isinstance(scene.focusItem(), (QtWidgets.QGraphicsTextItem, QtWidgets.QGraphicsProxyWidget)):
+            return
+
+        for node in self.graph.all_nodes():
+            node.set_selected(True)
+        self._update_run_button_state()
+
     def _build_ui(self) -> None:
         # Toolbar
         toolbar = QToolBar("Flow Actions", self)
@@ -995,6 +1014,8 @@ class ProcessFlowEditorWindow(QMainWindow):
         self.copy_shortcut.activated.connect(self._on_copy_selected)
         self.paste_shortcut = QShortcut(QKeySequence.Paste, self)
         self.paste_shortcut.activated.connect(self._on_paste)
+        self.select_all_shortcut = QShortcut(QKeySequence.SelectAll, self)
+        self.select_all_shortcut.activated.connect(self._on_select_all)
         self._clipboard_query_name: Optional[str] = None
 
         # File watcher and polling timer to automatically sync query edits on disk
@@ -2424,10 +2445,22 @@ class ProcessFlowEditorWindow(QMainWindow):
                     self.param_overlay.raise_()
             elif event.type() == QEvent.KeyPress:
                 key = event.key()
-                # Do not intercept typing if focus is on a text editor / line edit
+                # Do not intercept typing if focus is on a text editor / line edit or in-scene text editing
                 focus_w = QtWidgets.QApplication.focusWidget()
                 if isinstance(focus_w, (QLineEdit, QTextEdit, QPlainTextEdit)):
                     return super().eventFilter(watched, event)
+
+                scene = viewer.scene() if hasattr(viewer, "scene") else None
+                if scene:
+                    focus_item = scene.focusItem()
+                    if isinstance(focus_item, (QtWidgets.QGraphicsTextItem, QtWidgets.QGraphicsProxyWidget)):
+                        return super().eventFilter(watched, event)
+                    # Also check if any node's text item is currently in edit mode
+                    for node_item in scene.items():
+                        text_item = getattr(node_item, "_text_item", None)
+                        if text_item and (text_item.textInteractionFlags() & Qt.TextEditable):
+                            return super().eventFilter(watched, event)
+
 
                 if key == Qt.Key_Escape:
                     if getattr(viewer, "_LIVE_PIPE", None) and viewer._LIVE_PIPE.isVisible():

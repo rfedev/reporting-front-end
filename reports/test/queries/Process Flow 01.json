@@ -3,13 +3,14 @@
   "report_name": "test",
   "query_names": [
     "test query",
-    "sesegtest query_copy3"
+    "Query name"
   ],
   "parameter_defaults": {
     "repdate": "2026-09-11",
     "testParam1": "",
     "testParam": "",
-    "testParam2": ""
+    "testParam2": "",
+    "name": ""
   },
   "show_full_table_names": false,
   "csv_filenames": {
@@ -42,7 +43,7 @@
       "reject_connection_types": "{}"
     },
     "nodes": {
-      "0x7f1c55c0c8a0": {
+      "0x7fca2538f490": {
         "type_": "reporting.nodes.QueryNode",
         "icon": null,
         "name": "test query",
@@ -68,7 +69,7 @@
         "selected": false,
         "visible": true,
         "width": 162.140625,
-        "height": 133.3,
+        "height": 129.3,
         "pos": [
           1737.0,
           192.0
@@ -83,7 +84,7 @@
           "parameters": "repdate"
         }
       },
-      "0x7f1c55c0c9d0": {
+      "0x7fca2538f5c0": {
         "type_": "reporting.nodes.TableBoxNode",
         "icon": null,
         "name": "test query [Out]",
@@ -106,7 +107,7 @@
           180
         ],
         "disabled": false,
-        "selected": true,
+        "selected": false,
         "visible": true,
         "width": 160.9375,
         "height": 96.0,
@@ -123,7 +124,7 @@
           "query_owner": ""
         }
       },
-      "0x7f1c55c0cb00": {
+      "0x7fca2538f6f0": {
         "type_": "reporting.nodes.TableBoxNode",
         "icon": null,
         "name": "test query [CSV]",
@@ -146,7 +147,7 @@
           180
         ],
         "disabled": false,
-        "selected": true,
+        "selected": false,
         "visible": true,
         "width": 160,
         "height": 132.0,
@@ -163,10 +164,10 @@
           "query_owner": "test query"
         }
       },
-      "0x7f1c55c0cc30": {
+      "0x7fca2538f820": {
         "type_": "reporting.nodes.QueryNode",
         "icon": null,
-        "name": "sesegtest query_copy3",
+        "name": "Query name",
         "color": [
           45,
           80,
@@ -188,26 +189,26 @@
         "disabled": false,
         "selected": false,
         "visible": true,
-        "width": 172.671875,
-        "height": 99.0,
+        "width": 162.140625,
+        "height": 129.3,
         "pos": [
           1007.0,
-          797.3
+          793.3
         ],
         "layout_direction": 0,
         "port_deletion_allowed": false,
         "subgraph_session": {},
         "custom": {
-          "query_name": "sesegtest query_copy3",
-          "query_path": "/home/ric/git/reporting-front-end/reports/test/queries/sesegtest query_copy3.sql",
+          "query_name": "Query name",
+          "query_path": "/home/ric/git/reporting-front-end/reports/test/queries/Query name.sql",
           "report_name": "test",
-          "parameters": ""
+          "parameters": "name"
         }
       },
-      "0x7f1c55c0cd60": {
+      "0x7fca2538f950": {
         "type_": "reporting.nodes.TableBoxNode",
         "icon": null,
-        "name": "sesegtest query_copy3 [Out]",
+        "name": "Query name [Out]",
         "color": [
           180,
           85,
@@ -227,13 +228,13 @@
           180
         ],
         "disabled": false,
-        "selected": true,
+        "selected": false,
         "visible": true,
         "width": 160.9375,
         "height": 96.0,
         "pos": [
           1207.0,
-          605.3
+          601.3
         ],
         "layout_direction": 0,
         "port_deletion_allowed": false,
@@ -244,7 +245,7 @@
           "query_owner": ""
         }
       },
-      "0x7f1c55c0ce90": {
+      "0x7fca2538fa80": {
         "type_": "reporting.nodes.ImportCsvNode",
         "icon": null,
         "name": "Import csv",
@@ -270,7 +271,7 @@
         "selected": false,
         "visible": true,
         "width": 162.140625,
-        "height": 75.2,
+        "height": 71.2,
         "pos": [
           277.0,
           192.0
@@ -283,7 +284,7 @@
           "imports_json": "[{\"csv_path\": \"test-import-%YYYYMM%.csv\", \"has_headers\": true, \"output_table\": \"link-to-cloud.test_dataset.test-import\"}]"
         }
       },
-      "0x7f1c55c0cfc0": {
+      "0x7fca2538fbb0": {
         "type_": "reporting.nodes.TableBoxNode",
         "icon": null,
         "name": "Import csv [In]",
@@ -306,13 +307,13 @@
           180
         ],
         "disabled": false,
-        "selected": true,
+        "selected": false,
         "visible": true,
         "width": 257.0,
         "height": 96.0,
         "pos": [
           0.0,
-          385.3
+          381.3
         ],
         "layout_direction": 0,
         "port_deletion_allowed": false,
@@ -323,7 +324,7 @@
           "query_owner": ""
         }
       },
-      "0x7f1c55c0d0f0": {
+      "0x7fca2538fce0": {
         "type_": "reporting.nodes.TableBoxNode",
         "icon": null,
         "name": "Import csv [Out]",
@@ -363,7 +364,7 @@
           "query_owner": ""
         }
       },
-      "0x7f1c55c0d220": {
+      "0x7fca2538fe10": {
         "type_": "reporting.nodes.TableBoxNode",
         "icon": null,
         "name": "test query [In]",
@@ -386,13 +387,13 @@
           180
         ],
         "disabled": false,
-        "selected": true,
+        "selected": false,
         "visible": true,
         "width": 210.0,
         "height": 96.0,
         "pos": [
           1507.0,
-          385.3
+          381.3
         ],
         "layout_direction": 0,
         "port_deletion_allowed": false,
@@ -403,10 +404,10 @@
           "query_owner": ""
         }
       },
-      "0x7f1c55c0d350": {
+      "0x7fca278c0050": {
         "type_": "reporting.nodes.TableBoxNode",
         "icon": null,
-        "name": "sesegtest query_copy3 [In]",
+        "name": "Query name [In]",
         "color": [
           35,
           115,
@@ -426,13 +427,13 @@
           180
         ],
         "disabled": false,
-        "selected": true,
+        "selected": false,
         "visible": true,
         "width": 210.0,
         "height": 96.0,
         "pos": [
           777.0,
-          990.5999999999999
+          982.5999999999999
         ],
         "layout_direction": 0,
         "port_deletion_allowed": false,
@@ -447,126 +448,116 @@
     "connections": [
       {
         "in": [
-          "0x7f1c55c0c8a0",
+          "0x7fca2538f490",
           "run_in"
         ],
         "out": [
-          "0x7f1c55c0cc30",
+          "0x7fca2538f820",
           "run_out"
         ]
       },
       {
         "in": [
-          "0x7f1c55c0c8a0",
+          "0x7fca2538f490",
           "run_in"
         ],
         "out": [
-          "0x7f1c55c0ce90",
+          "0x7fca2538fa80",
           "run_out"
         ]
       },
       {
         "in": [
-          "0x7f1c55c0c8a0",
+          "0x7fca2538f490",
           "tables_in"
         ],
         "out": [
-          "0x7f1c55c0d220",
+          "0x7fca2538fe10",
           "out_tables"
         ]
       },
       {
         "in": [
-          "0x7f1c55c0c8a0",
+          "0x7fca2538f490",
           "tables_in"
         ],
         "out": [
-          "0x7f1c55c0d0f0",
+          "0x7fca2538fce0",
           "out_tables"
         ]
       },
       {
         "out": [
-          "0x7f1c55c0c8a0",
+          "0x7fca2538f490",
           "tables_out"
         ],
         "in": [
-          "0x7f1c55c0c9d0",
+          "0x7fca2538f5c0",
           "in_tables"
         ]
       },
       {
         "out": [
-          "0x7f1c55c0c8a0",
+          "0x7fca2538f490",
           "csv_out"
         ],
         "in": [
-          "0x7f1c55c0cb00",
+          "0x7fca2538f6f0",
           "in_tables"
         ]
       },
       {
         "in": [
-          "0x7f1c55c0cc30",
-          "run_in"
-        ],
-        "out": [
-          "0x7f1c55c0ce90",
-          "run_out"
-        ]
-      },
-      {
-        "in": [
-          "0x7f1c55c0cc30",
+          "0x7fca2538f820",
           "tables_in"
         ],
         "out": [
-          "0x7f1c55c0d350",
+          "0x7fca278c0050",
           "out_tables"
         ]
       },
       {
         "out": [
-          "0x7f1c55c0cc30",
+          "0x7fca2538f820",
           "tables_out"
         ],
         "in": [
-          "0x7f1c55c0cd60",
+          "0x7fca2538f950",
           "in_tables"
         ]
       },
       {
         "in": [
-          "0x7f1c55c0ce90",
+          "0x7fca2538fa80",
           "tables_in"
         ],
         "out": [
-          "0x7f1c55c0cfc0",
+          "0x7fca2538fbb0",
           "out_tables"
         ]
       },
       {
         "out": [
-          "0x7f1c55c0ce90",
+          "0x7fca2538fa80",
           "tables_out"
         ],
         "in": [
-          "0x7f1c55c0d0f0",
+          "0x7fca2538fce0",
           "in_tables"
         ]
       }
     ]
   },
   "view_state": {
-    "zoom": -0.07,
+    "zoom": -0.57,
     "center": [
       1158.5,
-      543.3
+      539.3
     ]
   },
   "splitter_sizes": [
-    250,
-    2302,
+    117,
+    1075,
     0
   ],
   "parameter_date_options": {

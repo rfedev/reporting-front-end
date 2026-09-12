@@ -14,7 +14,81 @@ COLOR_DARK_ORANGE = (180, 85, 20, 255)   # Output table box & noodle
 COLOR_DARK_PURPLE = (110, 45, 130, 255)  # Output CSV box & noodle
 
 
+class CustomNodeTextItem(QtWidgets.QGraphicsTextItem):
+    """Clean, standard text item for node title editing that behaves like a normal single-line text box."""
+
+    def __init__(self, text, parent=None):
+        super().__init__(text, parent)
+        self._locked = False
+        self.setTabChangesFocus(True)
+        self.document().setDocumentMargin(2)
+        font = QtGui.QFont("sans-serif", 9, QtGui.QFont.Bold)
+        self.setFont(font)
+        self.setDefaultTextColor(QtGui.QColor(240, 240, 240))
+        self.setTextInteractionFlags(QtCore.Qt.NoTextInteraction)
+
+    def mouseDoubleClickEvent(self, event):
+        if not self._locked and event.button() == QtCore.Qt.LeftButton:
+            self.set_editable(True)
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+            self.set_editable(False)
+            event.accept()
+            return
+        elif event.key() == QtCore.Qt.Key_Escape:
+            parent_node = getattr(self, "node", None) or self.parentItem()
+            if parent_node:
+                orig_name = getattr(parent_node, "name", "")
+                self.setPlainText(orig_name)
+            self.set_editable(False)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def focusOutEvent(self, event):
+        self.set_editable(False)
+        super().focusOutEvent(event)
+
+    def set_editable(self, value=False):
+        if self._locked:
+            return
+        if value:
+            self.setTextInteractionFlags(
+                QtCore.Qt.TextEditable |
+                QtCore.Qt.TextSelectableByMouse |
+                QtCore.Qt.TextSelectableByKeyboard
+            )
+            self.setFocus(QtCore.Qt.MouseFocusReason)
+            # Select all text on enter edit mode like a normal text box
+            cursor = self.textCursor()
+            cursor.select(QtGui.QTextCursor.Document)
+            self.setTextCursor(cursor)
+        else:
+            self.setTextInteractionFlags(QtCore.Qt.NoTextInteraction)
+            cursor = self.textCursor()
+            cursor.clearSelection()
+            self.setTextCursor(cursor)
+            # Commit new text
+            new_text = self.toPlainText().strip()
+            parent_node = getattr(self, "node", None) or self.parentItem()
+            if parent_node and hasattr(parent_node, "viewer") and parent_node.viewer():
+                old_name = getattr(parent_node, "name", "")
+                if new_text and new_text != old_name:
+                    parent_node.viewer().node_name_changed.emit(parent_node.id, new_text)
+                elif not new_text:
+                    self.setPlainText(old_name)
+
+    @property
+    def node(self):
+        return self.parentItem()
+
+
 class TableBoxItem(NodeItem):
+
     """Custom graphics item for TableBoxNode with arrow expand/collapse and native text rendering."""
 
     def __init__(self, name="Table Box", parent=None):
@@ -127,6 +201,15 @@ class QueryNodeItem(NodeItem):
     def __init__(self, name="Query", parent=None):
         super().__init__(name, parent)
         self.parameter_list: List[str] = []
+        # Replace default text item with standard custom text item
+        if hasattr(self, "_text_item") and self._text_item:
+            try:
+                if self.scene():
+                    self.scene().removeItem(self._text_item)
+            except Exception:
+                pass
+        self._text_item = CustomNodeTextItem(self.name, self)
+
 
     def paint(self, painter, option, widget):
         if not self.viewer():
@@ -236,6 +319,13 @@ class ImportCsvItem(NodeItem):
 
     def __init__(self, name="Import csv", parent=None):
         super().__init__(name, parent)
+        if hasattr(self, "_text_item") and self._text_item:
+            try:
+                if self.scene():
+                    self.scene().removeItem(self._text_item)
+            except Exception:
+                pass
+        self._text_item = CustomNodeTextItem(self.name, self)
 
     def paint(self, painter, option, widget):
         if not self.viewer():

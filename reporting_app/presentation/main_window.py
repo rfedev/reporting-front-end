@@ -1,5 +1,6 @@
 """Main application window for the Reporting Front End."""
 
+from pathlib import Path
 import logging
 from typing import List, Optional
 from PySide6.QtCore import Qt
@@ -28,6 +29,7 @@ from reporting_app.core.models import ProcessFlowInfo, QueryInfo, QueryParameter
 from reporting_app.presentation.flow_editor.editor_window import ProcessFlowEditorWindow
 from reporting_app.presentation.query_dialog import QueryRunDialog
 from reporting_app.presentation.settings_dialog import SettingsDialog
+from reporting_app.utils.date_calc import format_filename_with_date
 
 logger = logging.getLogger(__name__)
 
@@ -630,10 +632,61 @@ class MainWindow(QMainWindow):
         outputs_dir.mkdir(parents=True, exist_ok=True)
         csv_map = flow_ctrl.get_csv_filenames()
 
+        # Determine filename_date from flow parameter settings or defaults
+        filename_date = ""
+        sel_param = flow_ctrl.get_selected_filename_date_param()
+        if sel_param and sel_param in param_values:
+            filename_date = param_values[sel_param]
+        else:
+            for k, v in param_values.items():
+                if any(token in k.lower() for token in ("date", "dt", "day", "month", "year")):
+                    filename_date = v
+                    break
+
         results_log = []
         errors = []
 
-        self.status_bar.showMessage(f"Running process flow ({len(queries_order)} queries)...")
+        # 1. Run CSV Imports if present
+        csv_imports = flow_ctrl.get_csv_imports()
+        for group in csv_imports:
+            imp_items = group.get("items", []) if isinstance(group, dict) and "items" in group else [group]
+            for item in imp_items:
+                c_path = item.get("csv_path", "").strip()
+                d_table = item.get("output_table", "").strip()
+                headers = item.get("has_headers", True)
+                if not c_path or not d_table:
+                    continue
+                if filename_date:
+                    c_path = format_filename_with_date(c_path, filename_date)
+
+                resolved_csv = Path(c_path)
+                if not resolved_csv.is_absolute() and active_report and active_report.folder_path:
+                    candidate = active_report.folder_path / "inputs" / resolved_csv
+                    if candidate.exists() or not resolved_csv.exists():
+                        resolved_csv = candidate
+
+                self.status_bar.showMessage(f"Importing {resolved_csv.name} -> {d_table}...")
+                QApplication.processEvents()
+                try:
+                    from reporting_app.core.bigquery_run import run_bigquery_import_csv
+                    imp_res = run_bigquery_import_csv(
+                        csv_path=resolved_csv,
+                        destination_table=d_table,
+                        has_headers=headers,
+                    )
+                    row_cnt = imp_res.get("row_count")
+                    cnt_str = f"{row_cnt:,} rows" if row_cnt is not None else "completed"
+                    results_log.append(f"📥 Imported CSV '{c_path}' into '{d_table}' ({cnt_str})")
+                except Exception as e:
+                    err_msg = f"Import CSV failed for {d_table}: {e}"
+                    errors.append(err_msg)
+                    results_log.append(f"❌ {err_msg}")
+                    break
+            if errors:
+                break
+
+        if not errors:
+            self.status_bar.showMessage(f"Running process flow ({len(queries_order)} queries)...")
 
         for idx, qname in enumerate(queries_order, start=1):
             qinfo = active_report.get_query(qname)
@@ -648,6 +701,8 @@ class MainWindow(QMainWindow):
 
             try:
                 custom_csv = csv_map.get(qname)
+                if custom_csv and filename_date:
+                    custom_csv = format_filename_with_date(custom_csv, filename_date)
                 res = run_bigquery_script(
                     sql_script_path=qinfo.file_path,
                     report_name=active_report.name,

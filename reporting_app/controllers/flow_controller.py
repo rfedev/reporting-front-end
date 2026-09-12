@@ -71,6 +71,14 @@ class ProcessFlowController(QObject):
         """Return selected date options for date parameters in this flow."""
         return self.flow_data.get("parameter_date_options", {})
 
+    def get_selected_filename_date_param(self) -> Optional[str]:
+        """Return the name of the parameter selected for filename dates."""
+        return self.flow_data.get("selected_filename_date_param")
+
+    def set_selected_filename_date_param(self, param_name: Optional[str]) -> None:
+        """Set the parameter selected for filename dates."""
+        self.flow_data["selected_filename_date_param"] = param_name
+
     def get_show_full_table_names(self) -> bool:
         """Return persisted toggle state for full vs short table names."""
         return self.flow_data.get("show_full_table_names", False)
@@ -194,6 +202,7 @@ class ProcessFlowController(QObject):
         view_state: Optional[Dict[str, Any]] = None,
         splitter_sizes: Optional[List[int]] = None,
         parameter_date_options: Optional[Dict[str, str]] = None,
+        selected_filename_date_param: Optional[str] = None,
     ) -> None:
         """Save process flow to JSON and update database parameter defaults."""
         self.parameter_defaults.update(parameter_defaults)
@@ -211,6 +220,8 @@ class ProcessFlowController(QObject):
             self.flow_data["splitter_sizes"] = splitter_sizes
         if parameter_date_options is not None:
             self.flow_data["parameter_date_options"] = parameter_date_options
+        if selected_filename_date_param is not None:
+            self.flow_data["selected_filename_date_param"] = selected_filename_date_param
 
         FlowStorage.save(
             file_path=self.file_path,
@@ -225,6 +236,7 @@ class ProcessFlowController(QObject):
             view_state=self.flow_data.get("view_state", {}),
             splitter_sizes=self.flow_data.get("splitter_sizes"),
             parameter_date_options=self.flow_data.get("parameter_date_options", {}),
+            selected_filename_date_param=self.flow_data.get("selected_filename_date_param"),
         )
 
         # Update persistence layer defaults if repository is provided

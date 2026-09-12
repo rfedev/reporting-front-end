@@ -182,6 +182,22 @@ class ProcessFlowGraphBuilder:
             inode.set_imports(items)
             import_nodes[imp_name] = inode
 
+            in_files = inode.get_input_files()
+            if in_files:
+                in_box_key = f"{imp_name} [In]"
+                in_pos = existing_positions.get(in_box_key, (ipos[0] - 280, ipos[1]))
+                in_box: TableBoxNode = graph.create_node(
+                    "reporting.nodes.TableBoxNode",
+                    name=in_box_key,
+                    pos=[in_pos[0], in_pos[1]],
+                )
+                in_box.setup_as_input(in_files)
+                in_box.set_display_mode(show_full_table_names)
+                try:
+                    in_box.get_output("out_tables").connect_to(inode.get_input("tables_in"))
+                except Exception as e:
+                    logger.debug(f"Could not connect {imp_name} to Input Box: {e}")
+
             out_tables = inode.get_output_tables()
             if out_tables:
                 out_box_key = f"{imp_name} [Out]"

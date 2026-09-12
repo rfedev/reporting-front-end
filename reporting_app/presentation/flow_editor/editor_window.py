@@ -9,6 +9,8 @@ from PySide6.QtCore import QEvent, QFileSystemWatcher, QObject, QPoint, QPointF,
 from PySide6.QtGui import QCursor, QDesktopServices, QKeySequence, QShortcut, QShowEvent
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
+    QCompleter,
     QDialog,
     QFileDialog,
     QGroupBox,
@@ -43,6 +45,7 @@ from reporting_app.core.bigquery_run import run_bigquery_script, run_bigquery_im
 from reporting_app.core.models import ProcessFlowInfo, QueryInfo, QueryParameter, Report
 from reporting_app.core.sql_parser import sync_query_csv_comments, update_query_csv_comment
 from reporting_app.presentation.flow_editor.graph_builder import ProcessFlowGraphBuilder
+from reporting_app.utils.date_calc import format_filename_with_date
 from reporting_app.presentation.flow_editor.nodes import ImportCsvNode, QueryNode, TableBoxNode
 from reporting_app.presentation.flow_editor.parameter_overlay import CanvasParameterOverlay
 from reporting_app.presentation.flow_editor.query_tree_widget import QueryManagementPanel
@@ -100,21 +103,51 @@ class ImportCsvDialog(QDialog):
         self,
         initial_imports: Optional[List[dict]] = None,
         workbench_dataset: str = "",
+        report_folder: Optional[Path] = None,
         parent: Optional[QWidget] = None,
     ):
         super().__init__(parent)
         self.setWindowTitle("Import CSV Configuration")
-        self.resize(650, 480)
+        self.resize(680, 480)
         self.workbench_dataset = workbench_dataset.strip()
+        self.report_folder = Path(report_folder) if report_folder else None
+        self.inputs_dir = (self.report_folder / "inputs") if self.report_folder else None
+        if self.inputs_dir:
+            try:
+                self.inputs_dir.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
         self.rows: List[dict] = []
         self._build_ui(initial_imports or [])
 
+    def _get_input_csv_files(self) -> List[str]:
+        """Return list of CSV filenames located in the report's inputs folder."""
+        if not self.inputs_dir or not self.inputs_dir.exists():
+            return []
+        try:
+            return sorted([f.name for f in self.inputs_dir.iterdir() if f.is_file() and f.suffix.lower() == ".csv"])
+        except Exception:
+            return []
+
     def _compute_auto_table(self, file_path: str) -> str:
-        """Derive projectid.dataset.csvtablename from the CSV file path and workbench dataset."""
+        """Derive projectid.dataset.csvtablename from the CSV file path and workbench dataset.
+
+        Strips away variable expressions enclosed in '%...%' and any trailing '-' or '_' prior to them.
+        Example: test-import-%YYYYMM%.csv -> test_import
+        """
         if not file_path:
             return ""
+        import re
         stem = Path(file_path).stem
-        clean_stem = "".join(c if c.isalnum() or c == "_" else "_" for c in stem)
+        # Strip away any %...% tokens and any '-' or '_' immediately preceding them
+        clean_stem = re.sub(r"[-_]?%[^%]+%", "", stem)
+        # Strip any trailing '-' or '_' left over
+        clean_stem = clean_stem.rstrip("-_")
+        # Replace remaining non-alphanumeric (except underscores and hyphens in table names)
+        clean_stem = "".join(c if c.isalnum() or c in ("_", "-") else "_" for c in clean_stem)
+        if not clean_stem:
+            clean_stem = "imported_table"
+
         if self.workbench_dataset:
             wb_prefix = self.workbench_dataset.rstrip(".") + "."
         else:
@@ -183,48 +216,58 @@ class ImportCsvDialog(QDialog):
         row_layout = QVBoxLayout(section_box)
         row_layout.setSpacing(10)
 
-        # Row 1: CSV file path + Browse + Headers checkbox + Delete
+        # Row 1: CSV file path (editable dropdown expanded as much as possible) + Folder icon button + Headers checkbox + Delete
         r1 = QHBoxLayout()
-        r1.addWidget(QLabel("CSV File:"))
-        path_edit = QLineEdit(csv_path)
-        path_edit.setPlaceholderText("Select or enter CSV file path...")
-        r1.addWidget(path_edit)
+        lbl_csv = QLabel("CSV File:")
+        lbl_csv.setFixedWidth(85)
+        r1.addWidget(lbl_csv)
 
-        headers_cb = QCheckBox("Headers")
-        headers_cb.setChecked(has_headers)
+        path_combo = QComboBox(self.container)
+        path_combo.setEditable(True)
+        path_combo.setInsertPolicy(QComboBox.NoInsert)
+        path_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        path_combo.lineEdit().setPlaceholderText("Select or enter CSV filename or path...")
 
-        # Row 2: Output table text box
-        r2 = QHBoxLayout()
-        r2.addWidget(QLabel("Output Table:"))
-        table_edit = QLineEdit(output_table)
-        table_edit.setPlaceholderText("projectid.dataset.tablename")
-        r2.addWidget(table_edit)
+        # Populate dropdown with available CSV files in the inputs folder
+        input_csv_files = self._get_input_csv_files()
+        for f in input_csv_files:
+            path_combo.addItem(f)
 
-        # Auto-population when CSV file is selected or changed
-        def on_path_changed(new_path: str):
-            curr_table = table_edit.text().strip()
-            # If table is empty or matches previous auto-populated value, update it
-            if not curr_table or getattr(table_edit, "_is_auto_populated", False):
-                auto_val = self._compute_auto_table(new_path)
-                if auto_val:
-                    table_edit.setText(auto_val)
-                    table_edit._is_auto_populated = True
+        if csv_path:
+            idx = path_combo.findText(csv_path)
+            if idx >= 0:
+                path_combo.setCurrentIndex(idx)
+            else:
+                path_combo.setEditText(csv_path)
+        else:
+            path_combo.setEditText("")
 
-        path_edit.textChanged.connect(on_path_changed)
+        r1.addWidget(path_combo, 1)
 
-        browse_btn = QPushButton("Browse...")
+        browse_btn = QPushButton("📁")
+        browse_btn.setToolTip("Browse for CSV file...")
+        browse_btn.setFixedWidth(36)
         def pick_file():
+            start_dir = str(self.inputs_dir) if self.inputs_dir and self.inputs_dir.exists() else ""
             selected, _ = QFileDialog.getOpenFileName(
-                self, "Select CSV File", "", "CSV Files (*.csv);;All Files (*)"
+                self, "Select CSV File", start_dir, "CSV Files (*.csv);;All Files (*)"
             )
             if selected:
-                path_edit.setText(selected)
-                auto_val = self._compute_auto_table(selected)
+                sel_path = Path(selected)
+                if self.inputs_dir and sel_path.parent.resolve() == self.inputs_dir.resolve():
+                    display_val = sel_path.name
+                else:
+                    display_val = selected
+                path_combo.setEditText(display_val)
+                auto_val = self._compute_auto_table(display_val)
                 if auto_val:
                     table_edit.setText(auto_val)
                     table_edit._is_auto_populated = True
         browse_btn.clicked.connect(pick_file)
         r1.addWidget(browse_btn)
+
+        headers_cb = QCheckBox("Headers")
+        headers_cb.setChecked(has_headers)
         r1.addWidget(headers_cb)
 
         del_btn = QPushButton("🗑")
@@ -232,12 +275,33 @@ class ImportCsvDialog(QDialog):
         del_btn.setFixedWidth(32)
         r1.addWidget(del_btn)
 
+        # Row 2: Output table text box (expands fully across the row)
+        r2 = QHBoxLayout()
+        lbl_table = QLabel("Output Table:")
+        lbl_table.setFixedWidth(85)
+        r2.addWidget(lbl_table)
+        table_edit = QLineEdit(output_table)
+        table_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        table_edit.setPlaceholderText("projectid.dataset.tablename")
+        r2.addWidget(table_edit, 1)
+
+        # Auto-population when CSV file is selected or changed
+        def on_path_changed(new_path: str):
+            curr_table = table_edit.text().strip()
+            if not curr_table or getattr(table_edit, "_is_auto_populated", False):
+                auto_val = self._compute_auto_table(new_path)
+                if auto_val:
+                    table_edit.setText(auto_val)
+                    table_edit._is_auto_populated = True
+
+        path_combo.currentTextChanged.connect(on_path_changed)
+
         row_layout.addLayout(r1)
         row_layout.addLayout(r2)
 
         row_data = {
             "widget": section_box,
-            "path_edit": path_edit,
+            "path_combo": path_combo,
             "headers_cb": headers_cb,
             "table_edit": table_edit,
             "del_btn": del_btn,
@@ -267,7 +331,7 @@ class ImportCsvDialog(QDialog):
     def get_imports(self) -> List[dict]:
         results = []
         for r in self.rows:
-            csv_path = r["path_edit"].text().strip()
+            csv_path = r["path_combo"].currentText().strip()
             table = r["table_edit"].text().strip()
             headers = r["headers_cb"].isChecked()
             if csv_path or table:
@@ -683,11 +747,16 @@ class ProcessFlowEditorWindow(QMainWindow):
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("Pan: Drag empty space | Multi-select: Ctrl+Drag | Double-click node to edit SQL.")
 
-        # Shortcuts for Save and Delete
+        # Shortcuts for Save, Delete, Copy, and Paste
         self.save_shortcut = QShortcut(QKeySequence.Save, self)
         self.save_shortcut.activated.connect(self._on_save)
         self.del_shortcut = QShortcut(QKeySequence.Delete, self)
         self.del_shortcut.activated.connect(self._on_delete_selected)
+        self.copy_shortcut = QShortcut(QKeySequence.Copy, self)
+        self.copy_shortcut.activated.connect(self._on_copy_selected)
+        self.paste_shortcut = QShortcut(QKeySequence.Paste, self)
+        self.paste_shortcut.activated.connect(self._on_paste)
+        self._clipboard_query_name: Optional[str] = None
 
         # File watcher and polling timer to automatically sync query edits on disk
         self._query_watcher = QFileSystemWatcher(self)
@@ -902,10 +971,12 @@ class ProcessFlowEditorWindow(QMainWindow):
                             unique_params.append(p.name)
 
             date_opt_defaults = self.flow_controller.flow_data.get("parameter_date_options", {})
+            sel_date_param = self.flow_controller.get_selected_filename_date_param()
             self.param_overlay.set_parameters(
                 unique_params,
                 current_defaults=self.flow_controller.parameter_defaults,
                 date_option_defaults=date_opt_defaults,
+                selected_filename_date_param=sel_date_param,
             )
             self.param_overlay.move(14, 14)
             self.param_overlay.raise_()
@@ -997,14 +1068,20 @@ class ProcessFlowEditorWindow(QMainWindow):
             node_name = f"Import csv {idx}"
             idx += 1
 
-        if pos is None:
-            all_nodes = self.graph.all_nodes()
-            if all_nodes:
-                max_x = max((n.pos()[0] for n in all_nodes), default=0.0)
-                min_y = min((n.pos()[1] for n in all_nodes), default=0.0)
-                node_pos = [max_x + 500.0, min_y]
-            else:
-                node_pos = [0.0, 0.0]
+        if not isinstance(pos, (list, tuple)) or len(pos) < 2:
+            try:
+                viewer = self.graph.viewer()
+                # Compute scene position corresponding to top-middle of the visible canvas viewport
+                vp = viewer.viewport()
+                vp_w = vp.width() if vp else viewer.width()
+                top_middle_viewport = QPoint(vp_w // 2, 70)
+                scene_pt = viewer.mapToScene(top_middle_viewport)
+                node_pos = [float(scene_pt.x()), float(scene_pt.y())]
+            except Exception:
+                sc = self.graph.viewer().scene_center()
+                cx = float(sc[0]) if isinstance(sc, (list, tuple)) else float(sc.x())
+                cy = float(sc[1]) if isinstance(sc, (list, tuple)) else float(sc.y())
+                node_pos = [cx, cy - 250.0]
         else:
             node_pos = [pos[0], pos[1]]
 
@@ -1040,7 +1117,12 @@ class ProcessFlowEditorWindow(QMainWindow):
         elif self.app_controller and getattr(self.app_controller, "repo", None):
             wb_dataset = self.app_controller.repo.get_workbench_dataset()
 
-        dialog = ImportCsvDialog(initial_imports=current_imports, workbench_dataset=wb_dataset, parent=self)
+        dialog = ImportCsvDialog(
+            initial_imports=current_imports,
+            workbench_dataset=wb_dataset,
+            report_folder=self.report.folder_path if self.report else None,
+            parent=self,
+        )
         if dialog.exec() == QDialog.Accepted:
             new_imports = dialog.get_imports()
             node.set_imports(new_imports)
@@ -1406,6 +1488,64 @@ class ProcessFlowEditorWindow(QMainWindow):
                 except Exception as e:
                     logger.warning(f"Failed to open with xdg-open: {e}")
 
+    def _on_copy_selected(self) -> None:
+        """Copy the selected query node."""
+        selected_nodes = self.graph.selected_nodes()
+        query_nodes = [
+            n for n in selected_nodes
+            if isinstance(n, QueryNode) or getattr(n, "type_", "") == "reporting.nodes.QueryNode"
+        ]
+        if query_nodes:
+            target = query_nodes[0]
+            qname = target.get_property("query_name") or target.name()
+            self._clipboard_query_name = qname
+            self.status_bar.showMessage(f"Copied query '{qname}'.", 3000)
+
+    def _on_paste(self) -> None:
+        """Paste query node from clipboard, creating a copy of the query file on disk."""
+        if not self._clipboard_query_name or not self.report:
+            return
+
+        src_qinfo = self._get_working_query(self._clipboard_query_name)
+        if not src_qinfo or not src_qinfo.file_path or not src_qinfo.file_path.exists():
+            return
+
+        # Determine unique new query name
+        base_orig = self._clipboard_query_name
+        import re
+        m = re.match(r"^(.*?)(?:_copy(\d*))?$", base_orig)
+        root_name = m.group(1) if m else base_orig
+
+        existing_names = {q.name for q in self.report.queries}
+        candidate = f"{root_name}_copy"
+        idx = 2
+        while candidate in existing_names:
+            candidate = f"{root_name}_copy{idx}"
+            idx += 1
+
+        # Read template SQL from source
+        try:
+            sql_content = src_qinfo.file_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            sql_content = ""
+
+        if self.app_controller:
+            self.app_controller.add_query(candidate, template_sql=sql_content)
+            self.report = self.app_controller.active_report or self.report
+            self._refresh_left_queries()
+
+        # Place the new node near the mouse or with offset from original
+        viewer = self.graph.viewer()
+        cursor_pos = viewer.mapFromGlobal(QCursor.pos())
+        scene_pos = viewer.mapToScene(cursor_pos)
+        pos = (scene_pos.x(), scene_pos.y())
+
+        new_node = self.add_query_to_canvas(candidate, pos=pos)
+        if new_node:
+            self.graph.clear_selection()
+            new_node.set_selected(True)
+            self.status_bar.showMessage(f"Pasted query '{candidate}'.", 3000)
+
     def _on_delete_selected(self) -> None:
         """Delete currently selected query or CSV import nodes and resynchronize topology.
 
@@ -1564,10 +1704,12 @@ class ProcessFlowEditorWindow(QMainWindow):
 
         # Collect parameters and date options from overlay if present
         date_options = {}
+        sel_filename_date_param = None
         if hasattr(self, "param_overlay"):
             overlay_vals = self.param_overlay.get_parameter_values()
             existing_defaults.update(overlay_vals)
             date_options = self.param_overlay.get_date_option_selections()
+            sel_filename_date_param = self.param_overlay.get_selected_filename_date_param()
 
         self.flow_controller.save_flow(
             active_query_names=active_query_names,
@@ -1579,6 +1721,7 @@ class ProcessFlowEditorWindow(QMainWindow):
             view_state=view_state,
             splitter_sizes=cur_splitter_sizes,
             parameter_date_options=date_options,
+            selected_filename_date_param=sel_filename_date_param,
         )
 
         if self.app_controller:
@@ -1617,10 +1760,22 @@ class ProcessFlowEditorWindow(QMainWindow):
 
         # Consolidate parameters from parameter overlay directly
         param_values = dict(self.flow_controller.parameter_defaults)
+        filename_date = ""
         if hasattr(self, "param_overlay"):
             overlay_vals = self.param_overlay.get_parameter_values()
             param_values.update(overlay_vals)
             self.flow_controller.parameter_defaults.update(param_values)
+            filename_date = self.param_overlay.get_filename_date()
+        if not filename_date:
+            # Fallback: check selected_filename_date_param or any date param in param_values
+            sel_param = self.flow_controller.get_selected_filename_date_param()
+            if sel_param and sel_param in param_values:
+                filename_date = param_values[sel_param]
+            else:
+                for k, v in param_values.items():
+                    if any(token in k.lower() for token in ("date", "dt", "day", "month", "year")):
+                        filename_date = v
+                        break
 
         outputs_dir = self.report.folder_path / "outputs"
         outputs_dir.mkdir(parents=True, exist_ok=True)
@@ -1639,11 +1794,21 @@ class ProcessFlowEditorWindow(QMainWindow):
                     headers = item.get("has_headers", True)
                     if not c_path or not d_table:
                         continue
-                    self.status_bar.showMessage(f"Importing {c_path} -> {d_table}...")
+                    if filename_date:
+                        c_path = format_filename_with_date(c_path, filename_date)
+
+                    # Resolve relative path or filename against report inputs directory
+                    resolved_csv = Path(c_path)
+                    if not resolved_csv.is_absolute() and self.report and self.report.folder_path:
+                        candidate = self.report.folder_path / "inputs" / resolved_csv
+                        if candidate.exists() or not resolved_csv.exists():
+                            resolved_csv = candidate
+
+                    self.status_bar.showMessage(f"Importing {resolved_csv.name} -> {d_table}...")
                     QtWidgets.QApplication.processEvents()
                     try:
                         imp_res = run_bigquery_import_csv(
-                            csv_path=c_path,
+                            csv_path=resolved_csv,
                             destination_table=d_table,
                             has_headers=headers,
                         )
@@ -1674,6 +1839,8 @@ class ProcessFlowEditorWindow(QMainWindow):
 
             try:
                 custom_csv = csv_map.get(qname)
+                if custom_csv and filename_date:
+                    custom_csv = format_filename_with_date(custom_csv, filename_date)
                 res = run_bigquery_script(
                     sql_script_path=qinfo.file_path,
                     report_name=self.report.name,

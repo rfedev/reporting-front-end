@@ -99,9 +99,10 @@ def run_bigquery_script(
     # Fallback to workbench dataset project if configured
     if not project_id:
         try:
-            from reporting_app.persistence.repository import SQLiteRepository
-            repo = SQLiteRepository()
-            wb = repo.get_workbench_dataset()
+            from reporting_app.persistence.database import DatabaseManager
+            from reporting_app.persistence.repository import Repository
+            repo = Repository(DatabaseManager())
+            wb = repo.get_workbench_dataset().strip()
             if wb and "." in wb:
                 project_id = wb.split(".")[0].strip()
         except Exception:
@@ -109,11 +110,26 @@ def run_bigquery_script(
 
     out_dir = Path(outputs_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Determine target output CSV filenames
+    target_csv_filenames: List[str] = []
     if output_filename:
-        csv_name = output_filename if output_filename.endswith(".csv") else f"{output_filename}.csv"
-        output_file = out_dir / csv_name
+        if isinstance(output_filename, (list, tuple)):
+            target_csv_filenames = [str(f).strip() for f in output_filename if str(f).strip()]
+        elif "," in str(output_filename):
+            target_csv_filenames = [s.strip() for s in str(output_filename).split(",") if s.strip()]
+        else:
+            target_csv_filenames = [str(output_filename).strip()]
+    elif output_csv_tables:
+        target_csv_filenames = list(output_csv_tables)
     else:
-        output_file = out_dir / f"{query_name}.csv"
+        target_csv_filenames = [f"{query_name}.csv"]
+
+    # Ensure all filenames have .csv extension
+    target_csv_filenames = [
+        f if f.lower().endswith(".csv") else f"{f}.csv"
+        for f in target_csv_filenames
+    ]
 
     # Initialize BigQuery client using ADC with detected or explicit project_id
     if client is None:
@@ -126,64 +142,88 @@ def run_bigquery_script(
     query_job = client.query(substituted_sql, project=project_id)
     results = query_job.result()
 
-    row_count = 0
-    exported_path: Optional[str] = None
+    total_row_count = 0
+    exported_paths: List[str] = []
 
-    if should_export:
-        export_results = results
-        # If running a multi-statement script job where a previous statement was the SELECT
-        if getattr(export_results, "total_rows", None) is None:
-            try:
-                for child_job in client.list_jobs(parent_job=query_job):
-                    if hasattr(child_job, "destination") and child_job.destination:
-                        child_res = child_job.result()
-                        if getattr(child_res, "total_rows", 0) and child_res.total_rows > 0:
-                            export_results = child_res
-                            break
-            except Exception as e:
-                logger.debug(f"Checking multi-query script child jobs: {e}")
-
+    def export_row_iterator_to_file(row_iter: Any, out_file: Path) -> int:
+        written_count = 0
         if stream_to_csv:
-            with open(output_file, "w", newline="", encoding="utf-8") as csvfile:
+            with open(out_file, "w", newline="", encoding="utf-8") as csvfile:
                 writer = csv.writer(csvfile)
                 header_written = False
-                for page in export_results.pages:
+                for page in row_iter.pages:
                     for row in page:
                         if not header_written:
                             writer.writerow(row.keys())
                             header_written = True
                         writer.writerow(list(row.values()))
-                        row_count += 1
+                        written_count += 1
         else:
             try:
-                df = export_results.to_dataframe(create_bqstorage_client=False)
-                df.to_csv(output_file, index=False)
-                row_count = len(df)
+                df = row_iter.to_dataframe(create_bqstorage_client=False)
+                df.to_csv(out_file, index=False)
+                written_count = len(df)
             except Exception as df_err:
-                logger.debug(f"Could not convert to dataframe, falling back to manual CSV writing: {df_err}")
-                with open(output_file, "w", newline="", encoding="utf-8") as csvfile:
+                logger.debug(f"Dataframe conversion fallback to manual CSV writing: {df_err}")
+                with open(out_file, "w", newline="", encoding="utf-8") as csvfile:
                     writer = csv.writer(csvfile)
                     header_written = False
-                    for page in export_results.pages:
+                    for page in row_iter.pages:
                         for row in page:
                             if not header_written:
                                 writer.writerow(row.keys())
                                 header_written = True
                             writer.writerow(list(row.values()))
-                            row_count += 1
+                            written_count += 1
+        return written_count
 
-        exported_path = str(output_file)
-        logger.info(f"Exported {row_count} rows to {exported_path}")
+    if should_export:
+        # Check child jobs for multi-statement scripts
+        child_select_results: List[Any] = []
+        try:
+            for child_job in client.list_jobs(parent_job=query_job):
+                if hasattr(child_job, "destination") and child_job.destination:
+                    child_res = child_job.result()
+                    if getattr(child_res, "total_rows", 0) is not None and child_res.total_rows > 0:
+                        child_select_results.append(child_res)
+        except Exception as e:
+            logger.debug(f"Checking multi-query script child jobs: {e}")
+
+        # In case list_jobs returns in reverse chronological order, ensure proper order
+        if len(child_select_results) > 1:
+            try:
+                child_select_results.reverse()
+            except Exception:
+                pass
+
+        if child_select_results:
+            for idx, c_res in enumerate(child_select_results):
+                fname = target_csv_filenames[idx] if idx < len(target_csv_filenames) else f"{query_name}_{idx+1}.csv"
+                dest_file = out_dir / fname
+                cnt = export_row_iterator_to_file(c_res, dest_file)
+                total_row_count += cnt
+                exported_paths.append(str(dest_file))
+                logger.info(f"Exported {cnt} rows to {dest_file}")
+        else:
+            fname = target_csv_filenames[0] if target_csv_filenames else f"{query_name}.csv"
+            dest_file = out_dir / fname
+            cnt = export_row_iterator_to_file(results, dest_file)
+            total_row_count += cnt
+            exported_paths.append(str(dest_file))
+            logger.info(f"Exported {cnt} rows to {dest_file}")
     else:
         logger.info(f"Query {query_name} completed table creation/update in BigQuery.")
+
+    exported_path_str = ", ".join(exported_paths) if exported_paths else None
 
     return {
         "query_name": query_name,
         "is_export": should_export,
         "has_output_tables": has_output_tables,
         "output_tables": output_tables,
-        "output_file": exported_path,
-        "row_count": row_count if should_export else None,
+        "output_file": exported_path_str,
+        "output_files": exported_paths,
+        "row_count": total_row_count if should_export else None,
         "status": "SUCCESS",
         "project_id": project_id,
     }
@@ -215,10 +255,33 @@ def run_bigquery_import_csv(
         raise FileNotFoundError(f"CSV file not found: {csv_p}")
 
     clean_dest = clean_table_name(destination_table)
+    parts = clean_dest.split(".")
+    if len(parts) == 1 and clean_dest:
+        # Only tablename given (no periods), prepend workbench dataset
+        try:
+            from reporting_app.persistence.database import DatabaseManager
+            from reporting_app.persistence.repository import Repository
+            repo = Repository(DatabaseManager())
+            wb = repo.get_workbench_dataset().strip()
+            if wb:
+                clean_dest = f"{wb.rstrip('.')}.{clean_dest}"
+                parts = clean_dest.split(".")
+        except Exception:
+            pass
+
     if not project_id:
-        parts = clean_dest.split(".")
         if len(parts) >= 3:
             project_id = parts[0]
+        else:
+            try:
+                from reporting_app.persistence.database import DatabaseManager
+                from reporting_app.persistence.repository import Repository
+                repo = Repository(DatabaseManager())
+                wb = repo.get_workbench_dataset().strip()
+                if wb and "." in wb:
+                    project_id = wb.split(".")[0].strip()
+            except Exception:
+                pass
 
     if client is None:
         client = bigquery.Client(project=project_id) if project_id else bigquery.Client()

@@ -237,6 +237,8 @@ class ImportCsvNode(BaseNode):
         super().__init__(ImportCsvItem)
         # Input execution port (connect from prior queries/imports) - Blue
         self.add_input("run_in", multi_input=True, display_name=True, color=(COLOR_BLUE[0], COLOR_BLUE[1], COLOR_BLUE[2]))
+        # Input tables/files port (connect from input TableBox) - Green
+        self.add_input("tables_in", multi_input=True, display_name=True, color=(COLOR_GREEN[0], COLOR_GREEN[1], COLOR_GREEN[2]))
 
         # Output execution port (connect to subsequent queries) - Blue
         self.add_output("run_out", multi_output=True, display_name=True, color=(COLOR_BLUE[0], COLOR_BLUE[1], COLOR_BLUE[2]))
@@ -267,6 +269,14 @@ class ImportCsvNode(BaseNode):
     def set_imports(self, imports: List[dict]):
         import json
         self.set_property("imports_json", json.dumps(imports))
+
+    def get_input_files(self) -> List[str]:
+        files = []
+        for item in self.get_imports():
+            f = item.get("csv_path", "").strip()
+            if f and f not in files:
+                files.append(f)
+        return files
 
     def get_output_tables(self) -> List[str]:
         tables = []

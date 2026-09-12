@@ -3,6 +3,7 @@
 from typing import Dict, List, Optional
 from PySide6.QtCore import QDate, QSize, Qt, Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDateEdit,
     QFormLayout,
@@ -22,6 +23,7 @@ class CanvasParameterOverlay(QFrame):
     """Expandable/collapsible overlay displaying Flow Parameters cleanly over the flow canvas."""
 
     parameter_changed = Signal(str, str)
+    filename_date_changed = Signal(str)
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -57,6 +59,13 @@ class CanvasParameterOverlay(QFrame):
             QPushButton#toggle_btn:hover {
                 color: #ffffff;
             }
+            QCheckBox {
+                spacing: 0px;
+            }
+            QCheckBox::indicator {
+                width: 13px;
+                height: 13px;
+            }
         """)
 
         self._is_collapsed = False
@@ -66,6 +75,8 @@ class CanvasParameterOverlay(QFrame):
         self._param_edits: Dict[str, QLineEdit] = {}
         self._date_combos: Dict[str, QComboBox] = {}
         self._date_pickers: Dict[str, QDateEdit] = {}
+        self._date_checkboxes: Dict[str, QCheckBox] = {}
+        self._selected_filename_date_param: Optional[str] = None
 
         self._build_ui()
 
@@ -131,6 +142,7 @@ class CanvasParameterOverlay(QFrame):
         param_names: List[str],
         current_defaults: Optional[Dict[str, str]] = None,
         date_option_defaults: Optional[Dict[str, str]] = None,
+        selected_filename_date_param: Optional[str] = None,
     ) -> None:
         """Populate the parameters in the list cleanly with exact sizing and state preservation."""
         new_names = list(param_names)
@@ -149,6 +161,8 @@ class CanvasParameterOverlay(QFrame):
             self._param_values.update(current_defaults)
         if date_option_defaults:
             self._last_selected_date_options.update(date_option_defaults)
+        if selected_filename_date_param is not None:
+            self._selected_filename_date_param = selected_filename_date_param
 
         # Only rebuild widgets if parameter names on canvas have actually changed
         if self._param_names == new_names and (self._param_edits or self._date_combos or not new_names):
@@ -167,6 +181,7 @@ class CanvasParameterOverlay(QFrame):
         self._param_edits.clear()
         self._date_combos.clear()
         self._date_pickers.clear()
+        self._date_checkboxes.clear()
 
         arrow = "▶" if self._is_collapsed else "▼"
         count = len(self._param_names)
@@ -180,6 +195,16 @@ class CanvasParameterOverlay(QFrame):
             self.form_layout.addRow(empty_lbl)
             self._update_overlay_size()
             return
+
+        # Determine date parameters
+        date_param_names = [p for p in self._param_names if is_date_param(p)]
+        if len(date_param_names) == 1:
+            self._selected_filename_date_param = date_param_names[0]
+        elif len(date_param_names) > 1:
+            if not self._selected_filename_date_param or self._selected_filename_date_param not in date_param_names:
+                self._selected_filename_date_param = date_param_names[0]
+        else:
+            self._selected_filename_date_param = None
 
         for pname in self._param_names:
             lbl = QLabel(f"{pname}:", self.content_widget)
@@ -224,6 +249,8 @@ class CanvasParameterOverlay(QFrame):
                         self._param_values[p] = val
                         self._update_overlay_size()
                         self.parameter_changed.emit(p, val)
+                        if self._selected_filename_date_param == p:
+                            self.filename_date_changed.emit(val)
                     return on_opt_changed
 
                 def make_dp_handler(p=pname):
@@ -231,6 +258,8 @@ class CanvasParameterOverlay(QFrame):
                         val = new_date.toString("yyyy-MM-dd")
                         self._param_values[p] = val
                         self.parameter_changed.emit(p, val)
+                        if self._selected_filename_date_param == p:
+                            self.filename_date_changed.emit(val)
                     return on_date_changed
 
                 combo.currentTextChanged.connect(make_combo_handler())
@@ -238,6 +267,36 @@ class CanvasParameterOverlay(QFrame):
 
                 row_layout.addWidget(combo)
                 row_layout.addWidget(date_picker)
+
+                # Add checkbox if more than one date parameter
+                if len(date_param_names) > 1:
+                    chk = QCheckBox(row_widget)
+                    chk.setToolTip("Set as filename date")
+                    chk.setChecked(pname == self._selected_filename_date_param)
+                    self._date_checkboxes[pname] = chk
+
+                    def make_chk_handler(p=pname, target_chk=chk):
+                        def on_chk_toggled(checked):
+                            if checked:
+                                self._selected_filename_date_param = p
+                                # Uncheck others
+                                for other_p, other_chk in self._date_checkboxes.items():
+                                    if other_p != p and other_chk.isChecked():
+                                        other_chk.blockSignals(True)
+                                        other_chk.setChecked(False)
+                                        other_chk.blockSignals(False)
+                                val = self.get_filename_date()
+                                self.filename_date_changed.emit(val)
+                            else:
+                                # Keep checked if clicked while already checked (mutually exclusive)
+                                if self._selected_filename_date_param == p:
+                                    target_chk.blockSignals(True)
+                                    target_chk.setChecked(True)
+                                    target_chk.blockSignals(False)
+                        return on_chk_toggled
+
+                    chk.toggled.connect(make_chk_handler())
+                    row_layout.addWidget(chk)
 
                 cur_opt = combo.currentText()
                 if cur_opt == "pick date":
@@ -278,4 +337,21 @@ class CanvasParameterOverlay(QFrame):
     def get_date_option_selections(self) -> Dict[str, str]:
         """Return selected option names for date parameters."""
         return dict(self._last_selected_date_options)
+
+    def get_selected_filename_date_param(self) -> Optional[str]:
+        """Return the parameter name currently selected for the filename date."""
+        return self._selected_filename_date_param
+
+    def get_filename_date(self) -> str:
+        """Return the date value (YYYY-MM-DD) corresponding to the filename date parameter."""
+        date_param_names = [p for p in self._param_names if is_date_param(p)]
+        if not date_param_names:
+            return ""
+
+        target_param = self._selected_filename_date_param
+        if not target_param or target_param not in date_param_names:
+            target_param = date_param_names[0]
+
+        vals = self.get_parameter_values()
+        return vals.get(target_param, "")
 

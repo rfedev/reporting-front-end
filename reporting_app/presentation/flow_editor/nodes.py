@@ -529,3 +529,64 @@ def _custom_pipe_set_connections(self, port1, port2):
 
 PipeItem.reset = _custom_pipe_reset
 PipeItem.set_connections = _custom_pipe_set_connections
+
+# Patch NodeGraphQt PortConnectedCmd and PortDisconnectedCmd to protect against KeyError in ports dictionary
+from NodeGraphQt.base import commands
+from NodeGraphQt.constants import PortTypeEnum
+
+_orig_port_connected_redo = commands.PortConnectedCmd.redo
+_orig_port_disconnected_redo = commands.PortDisconnectedCmd.redo
+
+
+def _safe_port_connected_redo(self):
+    src_model = self.source.model
+    trg_model = self.target.model
+    src_id = self.source.node().id
+    trg_id = self.target.node().id
+
+    src_model.connected_ports[trg_id].append(self.target.name())
+    trg_model.connected_ports[src_id].append(self.source.name())
+
+    self.source.view.connect_to(self.target.view)
+
+    if self.emit_signal:
+        ports = {p.type_(): p for p in [self.source, self.target]}
+        in_p = ports.get(PortTypeEnum.IN.value)
+        out_p = ports.get(PortTypeEnum.OUT.value)
+        if in_p and out_p:
+            graph = self.source.node().graph
+            graph.port_connected.emit(in_p, out_p)
+
+
+def _safe_port_disconnected_redo(self):
+    src_model = self.source.model
+    trg_model = self.target.model
+    src_id = self.source.node().id
+    trg_id = self.target.node().id
+
+    port_names = src_model.connected_ports.get(trg_id)
+    if port_names is []:
+        del src_model.connected_ports[trg_id]
+    if port_names and self.target.name() in port_names:
+        port_names.remove(self.target.name())
+
+    port_names = trg_model.connected_ports.get(src_id)
+    if port_names is []:
+        del trg_model.connected_ports[src_id]
+    if port_names and self.source.name() in port_names:
+        port_names.remove(self.source.name())
+
+    self.source.view.disconnect_from(self.target.view)
+
+    if self.emit_signal:
+        ports = {p.type_(): p for p in [self.source, self.target]}
+        in_p = ports.get(PortTypeEnum.IN.value)
+        out_p = ports.get(PortTypeEnum.OUT.value)
+        if in_p and out_p:
+            graph = self.source.node().graph
+            graph.port_disconnected.emit(in_p, out_p)
+
+
+commands.PortConnectedCmd.redo = _safe_port_connected_redo
+commands.PortDisconnectedCmd.redo = _safe_port_disconnected_redo
+

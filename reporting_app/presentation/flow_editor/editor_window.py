@@ -472,6 +472,13 @@ class ProcessFlowEditorWindow(QMainWindow):
             viewer.viewport().setContextMenuPolicy(Qt.CustomContextMenu)
 
         def custom_mouse_press(event):
+            # If user right-clicks while dragging a live connection noodle, cancel the action
+            if getattr(viewer, "_LIVE_PIPE", None) and viewer._LIVE_PIPE.isVisible():
+                if event.button() in (Qt.RightButton, Qt.LeftButton):
+                    viewer.end_live_connection()
+                    event.accept()
+                    return
+
             if event.button() == Qt.RightButton:
                 map_pos = viewer.mapToScene(event.pos())
                 self._show_canvas_context_menu(event.pos(), map_pos)
@@ -487,10 +494,29 @@ class ProcessFlowEditorWindow(QMainWindow):
                     viewer.CTRL_state = False
                     return orig_mouse_press(event)
 
-                # Check if click lands on empty canvas (no node / pipe)
+                # Check if click lands on or near a pipe item: select only the pipe
                 map_pos = viewer.mapToScene(event.pos())
-                items = viewer._items_near(map_pos, None, 15, 15)
-                if not items:
+                items_exact = viewer.scene().items(map_pos) if viewer.scene() else []
+                # Check if user clicked directly on a port (ports have priority over pipes)
+                port_clicked = next((it for it in items_exact if isinstance(it, PortItem)), None)
+                if not port_clicked:
+                    # Check if click is on or close to a pipe
+                    items_near_pipe = viewer._items_near(map_pos, PipeItem, 8, 8)
+                    pipe_item = next((it for it in items_exact if isinstance(it, PipeItem)), None)
+                    if not pipe_item and items_near_pipe:
+                        pipe_item = items_near_pipe[0]
+                    if pipe_item:
+                        # Deselect other items and select only this pipe
+                        self.graph.clear_selection()
+                        if viewer.scene():
+                            viewer.scene().clearSelection()
+                        pipe_item.setSelected(True)
+                        event.accept()
+                        return
+
+                # Check if click lands on empty canvas (no node / pipe)
+                items_near = viewer._items_near(map_pos, None, 15, 15)
+                if not items_near:
                     # Deselect everything in the process flow editor by clicking once on empty space
                     self.graph.clear_selection()
                     if viewer.scene():
@@ -519,6 +545,26 @@ class ProcessFlowEditorWindow(QMainWindow):
 
             return orig_mouse_release(event)
 
+        # Intercept sceneMousePressEvent so dragging never detaches or starts from a pipe
+        orig_scene_mouse_press = viewer.sceneMousePressEvent
+
+        def custom_scene_mouse_press(event):
+            if event.button() == Qt.LeftButton:
+                pos = event.scenePos()
+                items = viewer._items_near(pos, None, 5, 5)
+                has_port = any(isinstance(it, PortItem) for it in items)
+                has_node = any(isinstance(it, AbstractNodeItem) for it in items)
+                pipe_item = next((it for it in items if isinstance(it, PipeItem)), None)
+                # If clicking on a pipe and NOT directly on a port or node, do not allow pipe detachment
+                if pipe_item and not has_port and not has_node:
+                    self.graph.clear_selection()
+                    if viewer.scene():
+                        viewer.scene().clearSelection()
+                    pipe_item.setSelected(True)
+                    return
+            return orig_scene_mouse_press(event)
+
+        viewer.sceneMousePressEvent = custom_scene_mouse_press
         viewer.mousePressEvent = custom_mouse_press
         viewer.mouseMoveEvent = orig_mouse_move
         viewer.mouseReleaseEvent = custom_mouse_release
@@ -527,6 +573,15 @@ class ProcessFlowEditorWindow(QMainWindow):
         orig_start_live_connection = viewer.start_live_connection
 
         def custom_start_live_connection(selected_port):
+            # Live connections can ONLY be started from a valid PortItem, NEVER directly from a pipe!
+            if not isinstance(selected_port, PortItem):
+                return
+
+            # Only allow starting a manual connection from run_out or run_in ports!
+            port_name = getattr(selected_port, "name", "")
+            if port_name not in ("run_out", "run_in"):
+                return
+
             if viewer._origin_pos is None and selected_port:
                 viewer._origin_pos = viewer.mapFromScene(selected_port.scenePos())
             orig_start_live_connection(selected_port)
@@ -541,13 +596,19 @@ class ProcessFlowEditorWindow(QMainWindow):
 
         viewer.start_live_connection = custom_start_live_connection
 
-        # Intercept live connection release on empty space
+        # Intercept live connection release on empty space or invalid ports
         orig_apply_live_connection = viewer.apply_live_connection
 
         def custom_apply_live_connection(event):
             start_port = getattr(viewer, "_start_port", None)
             pipe_visible = getattr(viewer, "_LIVE_PIPE", None) and viewer._LIVE_PIPE.isVisible()
             if pipe_visible and start_port is not None:
+                start_name = getattr(start_port, "name", "")
+                # Only run_out or run_in can initiate connections
+                if start_name not in ("run_out", "run_in"):
+                    viewer.end_live_connection()
+                    return
+
                 # Check if mouse release lands on any existing port
                 scene_pos = event.scenePos()
                 end_port = None
@@ -561,10 +622,23 @@ class ProcessFlowEditorWindow(QMainWindow):
                     p_name = getattr(start_port, "name", "")
                     p_node_item = getattr(start_port, "node", None)
                     p_base_node = next((n for n in self.graph.all_nodes() if getattr(n, "view", None) == p_node_item), None)
-                    orig_apply_live_connection(event)
+                    viewer.end_live_connection()
                     if p_base_node is not None:
                         self._handle_empty_space_port_drop(p_base_node, p_name, scene_pos.x(), scene_pos.y())
                     return
+                else:
+                    # Connection dropped onto an existing port:
+                    # Enforce that user can ONLY connect run_out <-> run_in
+                    end_name = getattr(end_port, "name", "")
+                    valid_connection = (
+                        (start_name == "run_out" and end_name == "run_in")
+                        or (start_name == "run_in" and end_name == "run_out")
+                    )
+                    if not valid_connection:
+                        # Reject disallowed connection
+                        viewer.end_live_connection()
+                        self.status_bar.showMessage("Execution connections are only allowed between run_out and run_in.", 3000)
+                        return
 
             orig_apply_live_connection(event)
 
@@ -637,11 +711,70 @@ class ProcessFlowEditorWindow(QMainWindow):
                         cur = cur.parentItem() if hasattr(cur, "parentItem") else None
         return None
 
+    def _get_selected_pipes(self) -> List[PipeItem]:
+        """Return list of currently selected PipeItems in the scene."""
+        scene = self.graph.viewer().scene()
+        if not scene:
+            return []
+        return [item for item in scene.selectedItems() if isinstance(item, PipeItem)]
+
+    def _delete_selected_blue_pipes(self) -> None:
+        """Delete selected blue execution connections (run_out -> run_in) to remove links."""
+        pipes = self._get_selected_pipes()
+        deleted_count = 0
+        for pipe in pipes:
+            out_p = getattr(pipe, "output_port", None)
+            in_p = getattr(pipe, "input_port", None)
+            if not out_p or not in_p:
+                continue
+            # Blue noodles connect run_out to run_in between executable nodes
+            if out_p.name == "run_out" and in_p.name == "run_in":
+                # Disconnect ports in NodeGraphQt model
+                out_base_node = next((n for n in self.graph.all_nodes() if getattr(n, "view", None) == out_p.node), None)
+                in_base_node = next((n for n in self.graph.all_nodes() if getattr(n, "view", None) == in_p.node), None)
+                if out_base_node and in_base_node:
+                    src_port = out_base_node.get_output("run_out")
+                    tgt_port = in_base_node.get_input("run_in")
+                    if src_port and tgt_port:
+                        try:
+                            src_port.disconnect_from(tgt_port)
+                            deleted_count += 1
+                        except Exception as e:
+                            logger.debug(f"Could not disconnect {src_port} from {tgt_port}: {e}")
+                # Remove pipe graphics item from scene
+                try:
+                    pipe.disconnect()
+                except Exception:
+                    pass
+                try:
+                    if pipe.scene():
+                        pipe.scene().removeItem(pipe)
+                except Exception:
+                    pass
+
+        if deleted_count > 0:
+            self._on_save(show_popup=False)
+            self.status_bar.showMessage(f"Deleted {deleted_count} connection(s).", 3000)
+        else:
+            self.status_bar.showMessage("Only blue execution connections can be deleted.", 3000)
+
     def _show_canvas_context_menu(self, viewport_pos: QPoint, scene_pos: QtCore.QPointF) -> None:
         """Display context menu on canvas right-click with tabulated shortcut keys."""
         viewer = self.graph.viewer()
         target_node = self._find_executable_node_near(scene_pos)
         selected_nodes = self._get_selected_query_nodes()
+        selected_pipes = self._get_selected_pipes()
+
+        # If only connecting noodles are selected, show only 'Delete connection(s)'
+        if selected_pipes and not selected_nodes and not self.graph.selected_nodes():
+            menu = QMenu(self)
+            del_action = menu.addAction("Delete connection(s)")
+            del_action.setShortcut(QKeySequence("Delete"))
+            del_action.setShortcutVisibleInContextMenu(True)
+            del_action.triggered.connect(self._delete_selected_blue_pipes)
+            global_pt = viewer.viewport().mapToGlobal(viewport_pos) if hasattr(viewer, "viewport") and viewer.viewport() else viewer.mapToGlobal(viewport_pos)
+            menu.exec(global_pt)
+            return
 
         menu = QMenu(self)
 
@@ -1681,10 +1814,14 @@ class ProcessFlowEditorWindow(QMainWindow):
             self.graph.delete_nodes(deletable_nodes)
             self._sync_graph_topology()
             self.status_bar.showMessage(f"Deleted {len(deletable_nodes)} node(s).", 3000)
-        elif selected_nodes:
-            self.status_bar.showMessage(
-                "Table boxes are managed automatically; only query and CSV import nodes can be deleted.", 3000
-            )
+        else:
+            selected_pipes = self._get_selected_pipes()
+            if selected_pipes:
+                self._delete_selected_blue_pipes()
+            elif selected_nodes:
+                self.status_bar.showMessage(
+                    "Table boxes are managed automatically; only query and CSV import nodes can be deleted.", 3000
+                )
 
     def _auto_layout(self, direction: str = "horizontal") -> None:
         """Auto-format layout or align objects horizontally or vertically.
@@ -2203,7 +2340,11 @@ class ProcessFlowEditorWindow(QMainWindow):
                 if isinstance(focus_w, (QLineEdit, QTextEdit, QPlainTextEdit)):
                     return super().eventFilter(watched, event)
 
-                if key == Qt.Key_Delete:
+                if key == Qt.Key_Escape:
+                    if getattr(viewer, "_LIVE_PIPE", None) and viewer._LIVE_PIPE.isVisible():
+                        viewer.end_live_connection()
+                        return True
+                elif key == Qt.Key_Delete:
                     self._on_delete_selected()
                     return True
                 elif key == Qt.Key_F5:

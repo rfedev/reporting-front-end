@@ -404,51 +404,254 @@ class ProcessFlowGraphBuilder:
             rank_groups[ranks[q.name]].append(q)
         sorted_ranks = sorted(rank_groups.keys())
 
-        # Helper to get node dimensions safely
-        def get_node_dims(node: Optional[BaseNode], default_w: float = 200.0, default_h: float = 60.0) -> Tuple[float, float]:
-            if not node:
-                return (0.0, 0.0)
-            try:
-                rect = node.view.boundingRect()
-                w = max(rect.width(), default_w)
-                h = max(rect.height(), default_h)
-                return (w, h)
-            except Exception:
-                return (default_w, default_h)
+        # Build downstream consumer mappings to assign branch levels
+        downstreams: Dict[str, List[str]] = defaultdict(list)
+        for q in queries:
+            for up in upstreams[q.name]:
+                downstreams[up].append(q.name)
 
-        new_positions: Dict[str, Tuple[float, float]] = {}
+        # Compute branch level (0 = main line, 1 = first branch below, 2 = second branch below, etc.)
+        # If a downstream node has multiple upstreams, the first upstream stays on branch 0,
+        # subsequent upstreams get branch levels 1, 2...
+        branch_levels: Dict[str, int] = {q.name: 0 for q in queries}
+        for inode in import_nodes:
+            branch_levels[inode.name()] = 0
+
+        for target_name in all_producers:
+            # Find all nodes that feed directly into target_name
+            prods = [u for u in all_producers if target_name in downstreams[u]]
+            if len(prods) > 1:
+                # Sort for deterministic ordering (e.g. imports or earlier queries first)
+                for b_idx, p_name in enumerate(prods):
+                    branch_levels[p_name] = max(branch_levels.get(p_name, 0), b_idx)
+
+        # Propagate branch levels upstream if a branch node has its own upstreams
+        for _ in range(len(queries)):
+            changed = False
+            for q in queries:
+                b = branch_levels.get(q.name, 0)
+                if b > 0:
+                    for up in upstreams[q.name]:
+                        if branch_levels.get(up, 0) < b:
+                            branch_levels[up] = b
+                            changed = True
+            if not changed:
+                break
 
         if direction == "horizontal":
             # Left to Right:
-            # Ranks advance along X; within a rank, queries stack along Y.
-            cur_x = 0.0
+            # Ranks advance along X; branch levels offset along Y below the main row.
+            # - Top: Output tables / output CSV
+            # - Middle: Import CSV / query nodes
+            # - Bottom: Input tables / input CSV tables
             col_gap_x = 100.0
-            intra_gap_x = 70.0
-            intra_gap_y = 20.0
-            query_gap_y = 60.0
+            intra_gap_y = 60.0
+            intra_gap_x = 20.0
+            cluster_gap_x = 80.0
 
-            # Place import CSV nodes at rank 0 column if present
+            # First determine maximum heights for each tier across the entire graph
+            max_out_h = 60.0
+            max_node_h = 70.0
+
+            for inode in import_nodes:
+                out_box = nodes_by_name.get(f"{inode.name()} [Out]")
+                w_inode, h_inode = get_node_dims(inode, 180.0, 70.0)
+                w_out, h_out = get_node_dims(out_box, 200.0, 60.0)
+                max_node_h = max(max_node_h, h_inode)
+                if out_box:
+                    max_out_h = max(max_out_h, h_out)
+
+            for q in queries:
+                q_node = nodes_by_name.get(q.name)
+                out_box = nodes_by_name.get(f"{q.name} [Out]")
+                csv_box = nodes_by_name.get(f"{q.name} [CSV]")
+                w_q, h_q = get_node_dims(q_node, 180.0, 70.0)
+                w_out, h_out = get_node_dims(out_box, 200.0, 60.0)
+                w_csv, h_csv = get_node_dims(csv_box, 180.0, 60.0)
+                max_node_h = max(max_node_h, h_q)
+                if out_box and csv_box:
+                    max_out_h = max(max_out_h, max(h_out, h_csv))
+                elif out_box:
+                    max_out_h = max(max_out_h, h_out)
+                elif csv_box:
+                    max_out_h = max(max_out_h, h_csv)
+
+            # Base horizontal alignment lines (main level Y=0):
+            base_out_y = 0.0
+            base_node_y = base_out_y + max_out_h + intra_gap_y
+            base_in_y = base_node_y + max_node_h + intra_gap_y
+
+            # Tier height between main flow and lower branch levels
+            tier_height = (base_in_y - base_out_y) + 140.0 + 80.0
+
+            # X-advancing layout
+            cur_x = 0.0
+
+            # Place import CSV nodes at rank 0
             if import_nodes:
-                imp_cur_y = 0.0
                 max_imp_w = 0.0
+                rank_start_x = cur_x
                 for inode in import_nodes:
+                    in_box = nodes_by_name.get(f"{inode.name()} [In]")
                     out_box = nodes_by_name.get(f"{inode.name()} [Out]")
+
+                    w_in, h_in = get_node_dims(in_box, 200.0, 60.0)
                     w_inode, h_inode = get_node_dims(inode, 180.0, 70.0)
                     w_out, h_out = get_node_dims(out_box, 200.0, 60.0)
-                    cluster_h = max(h_inode, h_out)
-                    cluster_w = w_inode + (intra_gap_x + w_out if out_box else 0.0)
+
+                    in_w_span = w_in if in_box else 0.0
+                    out_w_span = w_out if out_box else 0.0
+
+                    b_level = branch_levels.get(inode.name(), 0)
+                    y_offset = b_level * tier_height
+
+                    in_x = rank_start_x
+                    node_x = in_x + (in_w_span + intra_gap_x if in_w_span > 0 else 0.0)
+                    out_x = node_x + w_inode + intra_gap_x
+
+                    # 1. Top & Right: Output tables
+                    if out_box:
+                        new_positions[out_box.name()] = (out_x, base_out_y + y_offset)
+
+                    # 2. Middle: Node
+                    new_positions[inode.name()] = (node_x, base_node_y + y_offset)
+
+                    # 3. Bottom & Left: Input tables
+                    if in_box:
+                        new_positions[in_box.name()] = (in_x, base_in_y + y_offset)
+
+                    cluster_w = (node_x - rank_start_x) + w_inode + (intra_gap_x + out_w_span if out_w_span > 0 else 0.0)
                     max_imp_w = max(max_imp_w, cluster_w)
 
-                    new_positions[inode.name()] = (cur_x, imp_cur_y)
-                    if out_box:
-                        new_positions[out_box.name()] = (cur_x + w_inode + intra_gap_x, imp_cur_y)
-                    imp_cur_y += cluster_h + query_gap_y
                 cur_x += max_imp_w + col_gap_x
 
+            # Place query nodes grouped by rank
             for r in sorted_ranks:
                 queries_in_rank = rank_groups[r]
                 max_rank_w = 0.0
-                cur_y = 0.0
+                rank_start_x = cur_x
+
+                for q in queries_in_rank:
+                    in_box = nodes_by_name.get(f"{q.name} [In]")
+                    conv_box = nodes_by_name.get(f"{q.name} [Convergence]")
+                    q_node = nodes_by_name.get(q.name)
+                    out_box = nodes_by_name.get(f"{q.name} [Out]")
+                    csv_box = nodes_by_name.get(f"{q.name} [CSV]")
+
+                    w_in, h_in = get_node_dims(in_box, 200.0, 60.0)
+                    w_conv, h_conv = get_node_dims(conv_box, 200.0, 60.0)
+                    w_q, h_q = get_node_dims(q_node, 180.0, 70.0)
+                    w_out, h_out = get_node_dims(out_box, 200.0, 60.0)
+                    w_csv, h_csv = get_node_dims(csv_box, 180.0, 60.0)
+
+                    # Input section (bottom-left)
+                    has_in = bool(in_box)
+                    has_conv = bool(conv_box)
+                    if has_in and has_conv:
+                        w_in_sec = w_in + intra_gap_x + w_conv
+                    elif has_in:
+                        w_in_sec = w_in
+                    elif has_conv:
+                        w_in_sec = w_conv
+                    else:
+                        w_in_sec = 0.0
+
+                    # Output section (top-right)
+                    has_out = bool(out_box)
+                    has_csv = bool(csv_box)
+                    if has_out and has_csv:
+                        w_out_sec = w_out + intra_gap_x + w_csv
+                    elif has_out:
+                        w_out_sec = w_out
+                    elif has_csv:
+                        w_out_sec = w_csv
+                    else:
+                        w_out_sec = 0.0
+
+                    # Stagger horizontally: Inputs (left) -> Query Node (middle) -> Outputs (right)
+                    b_level = branch_levels.get(q.name, 0)
+                    y_offset = b_level * tier_height
+
+                    in_x = rank_start_x
+                    node_x = in_x + (w_in_sec + intra_gap_x if w_in_sec > 0 else 0.0)
+                    out_x = node_x + w_q + intra_gap_x
+
+                    # 1. Top & Right: Output tables / output CSV
+                    if has_out and has_csv:
+                        new_positions[out_box.name()] = (out_x, base_out_y + y_offset)
+                        new_positions[csv_box.name()] = (out_x + w_out + intra_gap_x, base_out_y + y_offset)
+                    elif has_out:
+                        new_positions[out_box.name()] = (out_x, base_out_y + y_offset)
+                    elif has_csv:
+                        new_positions[csv_box.name()] = (out_x, base_out_y + y_offset)
+
+                    # 2. Middle: Query node
+                    if q_node:
+                        new_positions[q.name] = (node_x, base_node_y + y_offset)
+
+                    # 3. Bottom & Left: Input tables / convergence tables
+                    if has_in and has_conv:
+                        new_positions[in_box.name()] = (in_x, base_in_y + y_offset)
+                        new_positions[conv_box.name()] = (in_x + w_in + intra_gap_x, base_in_y + y_offset)
+                    elif has_in:
+                        new_positions[in_box.name()] = (in_x, base_in_y + y_offset)
+                    elif has_conv:
+                        new_positions[conv_box.name()] = (in_x, base_in_y + y_offset)
+
+                    cluster_w = (node_x - rank_start_x) + w_q + (intra_gap_x + w_out_sec if w_out_sec > 0 else 0.0)
+                    max_rank_w = max(max_rank_w, cluster_w)
+
+                cur_x = rank_start_x + max_rank_w + col_gap_x
+
+        else:
+            # Top to Bottom (Vertical):
+            # Ranks advance along Y; branches are placed to the left (negative X).
+            cur_y = 0.0
+            intra_gap_y = 40.0
+            intra_gap_x = 20.0
+            rank_gap_y = 80.0
+            tier_width = 500.0  # Cluster width spacing for side branches
+
+            # Place import CSV nodes first
+            if import_nodes:
+                max_imp_h = 0.0
+                for inode in import_nodes:
+                    in_box = nodes_by_name.get(f"{inode.name()} [In]")
+                    out_box = nodes_by_name.get(f"{inode.name()} [Out]")
+
+                    w_in, h_in = get_node_dims(in_box, 200.0, 60.0)
+                    w_inode, h_inode = get_node_dims(inode, 180.0, 70.0)
+                    w_out, h_out = get_node_dims(out_box, 200.0, 60.0)
+
+                    cluster_w = max(w_in, w_inode, w_out)
+                    b_level = branch_levels.get(inode.name(), 0)
+                    branch_x_offset = -b_level * tier_width
+                    cluster_x = branch_x_offset
+                    node_y = cur_y
+
+                    # 1. Input table at Top
+                    if in_box:
+                        new_positions[in_box.name()] = (cluster_x + max(0.0, (cluster_w - w_in) / 2.0), node_y)
+                        node_y += h_in + intra_gap_y
+
+                    # 2. Import CSV node in Middle
+                    new_positions[inode.name()] = (cluster_x + max(0.0, (cluster_w - w_inode) / 2.0), node_y)
+                    node_y += h_inode + intra_gap_y
+
+                    # 3. Output table at Bottom
+                    if out_box:
+                        new_positions[out_box.name()] = (cluster_x + max(0.0, (cluster_w - w_out) / 2.0), node_y)
+                        node_y += h_out + intra_gap_y
+
+                    total_h = node_y - cur_y
+                    max_imp_h = max(max_imp_h, total_h)
+
+                cur_y += max_imp_h + rank_gap_y
+
+            for r in sorted_ranks:
+                queries_in_rank = rank_groups[r]
+                max_rank_h = 0.0
+                rank_start_y = cur_y
 
                 for q in queries_in_rank:
                     in_box = nodes_by_name.get(f"{q.name} [In]")
@@ -467,8 +670,8 @@ class ProcessFlowGraphBuilder:
                     has_in = bool(in_box)
                     has_conv = bool(conv_box)
                     if has_in and has_conv:
-                        w_in_sec = max(w_in, w_conv)
-                        h_in_sec = h_in + intra_gap_y + h_conv
+                        w_in_sec = w_in + intra_gap_x + w_conv
+                        h_in_sec = max(h_in, h_conv)
                     elif has_in:
                         w_in_sec, h_in_sec = w_in, h_in
                     elif has_conv:
@@ -477,114 +680,6 @@ class ProcessFlowGraphBuilder:
                         w_in_sec, h_in_sec = 0.0, 0.0
 
                     # Output section
-                    has_out = bool(out_box)
-                    has_csv = bool(csv_box)
-                    if has_out and has_csv:
-                        w_out_sec = max(w_out, w_csv)
-                        h_out_sec = h_out + intra_gap_y + h_csv
-                    elif has_out:
-                        w_out_sec, h_out_sec = w_out, h_out
-                    elif has_csv:
-                        w_out_sec, h_out_sec = w_csv, h_csv
-                    else:
-                        w_out_sec, h_out_sec = 0.0, 0.0
-
-                    cluster_h = max(h_in_sec, h_q, h_out_sec)
-                    cluster_w = (
-                        (w_in_sec + intra_gap_x if w_in_sec > 0 else 0.0)
-                        + w_q
-                        + (intra_gap_x + w_out_sec if w_out_sec > 0 else 0.0)
-                    )
-                    max_rank_w = max(max_rank_w, cluster_w)
-
-                    # Place input box(es)
-                    if has_in and has_conv:
-                        new_positions[in_box.name()] = (cur_x, cur_y)
-                        new_positions[conv_box.name()] = (cur_x, cur_y + h_in + intra_gap_y)
-                    elif has_in:
-                        new_positions[in_box.name()] = (cur_x, cur_y)
-                    elif has_conv:
-                        new_positions[conv_box.name()] = (cur_x, cur_y)
-
-                    # Place query node
-                    qx = cur_x + (w_in_sec + intra_gap_x if w_in_sec > 0 else 0.0)
-                    qy = cur_y + max(0.0, (cluster_h - h_q) / 2.0)
-                    if q_node:
-                        new_positions[q.name] = (qx, qy)
-
-                    # Place output box(es)
-                    ox = qx + w_q + intra_gap_x
-                    if has_out and has_csv:
-                        new_positions[out_box.name()] = (ox, cur_y)
-                        new_positions[csv_box.name()] = (ox, cur_y + h_out + intra_gap_y)
-                    elif has_out:
-                        new_positions[out_box.name()] = (ox, cur_y)
-                    elif has_csv:
-                        new_positions[csv_box.name()] = (ox, cur_y)
-
-                    cur_y += cluster_h + query_gap_y
-
-                cur_x += max_rank_w + col_gap_x
-
-        else:
-            # Top to Bottom (Vertical):
-            # Ranks advance along Y; within a rank, queries advance along X.
-            cur_y = 0.0
-            row_gap_y = 120.0
-            intra_gap_x = 20.0
-            intra_gap_y = 40.0
-            query_gap_x = 70.0
-
-            # Place import CSV nodes at rank 0 row if present
-            if import_nodes:
-                imp_cur_x = 0.0
-                max_imp_h = 0.0
-                for inode in import_nodes:
-                    out_box = nodes_by_name.get(f"{inode.name()} [Out]")
-                    w_inode, h_inode = get_node_dims(inode, 180.0, 70.0)
-                    w_out, h_out = get_node_dims(out_box, 200.0, 60.0)
-                    cluster_w = max(w_inode, w_out)
-                    cluster_h = h_inode + (intra_gap_y + h_out if out_box else 0.0)
-                    max_imp_h = max(max_imp_h, cluster_h)
-
-                    new_positions[inode.name()] = (imp_cur_x, cur_y)
-                    if out_box:
-                        new_positions[out_box.name()] = (imp_cur_x, cur_y + h_inode + intra_gap_y)
-                    imp_cur_x += cluster_w + query_gap_x
-                cur_y += max_imp_h + row_gap_y
-
-            for r in sorted_ranks:
-                queries_in_rank = rank_groups[r]
-                max_rank_h = 0.0
-                cur_x = 0.0
-
-                for q in queries_in_rank:
-                    in_box = nodes_by_name.get(f"{q.name} [In]")
-                    conv_box = nodes_by_name.get(f"{q.name} [Convergence]")
-                    q_node = nodes_by_name.get(q.name)
-                    out_box = nodes_by_name.get(f"{q.name} [Out]")
-                    csv_box = nodes_by_name.get(f"{q.name} [CSV]")
-
-                    w_in, h_in = get_node_dims(in_box, 200.0, 60.0)
-                    w_conv, h_conv = get_node_dims(conv_box, 200.0, 60.0)
-                    w_q, h_q = get_node_dims(q_node, 180.0, 70.0)
-                    w_out, h_out = get_node_dims(out_box, 200.0, 60.0)
-                    w_csv, h_csv = get_node_dims(csv_box, 180.0, 60.0)
-
-                    # Top: Input section
-                    has_in = bool(in_box)
-                    has_conv = bool(conv_box)
-                    if has_in and has_conv:
-                        w_in_sec = max(w_in, w_conv)
-                        h_in_sec = h_in + intra_gap_y + h_conv
-                    elif has_in:
-                        w_in_sec, h_in_sec = w_in, h_in
-                    elif has_conv:
-                        w_in_sec, h_in_sec = w_conv, h_conv
-                    else:
-                        w_in_sec, h_in_sec = 0.0, 0.0
-
-                    # Bottom: Output section (placed side-by-side if both exist to balance width)
                     has_out = bool(out_box)
                     has_csv = bool(csv_box)
                     if has_out and has_csv:
@@ -598,42 +693,46 @@ class ProcessFlowGraphBuilder:
                         w_out_sec, h_out_sec = 0.0, 0.0
 
                     cluster_w = max(w_in_sec, w_q, w_out_sec)
-                    cluster_h = (
-                        (h_in_sec + intra_gap_y if h_in_sec > 0 else 0.0)
-                        + h_q
-                        + (intra_gap_y + h_out_sec if h_out_sec > 0 else 0.0)
-                    )
-                    max_rank_h = max(max_rank_h, cluster_h)
+                    b_level = branch_levels.get(q.name, 0)
+                    branch_x_offset = -b_level * tier_width
+                    cluster_x = branch_x_offset
+                    node_y = rank_start_y
 
-                    # Place top input box(es)
+                    # 1. Top: Input section
                     if has_in and has_conv:
-                        new_positions[in_box.name()] = (cur_x + max(0.0, (cluster_w - w_in) / 2.0), cur_y)
-                        new_positions[conv_box.name()] = (cur_x + max(0.0, (cluster_w - w_conv) / 2.0), cur_y + h_in + intra_gap_y)
+                        ix_start = cluster_x + max(0.0, (cluster_w - w_in_sec) / 2.0)
+                        new_positions[in_box.name()] = (ix_start, node_y)
+                        new_positions[conv_box.name()] = (ix_start + w_in + intra_gap_x, node_y)
+                        node_y += h_in_sec + intra_gap_y
                     elif has_in:
-                        new_positions[in_box.name()] = (cur_x + max(0.0, (cluster_w - w_in) / 2.0), cur_y)
+                        new_positions[in_box.name()] = (cluster_x + max(0.0, (cluster_w - w_in) / 2.0), node_y)
+                        node_y += h_in_sec + intra_gap_y
                     elif has_conv:
-                        new_positions[conv_box.name()] = (cur_x + max(0.0, (cluster_w - w_conv) / 2.0), cur_y)
+                        new_positions[conv_box.name()] = (cluster_x + max(0.0, (cluster_w - w_conv) / 2.0), node_y)
+                        node_y += h_in_sec + intra_gap_y
 
-                    # Place middle query node
-                    qy = cur_y + (h_in_sec + intra_gap_y if h_in_sec > 0 else 0.0)
-                    qx = cur_x + max(0.0, (cluster_w - w_q) / 2.0)
+                    # 2. Middle: Query node
                     if q_node:
-                        new_positions[q.name] = (qx, qy)
+                        new_positions[q.name] = (cluster_x + max(0.0, (cluster_w - w_q) / 2.0), node_y)
+                        node_y += h_q + intra_gap_y
 
-                    # Place bottom output box(es)
-                    oy = qy + h_q + intra_gap_y
+                    # 3. Bottom: Output section
                     if has_out and has_csv:
-                        ox_start = cur_x + max(0.0, (cluster_w - w_out_sec) / 2.0)
-                        new_positions[out_box.name()] = (ox_start, oy)
-                        new_positions[csv_box.name()] = (ox_start + w_out + intra_gap_x, oy)
+                        ox_start = cluster_x + max(0.0, (cluster_w - w_out_sec) / 2.0)
+                        new_positions[out_box.name()] = (ox_start, node_y)
+                        new_positions[csv_box.name()] = (ox_start + w_out + intra_gap_x, node_y)
+                        node_y += h_out_sec + intra_gap_y
                     elif has_out:
-                        new_positions[out_box.name()] = (cur_x + max(0.0, (cluster_w - w_out) / 2.0), oy)
+                        new_positions[out_box.name()] = (cluster_x + max(0.0, (cluster_w - w_out) / 2.0), node_y)
+                        node_y += h_out_sec + intra_gap_y
                     elif has_csv:
-                        new_positions[csv_box.name()] = (cur_x + max(0.0, (cluster_w - w_csv) / 2.0), oy)
+                        new_positions[csv_box.name()] = (cluster_x + max(0.0, (cluster_w - w_csv) / 2.0), node_y)
+                        node_y += h_out_sec + intra_gap_y
 
-                    cur_x += cluster_w + query_gap_x
+                    total_h = node_y - rank_start_y
+                    max_rank_h = max(max_rank_h, total_h)
 
-                cur_y += max_rank_h + row_gap_y
+                cur_y = rank_start_y + max_rank_h + rank_gap_y
 
         # 4. Apply new positions to all matching nodes in the graph
         for node_name, (nx, ny) in new_positions.items():

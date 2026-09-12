@@ -2,7 +2,7 @@
   "flow_name": "Process Flow 01",
   "report_name": "test",
   "query_names": [
-    "new name11"
+    "test query"
   ],
   "parameter_defaults": {
     "repdate": "2026-09-11",
@@ -15,7 +15,7 @@
     "test2": "table_01.csv",
     "new query": "test-ouptut.csv",
     "new name": "sel1.csv, sel3.csv",
-    "new name11": "sel1.csv, sel3.csv"
+    "test query": "sel1.csv, sel2.csv, sel3.csv"
   },
   "csv_imports": [],
   "graph_session": {
@@ -29,10 +29,10 @@
       "reject_connection_types": "{}"
     },
     "nodes": {
-      "0x7f031b792510": {
+      "0x7f52e02bbbb0": {
         "type_": "reporting.nodes.QueryNode",
         "icon": null,
-        "name": "new name11",
+        "name": "test query",
         "color": [
           45,
           80,
@@ -52,28 +52,28 @@
           180
         ],
         "disabled": false,
-        "selected": true,
+        "selected": false,
         "visible": true,
         "width": 162.140625,
-        "height": 171.3,
+        "height": 133.3,
         "pos": [
-          536.3751375137514,
-          310.3993399339934
+          693.6299842666858,
+          386.9508517570829
         ],
         "layout_direction": 0,
         "port_deletion_allowed": false,
         "subgraph_session": {},
         "custom": {
-          "query_name": "new name11",
-          "query_path": "/home/ric/git/reporting-front-end/reports/test/queries/new name11.sql",
+          "query_name": "test query",
+          "query_path": "/home/ric/git/reporting-front-end/reports/test/queries/test query.sql",
           "report_name": "test",
-          "parameters": "repdate, testParam, testParam2"
+          "parameters": "repdate"
         }
       },
-      "0x7f031b7c9bd0": {
+      "0x7f52e02bb950": {
         "type_": "reporting.nodes.TableBoxNode",
         "icon": null,
-        "name": "new name11 [CSV]",
+        "name": "test query [CSV]",
         "color": [
           110,
           45,
@@ -93,42 +93,92 @@
           180
         ],
         "disabled": false,
-        "selected": false,
+        "selected": true,
         "visible": true,
         "width": 160,
-        "height": 114.0,
+        "height": 132.0,
         "pos": [
-          796.3751375137514,
-          310.3993399339934
+          953.6299842666858,
+          386.9508517570829
         ],
         "layout_direction": 0,
         "port_deletion_allowed": false,
         "subgraph_session": {},
         "custom": {
           "box_type": "Output CSV",
-          "raw_tables_json": "[\"sel1.csv\", \"sel3.csv\"]",
-          "query_owner": "new name11"
+          "raw_tables_json": "[\"sel1.csv\", \"sel2.csv\", \"sel3.csv\"]",
+          "query_owner": "test query"
+        }
+      },
+      "0x7f52e20bc8a0": {
+        "type_": "reporting.nodes.TableBoxNode",
+        "icon": null,
+        "name": "test query [In]",
+        "color": [
+          35,
+          115,
+          70,
+          255
+        ],
+        "border_color": [
+          74,
+          84,
+          85,
+          255
+        ],
+        "text_color": [
+          255,
+          255,
+          255,
+          180
+        ],
+        "disabled": false,
+        "selected": true,
+        "visible": true,
+        "width": 210.0,
+        "height": 114.0,
+        "pos": [
+          413.6299842666858,
+          346.9508517570829
+        ],
+        "layout_direction": 0,
+        "port_deletion_allowed": false,
+        "subgraph_session": {},
+        "custom": {
+          "box_type": "Input Tables",
+          "raw_tables_json": "[\"link-to-cloud.test_dataset.test-import-202608\", \"link-to-cloud.test_dataset.test-import\"]",
+          "query_owner": ""
         }
       }
     },
     "connections": [
       {
+        "in": [
+          "0x7f52e02bbbb0",
+          "tables_in"
+        ],
         "out": [
-          "0x7f031b792510",
+          "0x7f52e20bc8a0",
+          "out_tables"
+        ]
+      },
+      {
+        "out": [
+          "0x7f52e02bbbb0",
           "csv_out"
         ],
         "in": [
-          "0x7f031b7c9bd0",
+          "0x7f52e02bb950",
           "in_tables"
         ]
       }
     ]
   },
   "view_state": {
-    "zoom": 0.85,
+    "zoom": 0.25,
     "center": [
-      746.3751375137514,
-      396.04933993399345
+      763.6299842666858,
+      433.6008517570829
     ]
   },
   "splitter_sizes": [
@@ -138,5 +188,6 @@
   ],
   "parameter_date_options": {
     "repdate": "pick date"
-  }
+  },
+  "selected_filename_date_param": "repdate"
 }

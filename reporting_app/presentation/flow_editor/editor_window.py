@@ -1660,7 +1660,7 @@ class ProcessFlowEditorWindow(QMainWindow):
 
         self.status_bar.showMessage(f"Aligned {len(nodes)} selected object(s) {dir_msg}.", 3000)
 
-    def _on_save(self) -> None:
+    def _on_save(self, show_popup: bool = True) -> None:
         """Save process flow graph state, parameter defaults, and table display mode."""
         session_data = self.graph.serialize_session()
 
@@ -1730,7 +1730,8 @@ class ProcessFlowEditorWindow(QMainWindow):
             self._refresh_left_queries()
 
         self.status_bar.showMessage("Process flow saved successfully.", 4000)
-        QMessageBox.information(self, "Saved", f"Process flow '{self.flow_controller.flow_name}' saved.")
+        if show_popup:
+            QMessageBox.information(self, "Saved", f"Process flow '{self.flow_controller.flow_name}' saved.")
 
     def closeEvent(self, event) -> None:
         """Remember splitter dimensions when closing process flow editor window."""
@@ -1908,14 +1909,37 @@ class ProcessFlowEditorWindow(QMainWindow):
             else:
                 self._pending_query_renames[orig_name] = new_name
 
-            # Immediately update the left panel to reflect the new name
+            # 1. Immediately rename the query file on disk if app_controller is available
+            if self.app_controller:
+                renamed_ok = self.app_controller.rename_query(old_name, new_name)
+                if renamed_ok:
+                    self.report = self.app_controller.active_report or self.report
+                    if orig_name in self._pending_query_renames:
+                        self._pending_query_renames.pop(orig_name, None)
+            else:
+                # If app_controller is not wired, attempt direct file rename
+                try:
+                    qinfo = self._get_working_query(old_name)
+                    if qinfo and qinfo.file_path and qinfo.file_path.exists():
+                        clean_new = new_name.strip()
+                        if clean_new.endswith(".sql"):
+                            clean_new = clean_new[:-4]
+                        target_file = qinfo.file_path.parent / f"{clean_new}.sql"
+                        if not target_file.exists():
+                            qinfo.file_path.rename(target_file)
+                            qinfo.name = clean_new
+                            qinfo.file_path = target_file
+                except Exception as e:
+                    logger.error(f"Direct file rename failed: {e}")
+
+            # 2. Immediately update the left panel to reflect the new name
             self._refresh_left_queries()
 
-            # Update flow_controller references in memory
+            # 3. Update flow_controller references in memory
             if self.flow_controller:
                 self.flow_controller.rename_query(old_name, new_name)
 
-            # Update existing positions map
+            # 4. Update existing positions map
             if old_name in self._node_positions:
                 self._node_positions[new_name] = self._node_positions.pop(old_name)
             for suffix in ("[Out]", "[CSV]", "[In]"):
@@ -1924,7 +1948,7 @@ class ProcessFlowEditorWindow(QMainWindow):
                 if old_key in self._node_positions:
                     self._node_positions[new_key] = self._node_positions.pop(old_key)
 
-            # Update live nodes on canvas (names and custom properties)
+            # 5. Update live nodes on canvas (names and custom properties)
             for n in self.graph.all_nodes():
                 curr_qname = n.get_property("query_name")
                 if n.name() == old_name or curr_qname == old_name or n.name() == new_name:
@@ -1939,8 +1963,15 @@ class ProcessFlowEditorWindow(QMainWindow):
                     if n.get_property("query_owner") == old_name:
                         n.set_property("query_owner", new_name)
 
-            # Re-sync graph topology to preserve all connections and table boxes
+            # 6. Re-sync graph topology to preserve all connections and table boxes
             self._sync_graph_topology()
+
+            # 7. Persist updated flow JSON immediately so there's no mismatch
+            if self.flow_controller:
+                try:
+                    self._on_save(show_popup=False)
+                except Exception as e:
+                    logger.warning(f"Could not auto-save flow after query rename: {e}")
         finally:
             self._is_renaming_query = False
 

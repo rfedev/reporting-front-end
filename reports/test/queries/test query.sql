@@ -8,6 +8,6 @@ SELECT '{repdate}' as reporting_date, 1 as num;
 select * from `link-to-cloud.test_dataset.test-import-202608`;
 
 # output: sel3.csv
-select * from `link-to-cloud.test_dataset.test-import-202609`;
+select * from `link-to-cloud.test_dataset.test-import`;
 
 

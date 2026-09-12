@@ -97,24 +97,29 @@ class QueryManagementPanel(QWidget):
 
         # Action Buttons
         btn_layout = QHBoxLayout()
+        btn_layout.setContentsMargins(0, 4, 0, 0)
+        btn_layout.setSpacing(4)
+
+        button_size = 28
         self.add_btn = QPushButton("➕")
         self.add_btn.setToolTip("Add Query")
-        self.add_btn.setMinimumWidth(0)
+        self.add_btn.setFixedSize(button_size, button_size)
         self.add_btn.clicked.connect(self._on_add)
 
         self.rename_btn = QPushButton("✏️")
         self.rename_btn.setToolTip("Rename Query")
-        self.rename_btn.setMinimumWidth(0)
+        self.rename_btn.setFixedSize(button_size, button_size)
         self.rename_btn.clicked.connect(self._on_rename)
 
         self.remove_btn = QPushButton("🗑️")
         self.remove_btn.setToolTip("Delete Query")
-        self.remove_btn.setMinimumWidth(0)
+        self.remove_btn.setFixedSize(button_size, button_size)
         self.remove_btn.clicked.connect(self._on_remove)
 
         btn_layout.addWidget(self.add_btn)
         btn_layout.addWidget(self.rename_btn)
         btn_layout.addWidget(self.remove_btn)
+        btn_layout.addStretch()
         layout.addLayout(btn_layout)
 
     def _show_context_menu(self, pos: QPoint) -> None:

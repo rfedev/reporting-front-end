@@ -453,6 +453,123 @@ class TestGraphTopology(unittest.TestCase):
         self.assertEqual(len(editor.graph.selected_nodes()), 0)
         editor.close()
 
+    def test_query_centric_spine_auto_layout_with_imports_and_flanking(self):
+        """Verify query-centric spine auto-layout:
+        - Horizontal: Inputs above, outputs below, sibling boxes side-by-side.
+        - Vertical: Inputs left, outputs right, sibling boxes stacked vertically.
+        - Import Files nodes placed at Rank 0 at the start of the pipeline.
+        - Zero collisions/overlaps across all nodes.
+        """
+        editor = ProcessFlowEditorWindow(
+            report=self.controller.active_report,
+            flow_name="SpineLayoutFlow",
+            app_controller=self.controller,
+        )
+        import_data = [
+            {
+                "node_name": "Import Files",
+                "items": [
+                    {"csv_path": "data/sales.csv", "has_headers": True, "output_table": "raw.sales_data"}
+                ]
+            }
+        ]
+        q1 = self.controller.active_report.get_query("query1")
+        q3 = self.controller.active_report.get_query("query3")
+        ProcessFlowGraphBuilder.rebuild_graph(
+            editor.graph,
+            queries=[q1, q3],
+            existing_positions={},
+            show_full_table_names=True,
+            csv_filenames={"query1": "query1.csv"},
+            import_csv_data=import_data,
+        )
+
+        # 1. Horizontal Auto-Layout
+        editor._auto_layout("horizontal")
+
+        nodes = {n.name(): n for n in editor.graph.all_nodes()}
+        self.assertIn("Import Files", nodes)
+        self.assertIn("query1", nodes)
+        self.assertIn("query3", nodes)
+
+        imp_node = nodes["Import Files"]
+        q1_node = nodes["query1"]
+        q3_node = nodes["query3"]
+
+        # Import Files at rank 0, followed by queries along X
+        self.assertLess(imp_node.pos()[0], q1_node.pos()[0])
+        self.assertLess(q1_node.pos()[0], q3_node.pos()[0])
+
+        # Query1 inputs (above) and outputs (below)
+        q1_in = nodes.get("query1 [In]")
+        q1_out = nodes.get("query1 [Out]")
+        q1_csv = nodes.get("query1 [CSV]")
+
+        if q1_in:
+            self.assertLess(q1_in.pos()[1], q1_node.pos()[1], "Input box must be above query node in horizontal layout")
+        if q1_out:
+            self.assertGreater(q1_out.pos()[1], q1_node.pos()[1], "Output box must be below query node in horizontal layout")
+        if q1_csv:
+            self.assertGreater(q1_csv.pos()[1], q1_node.pos()[1], "CSV box must be below query node in horizontal layout")
+
+        # If both q1_out and q1_csv exist, they must be side-by-side (different X, same Y)
+        if q1_out and q1_csv:
+            self.assertNotEqual(q1_out.pos()[0], q1_csv.pos()[0], "Sibling output boxes must be side-by-side in horizontal layout")
+            self.assertAlmostEqual(q1_out.pos()[1], q1_csv.pos()[1], delta=1.0, msg="Sibling output boxes must have matching top Y")
+
+        # Check for zero collisions in horizontal layout
+        all_nodes_list = editor.graph.all_nodes()
+        rects_h = []
+        for n in all_nodes_list:
+            pos = n.pos()
+            w = n.view.boundingRect().width()
+            h = n.view.boundingRect().height()
+            rects_h.append((n.name(), pos[0], pos[1], pos[0] + w, pos[1] + h))
+
+        for i in range(len(rects_h)):
+            for j in range(i + 1, len(rects_h)):
+                n1, l1, t1, r1, b1 = rects_h[i]
+                n2, l2, t2, r2, b2 = rects_h[j]
+                overlaps = not (r1 <= l2 or r2 <= l1 or b1 <= t2 or b2 <= t1)
+                self.assertFalse(overlaps, f"Nodes '{n1}' and '{n2}' overlap in horizontal layout!")
+
+        # 2. Vertical Auto-Layout
+        editor._auto_layout("vertical")
+
+        # Import Files at rank 0 (top), followed by queries along Y
+        self.assertLess(imp_node.pos()[1], q1_node.pos()[1])
+        self.assertLess(q1_node.pos()[1], q3_node.pos()[1])
+
+        # Query1 inputs (left) and outputs (right)
+        if q1_in:
+            self.assertLess(q1_in.pos()[0], q1_node.pos()[0], "Input box must be to the left of query in vertical layout")
+        if q1_out:
+            self.assertGreater(q1_out.pos()[0], q1_node.pos()[0], "Output box must be to the right of query in vertical layout")
+        if q1_csv:
+            self.assertGreater(q1_csv.pos()[0], q1_node.pos()[0], "CSV box must be to the right of query in vertical layout")
+
+        # If both q1_out and q1_csv exist, they must be stacked vertically (same X, different Y)
+        if q1_out and q1_csv:
+            self.assertAlmostEqual(q1_out.pos()[0], q1_csv.pos()[0], delta=1.0, msg="Sibling output boxes must have matching left X")
+            self.assertNotEqual(q1_out.pos()[1], q1_csv.pos()[1], "Sibling output boxes must be stacked vertically in vertical layout")
+
+        # Check for zero collisions in vertical layout
+        rects_v = []
+        for n in all_nodes_list:
+            pos = n.pos()
+            w = n.view.boundingRect().width()
+            h = n.view.boundingRect().height()
+            rects_v.append((n.name(), pos[0], pos[1], pos[0] + w, pos[1] + h))
+
+        for i in range(len(rects_v)):
+            for j in range(i + 1, len(rects_v)):
+                n1, l1, t1, r1, b1 = rects_v[i]
+                n2, l2, t2, r2, b2 = rects_v[j]
+                overlaps = not (r1 <= l2 or r2 <= l1 or b1 <= t2 or b2 <= t1)
+                self.assertFalse(overlaps, f"Nodes '{n1}' and '{n2}' overlap in vertical layout!")
+
+        editor.close()
+
 
 if __name__ == "__main__":
     unittest.main()

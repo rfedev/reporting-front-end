@@ -72,7 +72,7 @@ class TestGraphTopology(unittest.TestCase):
         )
 
         self.controller = AppController(db_manager=self.db_manager)
-        self.controller.set_working_directory(self.root)
+        self.controller.set_working_directories([{"alias": "Primary", "path": str(self.root)}])
         self.controller.initialize()
 
     def tearDown(self):

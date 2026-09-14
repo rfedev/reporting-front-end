@@ -1,0 +1,560 @@
+{
+  "flow_name": "Process Flow 01",
+  "report_name": "l0018-PSD",
+  "query_names": [
+    "test-query",
+    "fsefes"
+  ],
+  "parameter_defaults": {},
+  "show_full_table_names": false,
+  "csv_filenames": {},
+  "csv_imports": [
+    {
+      "node_name": "Import csv",
+      "items": [
+        {
+          "csv_path": "/home/ric/git/reporting-front-end/reports/l0018-PSD/outputs/test-import-csv.csv",
+          "has_headers": true,
+          "output_table": "link-to-cloud.test_dataset.test_import_csv"
+        }
+      ]
+    },
+    {
+      "node_name": "Import csv 2",
+      "items": [
+        {
+          "csv_path": "/home/ric/git/reporting-front-end/reports/l0018-PSD/outputs/test-import-csv.csv",
+          "has_headers": true,
+          "output_table": "link-to-cloud.test_dataset.test_import_csv"
+        },
+        {
+          "csv_path": "/home/ric/git/reporting-front-end/reports/l0018-PSD/outputs/test-query.csv",
+          "has_headers": true,
+          "output_table": "link-to-cloud.test_dataset.test_query"
+        }
+      ]
+    }
+  ],
+  "graph_session": {
+    "graph": {
+      "layout_direction": 0,
+      "acyclic": true,
+      "pipe_collision": false,
+      "pipe_slicing": true,
+      "pipe_style": 1,
+      "accept_connection_types": "{}",
+      "reject_connection_types": "{}"
+    },
+    "nodes": {
+      "0x7f6de7931350": {
+        "type_": "reporting.nodes.QueryNode",
+        "icon": null,
+        "name": "test-query",
+        "color": [
+          45,
+          80,
+          130,
+          255
+        ],
+        "border_color": [
+          74,
+          84,
+          85,
+          255
+        ],
+        "text_color": [
+          255,
+          255,
+          255,
+          180
+        ],
+        "disabled": false,
+        "selected": false,
+        "visible": true,
+        "width": 162.140625,
+        "height": 99.0,
+        "pos": [
+          613.1682643243927,
+          286.04375606199955
+        ],
+        "layout_direction": 0,
+        "port_deletion_allowed": false,
+        "subgraph_session": {},
+        "custom": {
+          "query_name": "test-query",
+          "query_path": "/home/ric/git/reporting-front-end/reports/l0018-PSD/queries/test-query.sql",
+          "report_name": "l0018-PSD",
+          "parameters": ""
+        }
+      },
+      "0x7f6de7931480": {
+        "type_": "reporting.nodes.TableBoxNode",
+        "icon": null,
+        "name": "test-query [CSV]",
+        "color": [
+          110,
+          45,
+          130,
+          255
+        ],
+        "border_color": [
+          74,
+          84,
+          85,
+          255
+        ],
+        "text_color": [
+          255,
+          255,
+          255,
+          180
+        ],
+        "disabled": false,
+        "selected": false,
+        "visible": true,
+        "width": 160,
+        "height": 96.0,
+        "pos": [
+          862.5176989391055,
+          476.23242365641414
+        ],
+        "layout_direction": 0,
+        "port_deletion_allowed": false,
+        "subgraph_session": {},
+        "custom": {
+          "box_type": "Output CSV",
+          "raw_tables_json": "[\"test-query.csv\"]",
+          "query_owner": "test-query"
+        }
+      },
+      "0x7f6de79315b0": {
+        "type_": "reporting.nodes.QueryNode",
+        "icon": null,
+        "name": "fsefes",
+        "color": [
+          45,
+          80,
+          130,
+          255
+        ],
+        "border_color": [
+          74,
+          84,
+          85,
+          255
+        ],
+        "text_color": [
+          255,
+          255,
+          255,
+          180
+        ],
+        "disabled": false,
+        "selected": false,
+        "visible": true,
+        "width": 162.140625,
+        "height": 99.0,
+        "pos": [
+          808.3111372780523,
+          -333.25108291288126
+        ],
+        "layout_direction": 0,
+        "port_deletion_allowed": false,
+        "subgraph_session": {},
+        "custom": {
+          "query_name": "fsefes",
+          "query_path": "/home/ric/git/reporting-front-end/reports/l0018-PSD/queries/fsefes.sql",
+          "report_name": "l0018-PSD",
+          "parameters": ""
+        }
+      },
+      "0x7f6de79316e0": {
+        "type_": "reporting.nodes.TableBoxNode",
+        "icon": null,
+        "name": "fsefes [Out]",
+        "color": [
+          180,
+          85,
+          20,
+          255
+        ],
+        "border_color": [
+          74,
+          84,
+          85,
+          255
+        ],
+        "text_color": [
+          255,
+          255,
+          255,
+          180
+        ],
+        "disabled": false,
+        "selected": false,
+        "visible": true,
+        "width": 160.9375,
+        "height": 96.0,
+        "pos": [
+          1122.4008318993806,
+          -402.30175689755555
+        ],
+        "layout_direction": 0,
+        "port_deletion_allowed": false,
+        "subgraph_session": {},
+        "custom": {
+          "box_type": "Output Tables",
+          "raw_tables_json": "[\"test\"]",
+          "query_owner": ""
+        }
+      },
+      "0x7f6de7931810": {
+        "type_": "reporting.nodes.TableBoxNode",
+        "icon": null,
+        "name": "fsefes [CSV]",
+        "color": [
+          110,
+          45,
+          130,
+          255
+        ],
+        "border_color": [
+          74,
+          84,
+          85,
+          255
+        ],
+        "text_color": [
+          255,
+          255,
+          255,
+          180
+        ],
+        "disabled": false,
+        "selected": false,
+        "visible": true,
+        "width": 160,
+        "height": 96.0,
+        "pos": [
+          1096.901450287182,
+          -151.1750647833328
+        ],
+        "layout_direction": 0,
+        "port_deletion_allowed": false,
+        "subgraph_session": {},
+        "custom": {
+          "box_type": "Output CSV",
+          "raw_tables_json": "[\"fsefes.csv\"]",
+          "query_owner": "fsefes"
+        }
+      },
+      "0x7f6de7931940": {
+        "type_": "reporting.nodes.ImportCsvNode",
+        "icon": null,
+        "name": "Import csv",
+        "color": [
+          110,
+          45,
+          130,
+          255
+        ],
+        "border_color": [
+          74,
+          84,
+          85,
+          255
+        ],
+        "text_color": [
+          255,
+          255,
+          255,
+          180
+        ],
+        "disabled": false,
+        "selected": false,
+        "visible": true,
+        "width": 160,
+        "height": 75.2,
+        "pos": [
+          650.0,
+          0.0
+        ],
+        "layout_direction": 0,
+        "port_deletion_allowed": false,
+        "subgraph_session": {},
+        "custom": {
+          "import_name": "Import csv",
+          "imports_json": "[{\"csv_path\": \"/home/ric/git/reporting-front-end/reports/l0018-PSD/outputs/test-import-csv.csv\", \"has_headers\": true, \"output_table\": \"link-to-cloud.test_dataset.test_import_csv\"}]"
+        }
+      },
+      "0x7f6de7931a70": {
+        "type_": "reporting.nodes.TableBoxNode",
+        "icon": null,
+        "name": "Import csv [Out]",
+        "color": [
+          180,
+          85,
+          20,
+          255
+        ],
+        "border_color": [
+          74,
+          84,
+          85,
+          255
+        ],
+        "text_color": [
+          255,
+          255,
+          255,
+          180
+        ],
+        "disabled": false,
+        "selected": false,
+        "visible": true,
+        "width": 197.0,
+        "height": 96.0,
+        "pos": [
+          910.0,
+          0.0
+        ],
+        "layout_direction": 0,
+        "port_deletion_allowed": false,
+        "subgraph_session": {},
+        "custom": {
+          "box_type": "Output Tables",
+          "raw_tables_json": "[\"link-to-cloud.test_dataset.test_import_csv\"]",
+          "query_owner": ""
+        }
+      },
+      "0x7f6de7931ba0": {
+        "type_": "reporting.nodes.ImportCsvNode",
+        "icon": null,
+        "name": "Import csv 2",
+        "color": [
+          110,
+          45,
+          130,
+          255
+        ],
+        "border_color": [
+          74,
+          84,
+          85,
+          255
+        ],
+        "text_color": [
+          255,
+          255,
+          255,
+          180
+        ],
+        "disabled": false,
+        "selected": false,
+        "visible": true,
+        "width": 160,
+        "height": 75.2,
+        "pos": [
+          3.0000760567432962,
+          -456.2785492377145
+        ],
+        "layout_direction": 0,
+        "port_deletion_allowed": false,
+        "subgraph_session": {},
+        "custom": {
+          "import_name": "Import csv",
+          "imports_json": "[{\"csv_path\": \"/home/ric/git/reporting-front-end/reports/l0018-PSD/outputs/test-import-csv.csv\", \"has_headers\": true, \"output_table\": \"link-to-cloud.test_dataset.test_import_csv\"}, {\"csv_path\": \"/home/ric/git/reporting-front-end/reports/l0018-PSD/outputs/test-query.csv\", \"has_headers\": true, \"output_table\": \"link-to-cloud.test_dataset.test_query\"}]"
+        }
+      },
+      "0x7f6de7931cd0": {
+        "type_": "reporting.nodes.TableBoxNode",
+        "icon": null,
+        "name": "Import csv 2 [Out]",
+        "color": [
+          180,
+          85,
+          20,
+          255
+        ],
+        "border_color": [
+          74,
+          84,
+          85,
+          255
+        ],
+        "text_color": [
+          255,
+          255,
+          255,
+          180
+        ],
+        "disabled": false,
+        "selected": false,
+        "visible": true,
+        "width": 197.0,
+        "height": 114.0,
+        "pos": [
+          133.02656568756152,
+          -255.0292428596266
+        ],
+        "layout_direction": 0,
+        "port_deletion_allowed": false,
+        "subgraph_session": {},
+        "custom": {
+          "box_type": "Output Tables",
+          "raw_tables_json": "[\"link-to-cloud.test_dataset.test_import_csv\", \"link-to-cloud.test_dataset.test_query\"]",
+          "query_owner": ""
+        }
+      },
+      "0x7f6de7931e00": {
+        "type_": "reporting.nodes.TableBoxNode",
+        "icon": null,
+        "name": "test-query [Convergence]",
+        "color": [
+          180,
+          85,
+          20,
+          255
+        ],
+        "border_color": [
+          74,
+          84,
+          85,
+          255
+        ],
+        "text_color": [
+          255,
+          255,
+          255,
+          180
+        ],
+        "disabled": false,
+        "selected": false,
+        "visible": true,
+        "width": 197.0,
+        "height": 96.0,
+        "pos": [
+          333.1682643243927,
+          346.04375606199955
+        ],
+        "layout_direction": 0,
+        "port_deletion_allowed": false,
+        "subgraph_session": {},
+        "custom": {
+          "box_type": "Output Tables",
+          "raw_tables_json": "[\"link-to-cloud.test_dataset.test_import_csv\"]",
+          "query_owner": ""
+        }
+      }
+    },
+    "connections": [
+      {
+        "in": [
+          "0x7f6de7931350",
+          "run_in"
+        ],
+        "out": [
+          "0x7f6de7931940",
+          "run_out"
+        ]
+      },
+      {
+        "in": [
+          "0x7f6de7931350",
+          "tables_in"
+        ],
+        "out": [
+          "0x7f6de7931e00",
+          "out_tables"
+        ]
+      },
+      {
+        "out": [
+          "0x7f6de7931350",
+          "csv_out"
+        ],
+        "in": [
+          "0x7f6de7931480",
+          "in_tables"
+        ]
+      },
+      {
+        "in": [
+          "0x7f6de79315b0",
+          "run_in"
+        ],
+        "out": [
+          "0x7f6de7931ba0",
+          "run_out"
+        ]
+      },
+      {
+        "in": [
+          "0x7f6de79315b0",
+          "tables_in"
+        ],
+        "out": [
+          "0x7f6de7931cd0",
+          "out_tables"
+        ]
+      },
+      {
+        "out": [
+          "0x7f6de79315b0",
+          "tables_out"
+        ],
+        "in": [
+          "0x7f6de79316e0",
+          "in_tables"
+        ]
+      },
+      {
+        "out": [
+          "0x7f6de79315b0",
+          "csv_out"
+        ],
+        "in": [
+          "0x7f6de7931810",
+          "in_tables"
+        ]
+      },
+      {
+        "out": [
+          "0x7f6de7931940",
+          "tables_out"
+        ],
+        "in": [
+          "0x7f6de7931a70",
+          "in_tables"
+        ]
+      },
+      {
+        "out": [
+          "0x7f6de7931ba0",
+          "tables_out"
+        ],
+        "in": [
+          "0x7f6de7931cd0",
+          "in_tables"
+        ]
+      },
+      {
+        "out": [
+          "0x7f6de7931cd0",
+          "out_tables"
+        ],
+        "in": [
+          "0x7f6de7931e00",
+          "in_tables"
+        ]
+      }
+    ]
+  },
+  "view_state": {
+    "zoom": -0.02,
+    "center": [
+      959.2370301059598,
+      -129.7261949289125
+    ]
+  }
+}

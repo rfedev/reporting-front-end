@@ -1,0 +1,567 @@
+{
+  "flow_name": "Process Flow 01",
+  "report_name": "test",
+  "query_names": [
+    "test query",
+    "Query name"
+  ],
+  "parameter_defaults": {
+    "repdate": "2026-09-11",
+    "testParam1": "",
+    "testParam": "",
+    "testParam2": "",
+    "name": ""
+  },
+  "show_full_table_names": false,
+  "csv_filenames": {
+    "test2": "table_01.csv",
+    "new query": "test-ouptut.csv",
+    "new name": "sel1.csv, sel3.csv",
+    "test query": "sel1.csv, sel2.csv, sel3.csv",
+    "test query_copy": "sel1.csv, sel2.csv, sel3.csv"
+  },
+  "csv_imports": [
+    {
+      "node_name": "Import csv",
+      "items": [
+        {
+          "csv_path": "test-import-%YYYYMM%.csv",
+          "has_headers": true,
+          "output_table": "link-to-cloud.test_dataset.test-import"
+        }
+      ]
+    }
+  ],
+  "graph_session": {
+    "graph": {
+      "layout_direction": 0,
+      "acyclic": true,
+      "pipe_collision": false,
+      "pipe_slicing": true,
+      "pipe_style": 1,
+      "accept_connection_types": "{}",
+      "reject_connection_types": "{}"
+    },
+    "nodes": {
+      "0x7fca278c0c30": {
+        "type_": "reporting.nodes.QueryNode",
+        "icon": null,
+        "name": "test query",
+        "color": [
+          45,
+          80,
+          130,
+          255
+        ],
+        "border_color": [
+          74,
+          84,
+          85,
+          255
+        ],
+        "text_color": [
+          255,
+          255,
+          255,
+          180
+        ],
+        "disabled": false,
+        "selected": false,
+        "visible": true,
+        "width": 162.140625,
+        "height": 129.3,
+        "pos": [
+          1005.6772684752104,
+          198.94293732460244
+        ],
+        "layout_direction": 0,
+        "port_deletion_allowed": false,
+        "subgraph_session": {},
+        "custom": {
+          "query_name": "test query",
+          "query_path": "/home/ric/git/reporting-front-end/reports/test/queries/test query.sql",
+          "report_name": "test",
+          "parameters": "repdate"
+        }
+      },
+      "0x7fca278c0d60": {
+        "type_": "reporting.nodes.TableBoxNode",
+        "icon": null,
+        "name": "test query [Out]",
+        "color": [
+          180,
+          85,
+          20,
+          255
+        ],
+        "border_color": [
+          74,
+          84,
+          85,
+          255
+        ],
+        "text_color": [
+          255,
+          255,
+          255,
+          180
+        ],
+        "disabled": false,
+        "selected": false,
+        "visible": true,
+        "width": 160.9375,
+        "height": 96.0,
+        "pos": [
+          1205.6772684752104,
+          6.94293732460244
+        ],
+        "layout_direction": 0,
+        "port_deletion_allowed": false,
+        "subgraph_session": {},
+        "custom": {
+          "box_type": "Output Tables",
+          "raw_tables_json": "[\"table\"]",
+          "query_owner": ""
+        }
+      },
+      "0x7fca278c0e90": {
+        "type_": "reporting.nodes.TableBoxNode",
+        "icon": null,
+        "name": "test query [CSV]",
+        "color": [
+          110,
+          45,
+          130,
+          255
+        ],
+        "border_color": [
+          74,
+          84,
+          85,
+          255
+        ],
+        "text_color": [
+          255,
+          255,
+          255,
+          180
+        ],
+        "disabled": false,
+        "selected": false,
+        "visible": true,
+        "width": 160,
+        "height": 132.0,
+        "pos": [
+          1425.6772684752104,
+          6.94293732460244
+        ],
+        "layout_direction": 0,
+        "port_deletion_allowed": false,
+        "subgraph_session": {},
+        "custom": {
+          "box_type": "Output CSV",
+          "raw_tables_json": "[\"sel1.csv\", \"sel2.csv\", \"sel3.csv\"]",
+          "query_owner": "test query"
+        }
+      },
+      "0x7fca278c0fc0": {
+        "type_": "reporting.nodes.QueryNode",
+        "icon": null,
+        "name": "Query name",
+        "color": [
+          45,
+          80,
+          130,
+          255
+        ],
+        "border_color": [
+          74,
+          84,
+          85,
+          255
+        ],
+        "text_color": [
+          255,
+          255,
+          255,
+          180
+        ],
+        "disabled": false,
+        "selected": false,
+        "visible": true,
+        "width": 162.140625,
+        "height": 129.3,
+        "pos": [
+          282.62020579981277,
+          763.213938260056
+        ],
+        "layout_direction": 0,
+        "port_deletion_allowed": false,
+        "subgraph_session": {},
+        "custom": {
+          "query_name": "Query name",
+          "query_path": "/home/ric/git/reporting-front-end/reports/test/queries/Query name.sql",
+          "report_name": "test",
+          "parameters": "name"
+        }
+      },
+      "0x7fca278c10f0": {
+        "type_": "reporting.nodes.TableBoxNode",
+        "icon": null,
+        "name": "Query name [Out]",
+        "color": [
+          180,
+          85,
+          20,
+          255
+        ],
+        "border_color": [
+          74,
+          84,
+          85,
+          255
+        ],
+        "text_color": [
+          255,
+          255,
+          255,
+          180
+        ],
+        "disabled": false,
+        "selected": false,
+        "visible": true,
+        "width": 160.9375,
+        "height": 96.0,
+        "pos": [
+          482.62020579981277,
+          571.213938260056
+        ],
+        "layout_direction": 0,
+        "port_deletion_allowed": false,
+        "subgraph_session": {},
+        "custom": {
+          "box_type": "Output Tables",
+          "raw_tables_json": "[\"table2\"]",
+          "query_owner": ""
+        }
+      },
+      "0x7fca278c1220": {
+        "type_": "reporting.nodes.ImportCsvNode",
+        "icon": null,
+        "name": "Import csv",
+        "color": [
+          110,
+          45,
+          130,
+          255
+        ],
+        "border_color": [
+          74,
+          84,
+          85,
+          255
+        ],
+        "text_color": [
+          255,
+          255,
+          255,
+          180
+        ],
+        "disabled": false,
+        "selected": false,
+        "visible": true,
+        "width": 162.140625,
+        "height": 71.2,
+        "pos": [
+          277.0,
+          192.0
+        ],
+        "layout_direction": 0,
+        "port_deletion_allowed": false,
+        "subgraph_session": {},
+        "custom": {
+          "import_name": "Import csv",
+          "imports_json": "[{\"csv_path\": \"test-import-%YYYYMM%.csv\", \"has_headers\": true, \"output_table\": \"link-to-cloud.test_dataset.test-import\"}]"
+        }
+      },
+      "0x7fca278c1350": {
+        "type_": "reporting.nodes.TableBoxNode",
+        "icon": null,
+        "name": "Import csv [In]",
+        "color": [
+          35,
+          115,
+          70,
+          255
+        ],
+        "border_color": [
+          74,
+          84,
+          85,
+          255
+        ],
+        "text_color": [
+          255,
+          255,
+          255,
+          180
+        ],
+        "disabled": false,
+        "selected": false,
+        "visible": true,
+        "width": 257.0,
+        "height": 96.0,
+        "pos": [
+          0.0,
+          381.3
+        ],
+        "layout_direction": 0,
+        "port_deletion_allowed": false,
+        "subgraph_session": {},
+        "custom": {
+          "box_type": "Input Tables",
+          "raw_tables_json": "[\"test-import-%YYYYMM%.csv\"]",
+          "query_owner": ""
+        }
+      },
+      "0x7fca278c1480": {
+        "type_": "reporting.nodes.TableBoxNode",
+        "icon": null,
+        "name": "Import csv [Out]",
+        "color": [
+          180,
+          85,
+          20,
+          255
+        ],
+        "border_color": [
+          74,
+          84,
+          85,
+          255
+        ],
+        "text_color": [
+          255,
+          255,
+          255,
+          180
+        ],
+        "disabled": false,
+        "selected": false,
+        "visible": true,
+        "width": 165.0,
+        "height": 96.0,
+        "pos": [
+          477.0,
+          0.0
+        ],
+        "layout_direction": 0,
+        "port_deletion_allowed": false,
+        "subgraph_session": {},
+        "custom": {
+          "box_type": "Output Tables",
+          "raw_tables_json": "[\"link-to-cloud.test_dataset.test-import\"]",
+          "query_owner": ""
+        }
+      },
+      "0x7fca278c15b0": {
+        "type_": "reporting.nodes.TableBoxNode",
+        "icon": null,
+        "name": "test query [In]",
+        "color": [
+          35,
+          115,
+          70,
+          255
+        ],
+        "border_color": [
+          74,
+          84,
+          85,
+          255
+        ],
+        "text_color": [
+          255,
+          255,
+          255,
+          180
+        ],
+        "disabled": false,
+        "selected": false,
+        "visible": true,
+        "width": 210.0,
+        "height": 96.0,
+        "pos": [
+          775.6772684752104,
+          388.2429373246024
+        ],
+        "layout_direction": 0,
+        "port_deletion_allowed": false,
+        "subgraph_session": {},
+        "custom": {
+          "box_type": "Input Tables",
+          "raw_tables_json": "[\"link-to-cloud.test_dataset.test-import-202608\"]",
+          "query_owner": ""
+        }
+      },
+      "0x7fca278c16e0": {
+        "type_": "reporting.nodes.TableBoxNode",
+        "icon": null,
+        "name": "Query name [In]",
+        "color": [
+          35,
+          115,
+          70,
+          255
+        ],
+        "border_color": [
+          74,
+          84,
+          85,
+          255
+        ],
+        "text_color": [
+          255,
+          255,
+          255,
+          180
+        ],
+        "disabled": false,
+        "selected": false,
+        "visible": true,
+        "width": 210.0,
+        "height": 96.0,
+        "pos": [
+          52.620205799812766,
+          952.513938260056
+        ],
+        "layout_direction": 0,
+        "port_deletion_allowed": false,
+        "subgraph_session": {},
+        "custom": {
+          "box_type": "Input Tables",
+          "raw_tables_json": "[\"link-to-cloud.test_dataset.test-import-202608\"]",
+          "query_owner": ""
+        }
+      }
+    },
+    "connections": [
+      {
+        "in": [
+          "0x7fca278c0c30",
+          "run_in"
+        ],
+        "out": [
+          "0x7fca278c0fc0",
+          "run_out"
+        ]
+      },
+      {
+        "in": [
+          "0x7fca278c0c30",
+          "run_in"
+        ],
+        "out": [
+          "0x7fca278c1220",
+          "run_out"
+        ]
+      },
+      {
+        "in": [
+          "0x7fca278c0c30",
+          "tables_in"
+        ],
+        "out": [
+          "0x7fca278c15b0",
+          "out_tables"
+        ]
+      },
+      {
+        "in": [
+          "0x7fca278c0c30",
+          "tables_in"
+        ],
+        "out": [
+          "0x7fca278c1480",
+          "out_tables"
+        ]
+      },
+      {
+        "out": [
+          "0x7fca278c0c30",
+          "tables_out"
+        ],
+        "in": [
+          "0x7fca278c0d60",
+          "in_tables"
+        ]
+      },
+      {
+        "out": [
+          "0x7fca278c0c30",
+          "csv_out"
+        ],
+        "in": [
+          "0x7fca278c0e90",
+          "in_tables"
+        ]
+      },
+      {
+        "in": [
+          "0x7fca278c0fc0",
+          "tables_in"
+        ],
+        "out": [
+          "0x7fca278c16e0",
+          "out_tables"
+        ]
+      },
+      {
+        "out": [
+          "0x7fca278c0fc0",
+          "tables_out"
+        ],
+        "in": [
+          "0x7fca278c10f0",
+          "in_tables"
+        ]
+      },
+      {
+        "in": [
+          "0x7fca278c1220",
+          "tables_in"
+        ],
+        "out": [
+          "0x7fca278c1350",
+          "out_tables"
+        ]
+      },
+      {
+        "out": [
+          "0x7fca278c1220",
+          "tables_out"
+        ],
+        "in": [
+          "0x7fca278c1480",
+          "in_tables"
+        ]
+      }
+    ]
+  },
+  "view_state": {
+    "zoom": -0.54,
+    "center": [
+      762.1976202798826,
+      446.4061485584528
+    ]
+  },
+  "splitter_sizes": [
+    113,
+    867,
+    178
+  ],
+  "parameter_date_options": {
+    "repdate": "pick date"
+  },
+  "selected_filename_date_param": "repdate"
+}

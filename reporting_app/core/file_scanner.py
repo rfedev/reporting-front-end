@@ -44,14 +44,14 @@ IGNORED_DIRS: Set[str] = {
 class FileScanner:
     """Scans and caches report assets within the working directory."""
 
-    def __init__(self, working_directory: Optional[Path] = None):
-        self.working_directory: Path = working_directory or Path.cwd()
+    def __init__(self, working_directories: Optional[List[Dict[str, str]]] = None):
+        self.working_directories: List[Dict[str, str]] = working_directories or [{"alias": "Default", "path": str(Path.cwd().resolve())}]
         self._query_cache: Dict[str, QueryInfo] = {}
         self._flow_cache: Dict[str, ProcessFlowInfo] = {}
 
-    def set_working_directory(self, path: Path) -> None:
-        """Update the working directory and clear outdated caches."""
-        self.working_directory = path.resolve()
+    def set_working_directories(self, directories: List[Dict[str, str]]) -> None:
+        """Update the working directories list and clear outdated caches."""
+        self.working_directories = directories
         self._query_cache.clear()
         self._flow_cache.clear()
 
@@ -85,23 +85,36 @@ class FileScanner:
         return has_sql or has_json or is_empty
 
     def scan_all_reports(self) -> List[Report]:
-        """Scan the working directory and return all discovered reports."""
-        if not self.working_directory.exists() or not self.working_directory.is_dir():
-            logger.warning(f"Working directory does not exist: {self.working_directory}")
-            return []
+        """Scan all configured working directories and return all discovered reports."""
+        all_reports: List[Report] = []
 
-        # If working_directory has a 'reports' subdirectory, scan inside 'reports/'
-        reports_sub = self.working_directory / "reports"
-        target_dir = reports_sub if reports_sub.exists() and reports_sub.is_dir() else self.working_directory
+        for entry in self.working_directories:
+            alias = entry.get("alias", "Default")
+            p_str = entry.get("path", "")
+            if not p_str:
+                continue
+            base_path = Path(p_str).resolve()
+            if not base_path.exists() or not base_path.is_dir():
+                logger.warning(f"Working directory [{alias}] does not exist: {base_path}")
+                continue
 
-        reports: List[Report] = []
-        for entry in sorted(target_dir.iterdir()):
-            if entry.is_dir() and self._is_valid_report_dir(entry):
-                reports.append(self.scan_report(entry))
+            # If base_path has a 'reports' subdirectory, scan inside 'reports/'
+            reports_sub = base_path / "reports"
+            target_dir = reports_sub if reports_sub.exists() and reports_sub.is_dir() else base_path
 
-        return reports
+            for item in sorted(target_dir.iterdir()):
+                if item.is_dir() and self._is_valid_report_dir(item):
+                    rep = self.scan_report(item, directory_alias=alias, working_directory=base_path)
+                    all_reports.append(rep)
 
-    def scan_report(self, report_dir: Path) -> Report:
+        return all_reports
+
+    def scan_report(
+        self,
+        report_dir: Path,
+        directory_alias: str = "",
+        working_directory: Optional[Path] = None,
+    ) -> Report:
         """Scan an individual report directory for queries and process flows."""
         report_name = report_dir.name
         queries = self._scan_queries(report_dir, report_name)
@@ -112,6 +125,8 @@ class FileScanner:
             folder_path=report_dir,
             queries=queries,
             process_flows=process_flows,
+            directory_alias=directory_alias,
+            working_directory=working_directory,
         )
 
     def _scan_queries(self, report_dir: Path, report_name: str) -> List[QueryInfo]:

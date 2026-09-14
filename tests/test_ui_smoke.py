@@ -34,7 +34,7 @@ class TestUISmoke(unittest.TestCase):
         )
 
         self.controller = AppController(db_manager=self.db_manager)
-        self.controller.set_working_directory(self.root)
+        self.controller.set_working_directories([{"alias": "Primary", "path": str(self.root)}])
 
     def tearDown(self):
         self.temp_dir.cleanup()
@@ -46,9 +46,11 @@ class TestUISmoke(unittest.TestCase):
         win.close()
 
     def test_settings_dialog_init(self):
-        dialog = SettingsDialog(current_dir=self.root, auto_scan=True)
+        dirs = [{"alias": "Primary", "path": str(self.root)}]
+        dialog = SettingsDialog(working_directories=dirs, auto_scan=True)
         self.assertIsNotNone(dialog)
-        self.assertEqual(dialog.get_working_directory(), self.root.resolve())
+        self.assertEqual(len(dialog.get_working_directories()), 1)
+        self.assertEqual(dialog.get_working_directories()[0]["alias"], "Primary")
         self.assertTrue(dialog.get_auto_scan())
         dialog.close()
 

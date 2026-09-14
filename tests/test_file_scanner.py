@@ -39,12 +39,13 @@ class TestFileScanner(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def test_scan_reports(self):
-        scanner = FileScanner(self.root)
+        scanner = FileScanner([{"alias": "Primary", "path": str(self.root)}])
         reports = scanner.scan_all_reports()
         self.assertEqual(len(reports), 1)
 
         rep = reports[0]
         self.assertEqual(rep.name, "rep_alpha")
+        self.assertEqual(rep.directory_alias, "Primary")
         self.assertEqual(len(rep.queries), 2)
         self.assertEqual(len(rep.process_flows), 1)
 
@@ -72,7 +73,7 @@ class TestFileScanner(unittest.TestCase):
             encoding="utf-8",
         )
 
-        scanner = FileScanner(self.root)
+        scanner = FileScanner([{"alias": "Primary", "path": str(self.root)}])
         reports = {r.name: r for r in scanner.scan_all_reports()}
         self.assertIn("rep_beta", reports)
 
@@ -81,6 +82,23 @@ class TestFileScanner(unittest.TestCase):
         self.assertIsNotNone(beta.get_query("beta_01"))
         self.assertEqual(len(beta.process_flows), 1)
         self.assertIsNotNone(beta.get_process_flow("Flow-Beta"))
+
+    def test_scan_multiple_directories(self):
+        with tempfile.TemporaryDirectory() as second_dir:
+            root2 = Path(second_dir)
+            rep2 = root2 / "rep_gamma"
+            (rep2 / "queries").mkdir(parents=True)
+            (rep2 / "queries" / "gamma.sql").write_text("SELECT 1;", encoding="utf-8")
+
+            scanner = FileScanner([
+                {"alias": "Primary", "path": str(self.root)},
+                {"alias": "Secondary", "path": str(root2)},
+            ])
+            reports = scanner.scan_all_reports()
+            self.assertEqual(len(reports), 2)
+            names_and_aliases = [(r.name, r.directory_alias) for r in reports]
+            self.assertIn(("rep_alpha", "Primary"), names_and_aliases)
+            self.assertIn(("rep_gamma", "Secondary"), names_and_aliases)
 
 
 if __name__ == "__main__":

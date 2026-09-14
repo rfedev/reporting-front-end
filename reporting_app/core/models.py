@@ -63,6 +63,8 @@ class Report:
     folder_path: Path
     queries: List[QueryInfo] = field(default_factory=list)
     process_flows: List[ProcessFlowInfo] = field(default_factory=list)
+    directory_alias: str = ""
+    working_directory: Optional[Path] = None
 
     def get_query(self, query_name: str) -> Optional[QueryInfo]:
         """Find a query by base name or filename."""

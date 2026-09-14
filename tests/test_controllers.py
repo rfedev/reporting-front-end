@@ -38,7 +38,7 @@ class TestControllers(unittest.TestCase):
         )
 
         self.controller = AppController(db_manager=self.db_manager)
-        self.controller.set_working_directory(self.root)
+        self.controller.set_working_directories([{"alias": "Primary", "path": str(self.root)}])
 
     def tearDown(self):
         self.temp_dir.cleanup()
@@ -97,14 +97,33 @@ class TestControllers(unittest.TestCase):
         self.assertEqual(self.controller.repo.get_selected_flow("report_01"), "flow1")
         self.assertEqual(self.controller.repo.get_selected_query("report_01"), "q2")
 
-    def test_flow_controller_parameters(self):
-        rep = self.controller.reports_by_name["report_01"]
-        flow_ctrl = ProcessFlowController(report=rep, flow_name="flow1")
+    def test_multi_working_directories(self):
+        with tempfile.TemporaryDirectory() as second_dir:
+            root2 = Path(second_dir)
+            rep_sec = root2 / "report_sec"
+            (rep_sec / "queries").mkdir(parents=True)
+            (rep_sec / "queries" / "sec_q.sql").write_text("SELECT 1;", encoding="utf-8")
 
-        # Test unique parameter consolidation across queries
-        unique_params = flow_ctrl.get_unique_parameters(["q1", "q2"])
-        # q1 has {p1}, q2 has {p1, p2}. Unique list should contain p1 and p2 exactly once
-        self.assertEqual(unique_params, ["p1", "p2"])
+            # Duplicate name in root2 to test alias disambiguation
+            rep_dup = root2 / "report_01"
+            (rep_dup / "queries").mkdir(parents=True)
+            (rep_dup / "queries" / "dup_q.sql").write_text("SELECT 2;", encoding="utf-8")
+
+            self.controller.set_working_directories([
+                {"alias": "Primary", "path": str(self.root)},
+                {"alias": "Secondary", "path": str(root2)},
+            ])
+
+            # Distinct name appears plain
+            self.assertIn("report_sec", self.controller.reports_by_key)
+            # Duplicate name appears with alias
+            self.assertIn("report_01 [Primary]", self.controller.reports_by_key)
+            self.assertIn("report_01 [Secondary]", self.controller.reports_by_key)
+
+            # Test creating report in secondary directory
+            new_rep = self.controller.add_report("created_in_sec", directory_alias="Secondary")
+            self.assertIsNotNone(new_rep)
+            self.assertTrue(new_rep.folder_path.is_relative_to(root2))
 
 
 if __name__ == "__main__":

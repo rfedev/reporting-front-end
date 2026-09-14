@@ -1,6 +1,10 @@
 Do not use. This is just for notes.
 
-When using the auto layout (horizontal), Put the input tables above the import csv/query nodes and the ouput tables below them Eg:
-Input tables                                                            Input tables
-                import csv/query nodes                                                  import csv/query nodes
-                                            ouput tables/output csv                                                ouput tables/output csv
+
+When using the auto layout (horizontal), Put the input tables below the import csv/query nodes and the ouput tables above them. Make sure the top of each node/table type alligns horizontally Eg:
+                                                        ouput tables/output csv                                                                 ouput tables/output csv
+                                import csv/query nodes                                                              import csv/query nodes
+Input tables/input csv tables                                                       Input tables/input csv tables
+
+
+When using the auto layout (vertical), the input tables for csv files is not alligning correctly. All nodes and tables should allign in a vertical row.

@@ -144,6 +144,7 @@ def run_bigquery_script(
 
     total_row_count = 0
     exported_paths: List[str] = []
+    export_details: List[Dict[str, Any]] = []
 
     def export_row_iterator_to_file(row_iter: Any, out_file: Path) -> int:
         written_count = 0
@@ -203,6 +204,7 @@ def run_bigquery_script(
                 cnt = export_row_iterator_to_file(c_res, dest_file)
                 total_row_count += cnt
                 exported_paths.append(str(dest_file))
+                export_details.append({"filename": dest_file.name, "path": str(dest_file), "row_count": cnt})
                 logger.info(f"Exported {cnt} rows to {dest_file}")
         else:
             fname = target_csv_filenames[0] if target_csv_filenames else f"{query_name}.csv"
@@ -210,6 +212,7 @@ def run_bigquery_script(
             cnt = export_row_iterator_to_file(results, dest_file)
             total_row_count += cnt
             exported_paths.append(str(dest_file))
+            export_details.append({"filename": dest_file.name, "path": str(dest_file), "row_count": cnt})
             logger.info(f"Exported {cnt} rows to {dest_file}")
     else:
         logger.info(f"Query {query_name} completed table creation/update in BigQuery.")
@@ -223,6 +226,7 @@ def run_bigquery_script(
         "output_tables": output_tables,
         "output_file": exported_path_str,
         "output_files": exported_paths,
+        "export_details": export_details,
         "row_count": total_row_count if should_export else None,
         "status": "SUCCESS",
         "project_id": project_id,

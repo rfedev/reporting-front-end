@@ -36,14 +36,23 @@ class Repository:
                 else:
                     session.add(AppSetting(key=key, value=value))
 
-    def get_working_directory(self) -> Path:
-        val = self.get_setting("working_directory", "")
-        if val and Path(val).exists():
-            return Path(val)
-        return Path.cwd()
+    def get_working_directories(self) -> List[Dict[str, str]]:
+        """Return list of configured working directories: [{'alias': '...', 'path': '...'}]"""
+        import json
+        val = self.get_setting("working_directories", "")
+        if val:
+            try:
+                dirs = json.loads(val)
+                if isinstance(dirs, list):
+                    return dirs
+            except Exception:
+                pass
+        return [{"alias": "Default", "path": str(Path.cwd().resolve())}]
 
-    def set_working_directory(self, path: Path) -> None:
-        self.set_setting("working_directory", str(path.resolve()))
+    def set_working_directories(self, directories: List[Dict[str, str]]) -> None:
+        """Store list of configured working directories."""
+        import json
+        self.set_setting("working_directories", json.dumps(directories))
 
     def get_auto_scan(self) -> bool:
         val = self.get_setting("auto_scan", "true").lower()

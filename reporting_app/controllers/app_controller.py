@@ -32,35 +32,45 @@ class AppController(QObject):
         self.db_manager = db_manager or DatabaseManager()
         self.repo = Repository(self.db_manager)
 
-        # Initialize working directory from database or default
-        working_dir = self.repo.get_working_directory()
-        self.scanner = FileScanner(working_dir)
+        # Initialize working directories from database or default
+        working_dirs = self.repo.get_working_directories()
+        self.scanner = FileScanner(working_dirs)
 
         # File watcher
         self.watcher = FileWatcherService(check_interval_ms=5000, parent=self)
-        self.watcher.set_target_directory(working_dir)
+        self._update_watcher_directories(working_dirs)
         self.watcher.set_enabled(self.repo.get_auto_scan())
         self.watcher.directory_changed.connect(self.scan)
 
         # Runtime state
+        self.reports_by_key: Dict[str, Report] = {}  # key: f"{r.name} [{r.directory_alias}]"
         self.reports_by_name: Dict[str, Report] = {}
         self.active_report: Optional[Report] = None
         self.active_flow_name: Optional[str] = None
         self.active_query_name: Optional[str] = None
 
+    def _update_watcher_directories(self, working_dirs: List[Dict[str, str]]) -> None:
+        target_paths = []
+        for d in working_dirs:
+            p_str = d.get("path", "")
+            if p_str:
+                p = Path(p_str).resolve()
+                if p.exists():
+                    target_paths.append(p)
+        self.watcher.set_target_directories(target_paths)
+
     def initialize(self) -> None:
         """Initial scan and setup."""
         self.scan()
 
-    def get_working_directory(self) -> Path:
-        return self.scanner.working_directory
+    def get_working_directories(self) -> List[Dict[str, str]]:
+        return self.scanner.working_directories
 
-    def set_working_directory(self, path: Path) -> None:
-        """Update working directory, save to settings, and rescan."""
-        resolved = path.resolve()
-        self.repo.set_working_directory(resolved)
-        self.scanner.set_working_directory(resolved)
-        self.watcher.set_target_directory(resolved)
+    def set_working_directories(self, directories: List[Dict[str, str]]) -> None:
+        """Update working directories, save to settings, and rescan."""
+        self.repo.set_working_directories(directories)
+        self.scanner.set_working_directories(directories)
+        self._update_watcher_directories(directories)
         self.scan()
 
     def get_auto_scan(self) -> bool:
@@ -102,9 +112,23 @@ class AppController(QObject):
         return info
 
     def scan(self) -> None:
-        """Trigger scanning of reports and queries."""
+        """Trigger scanning of reports and queries across all working directories."""
         self.status_changed.emit("Scanning reports directory...")
         reports = self.scanner.scan_all_reports()
+
+        # Build map with display keys.
+        # If multiple reports share the same name, append [alias] to distinguish them.
+        from collections import Counter
+        name_counts = Counter(r.name for r in reports)
+
+        self.reports_by_key = {}
+        for r in reports:
+            if name_counts[r.name] > 1 and r.directory_alias:
+                key = f"{r.name} [{r.directory_alias}]"
+            else:
+                key = r.name
+            self.reports_by_key[key] = r
+
         self.reports_by_name = {r.name: r for r in reports}
 
         # Update SQLite table catalog for all queries
@@ -112,29 +136,37 @@ class AppController(QObject):
             for q in r.queries:
                 self.repo.record_query_tables(r.name, q.name, q.input_tables, q.output_tables)
 
-        report_names = list(self.reports_by_name.keys())
-        self.reports_updated.emit(report_names)
+        display_keys = list(self.reports_by_key.keys())
+        self.reports_updated.emit(display_keys)
 
-        # Requirement 1: Restore persisted report selection
+        # Restore persisted report selection
         saved_report = self.repo.get_selected_report()
 
-        if self.active_report and self.active_report.name in self.reports_by_name:
-            self.select_report(self.active_report.name, preserve_flow=True)
-        elif saved_report and saved_report in self.reports_by_name:
+        # Find key corresponding to active_report or saved_report
+        active_key = None
+        if self.active_report:
+            for k, r in self.reports_by_key.items():
+                if r.folder_path == self.active_report.folder_path:
+                    active_key = k
+                    break
+
+        if active_key and active_key in self.reports_by_key:
+            self.select_report(active_key, preserve_flow=True)
+        elif saved_report and saved_report in self.reports_by_key:
             self.select_report(saved_report)
-        elif report_names:
-            self.select_report(report_names[0])
+        elif display_keys:
+            self.select_report(display_keys[0])
         else:
             self.active_report = None
             self.active_report_changed.emit(None)
             self.process_flows_updated.emit([])
             self.queries_updated.emit([])
 
-        self.status_changed.emit(f"Ready. Found {len(report_names)} report(s).")
+        self.status_changed.emit(f"Ready. Found {len(display_keys)} report(s).")
 
-    def select_report(self, report_name: str, preserve_flow: bool = False) -> None:
-        """Select active report and populate flows and queries."""
-        report = self.reports_by_name.get(report_name)
+    def select_report(self, report_key: str, preserve_flow: bool = False) -> None:
+        """Select active report by its key/name and populate flows and queries."""
+        report = self.reports_by_key.get(report_key) or self.reports_by_name.get(report_key)
         self.active_report = report
         self.active_report_changed.emit(report)
 
@@ -143,8 +175,8 @@ class AppController(QObject):
             self.queries_updated.emit([])
             return
 
-        # Requirement 1: Persist selected report
-        self.repo.set_selected_report(report_name)
+        # Persist selected report
+        self.repo.set_selected_report(report_key)
 
         # Requirement 2: Remove 'All Queries'. If no process flow created yet, create 'Process Flow 01'
         if not report.process_flows:
@@ -203,19 +235,37 @@ class AppController(QObject):
 
     # --- Report / Process Flow / Query Management (Requirement 3) ---
 
-    def add_report(self, report_name: str) -> Optional[Report]:
+    def add_report(self, report_name: str, directory_alias: Optional[str] = None) -> Optional[Report]:
         """Create a new report folder with queries subfolder and default flow."""
         clean_name = report_name.strip()
         if not clean_name:
             return None
 
-        # Determine target directory: reports folder inside working directory
-        working_dir = self.get_working_directory()
-        reports_sub = working_dir / "reports"
+        # Determine target working directory by alias
+        working_dirs = self.get_working_directories()
+        target_working_dir = None
+
+        if directory_alias:
+            for d in working_dirs:
+                if d.get("alias") == directory_alias:
+                    p = d.get("path")
+                    if p and Path(p).exists():
+                        target_working_dir = Path(p).resolve()
+                        break
+
+        if not target_working_dir and working_dirs:
+            p = working_dirs[0].get("path")
+            if p and Path(p).exists():
+                target_working_dir = Path(p).resolve()
+
+        if not target_working_dir:
+            target_working_dir = Path.cwd().resolve()
+
+        reports_sub = target_working_dir / "reports"
         if reports_sub.exists() and reports_sub.is_dir():
             target_dir = reports_sub
-        elif working_dir.name == "reports":
-            target_dir = working_dir
+        elif target_working_dir.name == "reports":
+            target_dir = target_working_dir
         else:
             reports_sub.mkdir(parents=True, exist_ok=True)
             target_dir = reports_sub
@@ -227,12 +277,18 @@ class AppController(QObject):
         (rep_folder / "inputs").mkdir(parents=True, exist_ok=True)
 
         self.scan()
+        # Find the newly created report
+        for k, rep in self.reports_by_key.items():
+            if rep.folder_path == rep_folder:
+                self.select_report(k)
+                return self.active_report
+
         self.select_report(clean_name)
         return self.active_report
 
-    def remove_report(self, report_name: str) -> bool:
+    def remove_report(self, report_key: str) -> bool:
         """Remove a report folder from disk."""
-        rep = self.reports_by_name.get(report_name)
+        rep = self.reports_by_key.get(report_key) or self.reports_by_name.get(report_key)
         if not rep or not rep.folder_path.exists():
             return False
 

@@ -44,8 +44,10 @@ _CTE_RE = re.compile(
 
 
 def strip_comments(sql: str) -> str:
-    """Remove SQL comments to avoid false positives."""
-    return _COMMENT_RE.sub("", sql)
+    """Remove SQL comments (-- ..., /* ... */, and # ...) to avoid false positives."""
+    clean = _COMMENT_RE.sub("", sql)
+    clean = re.sub(r"#[^\n]*", "", clean)
+    return clean
 
 
 def clean_table_name(table_ref: str) -> str:
@@ -226,9 +228,11 @@ def find_standalone_select_statements(sql: str) -> List[dict]:
         comment_line_idx = None
         csv_filename = None
 
-        # 1. Check lines immediately preceding code_line_idx (skipping blanks and other comments up to 5 lines)
+        # 1. Check lines immediately preceding code_line_idx:
+        # Stop if we hit non-empty line that isn't a comment, or reach the previous statement's end.
+        prev_stmt_line_idx = sql[:start_char].count("\n")
         cur = code_line_idx - 1
-        while cur >= 0:
+        while cur >= prev_stmt_line_idx:
             line_str = lines[cur].strip()
             if not line_str:
                 cur -= 1
@@ -238,22 +242,35 @@ def find_standalone_select_statements(sql: str) -> List[dict]:
                 comment_line_idx = cur
                 csv_filename = fname
                 break
-            if line_str.startswith(("--", "/*", "*", "#")) and (code_line_idx - cur) <= 5:
+            # If line is a comment, keep looking back a few lines (up to 3 comment lines)
+            if line_str.startswith(("--", "/*", "*", "#")):
+                # But do NOT jump over other comments that look like commented-out statements
+                clean_comment_text = line_str.lstrip("-/*#* ").strip()
+                if clean_comment_text.lower().startswith(("create", "insert", "select", "update", "delete", "with", "merge")):
+                    break
                 cur -= 1
                 continue
+            # Hit actual code from preceding statement
             break
 
-        # 2. If not found before code_line_idx, check within raw_stmt lines before token
+        # 2. If not found, check within raw_stmt lines before the SELECT/WITH keyword
         if csv_filename is None and m_token and m_token.start() > 0:
             prefix = raw_stmt[:m_token.start()]
-            for line_in_prefix in prefix.splitlines():
-                fname = extract_csv_filename_from_comment(line_in_prefix.strip())
+            for line_in_prefix in reversed(prefix.splitlines()):
+                line_clean = line_in_prefix.strip()
+                if not line_clean:
+                    continue
+                fname = extract_csv_filename_from_comment(line_clean)
                 if fname:
                     csv_filename = fname
                     for l_idx, l_content in enumerate(lines):
-                        if l_content.strip() == line_in_prefix.strip():
+                        if l_content.strip() == line_clean:
                             comment_line_idx = l_idx
                             break
+                    break
+                # If we encounter a commented-out SQL query or non-comment text, stop looking further up
+                clean_comment_text = line_clean.lstrip("-/*#* ").strip()
+                if clean_comment_text.lower().startswith(("create", "insert", "select", "update", "delete", "with", "merge")):
                     break
 
         results.append({

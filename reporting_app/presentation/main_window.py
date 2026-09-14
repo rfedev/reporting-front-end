@@ -34,6 +34,66 @@ from reporting_app.utils.date_calc import format_filename_with_date
 logger = logging.getLogger(__name__)
 
 
+class AddReportDialog(QDialog):
+    """Dialog prompting for report name and working directory alias."""
+
+    def __init__(self, directory_aliases: List[str], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Add Report")
+        self.resize(380, 150)
+        self._aliases = directory_aliases
+
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        name_layout = QHBoxLayout()
+        name_label = QLabel("Report Name:")
+        name_label.setFixedWidth(120)
+        self.name_edit = QLineEdit(self)
+        self.name_edit.setPlaceholderText("e.g. monthly_sales_summary")
+        name_layout.addWidget(name_label)
+        name_layout.addWidget(self.name_edit)
+        layout.addLayout(name_layout)
+
+        dir_layout = QHBoxLayout()
+        dir_label = QLabel("Working Directory:")
+        dir_label.setFixedWidth(120)
+        self.alias_combo = QComboBox(self)
+        self.alias_combo.addItems(self._aliases)
+        dir_layout.addWidget(dir_label)
+        dir_layout.addWidget(self.alias_combo, 1)
+        layout.addLayout(dir_layout)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        ok_btn = QPushButton("OK")
+        ok_btn.setStyleSheet("font-weight: bold; background-color: #2b78e4; color: white;")
+        ok_btn.clicked.connect(self._on_accept)
+        btn_layout.addWidget(cancel_btn)
+        btn_layout.addWidget(ok_btn)
+        layout.addLayout(btn_layout)
+
+        self.name_edit.setFocus()
+
+    def _on_accept(self) -> None:
+        name = self.name_edit.text().strip()
+        if not name:
+            QMessageBox.warning(self, "Missing Name", "Please enter a report name.")
+            return
+        self.accept()
+
+    def get_report_name(self) -> str:
+        return self.name_edit.text().strip()
+
+    def get_directory_alias(self) -> str:
+        return self.alias_combo.currentText()
+
+
 class NewProcessFlowDialog(QDialog):
     """Dialog for creating a new process flow, optionally cloning an existing flow."""
 
@@ -373,11 +433,19 @@ class MainWindow(QMainWindow):
     # --- Actions for Adding and Removing Entities (Requirement 3) ---
 
     def _on_add_report(self) -> None:
-        name, ok = QInputDialog.getText(self, "Add Report", "Enter new report name:")
-        if ok and name.strip():
-            rep = self.controller.add_report(name.strip())
-            if rep:
-                self.status_bar.showMessage(f"Report '{rep.name}' created.", 3000)
+        working_dirs = self.controller.get_working_directories()
+        aliases = [d.get("alias", "Default") for d in working_dirs if d.get("alias")]
+        if not aliases:
+            aliases = ["Default"]
+
+        dialog = AddReportDialog(directory_aliases=aliases, parent=self)
+        if dialog.exec() == QDialog.Accepted:
+            rep_name = dialog.get_report_name()
+            selected_alias = dialog.get_directory_alias()
+            if rep_name:
+                rep = self.controller.add_report(rep_name, directory_alias=selected_alias)
+                if rep:
+                    self.status_bar.showMessage(f"Report '{rep.name}' created in [{selected_alias}].", 3000)
 
     def _on_remove_report(self) -> None:
         current = self.reports_combo.currentText()
@@ -436,13 +504,13 @@ class MainWindow(QMainWindow):
 
     def _on_open_settings(self) -> None:
         dialog = SettingsDialog(
-            current_dir=self.controller.get_working_directory(),
+            working_directories=self.controller.get_working_directories(),
             auto_scan=self.controller.get_auto_scan(),
             workbench_dataset=self.controller.repo.get_workbench_dataset(),
             parent=self,
         )
         if dialog.exec() == SettingsDialog.Accepted:
-            new_dir = dialog.get_working_directory()
+            new_dirs = dialog.get_working_directories()
             new_auto_scan = dialog.get_auto_scan()
             new_wb = dialog.get_workbench_dataset()
 
@@ -450,8 +518,8 @@ class MainWindow(QMainWindow):
             self.controller.repo.set_workbench_dataset(new_wb)
             self._update_sync_button_visibility()
 
-            if new_dir != self.controller.get_working_directory():
-                self.controller.set_working_directory(new_dir)
+            if new_dirs != self.controller.get_working_directories():
+                self.controller.set_working_directories(new_dirs)
 
     def _on_edit_process_flow(self) -> None:
         report = self.controller.active_report
@@ -563,9 +631,16 @@ class MainWindow(QMainWindow):
                     tbls = ", ".join(res.get("output_tables", []))
                     msgs.append(f"Created/updated table(s):\n{tbls}")
                 if res.get("is_export"):
-                    msgs.append(
-                        f"Exported {res.get('row_count', 0):,} rows to:\n{res.get('output_file')}"
-                    )
+                    details = res.get("export_details", [])
+                    if details:
+                        lines = [f"Exported {len(details)} table{'s' if len(details) != 1 else ''}:"]
+                        for d in details:
+                            lines.append(f"* {d['filename']} ({d['row_count']:,} rows)")
+                        msgs.append("\n".join(lines))
+                    else:
+                        msgs.append(
+                            f"Exported {res.get('row_count', 0):,} rows to:\n{res.get('output_file')}"
+                        )
                 if not msgs:
                     msgs.append("Query executed in BigQuery successfully.")
 
@@ -577,7 +652,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(
                     self,
                     "Query Execution Error",
-                    f"Failed to execute query '{query_name}':\n\n{e}\n\nNote: If authentication failed, please run 'gcloud auth application-default login' in terminal.",
+                    f"Error in query node: '{query_name}'\n\nFailed to execute query '{query_name}':\n\n{e}\n\nNote: If authentication failed, please run 'gcloud auth application-default login' in terminal.",
                 )
 
     def _on_run_process_flow(self) -> None:
@@ -646,6 +721,8 @@ class MainWindow(QMainWindow):
         results_log = []
         errors = []
 
+        failed_node_name = None
+
         # 1. Run CSV Imports if present
         csv_imports = flow_ctrl.get_csv_imports()
         for group in csv_imports:
@@ -678,6 +755,7 @@ class MainWindow(QMainWindow):
                     cnt_str = f"{row_cnt:,} rows" if row_cnt is not None else "completed"
                     results_log.append(f"📥 Imported CSV '{c_path}' into '{d_table}' ({cnt_str})")
                 except Exception as e:
+                    failed_node_name = group.get("node_name", "Import csv") if isinstance(group, dict) else "Import csv"
                     err_msg = f"Import CSV failed for {d_table}: {e}"
                     errors.append(err_msg)
                     results_log.append(f"❌ {err_msg}")
@@ -691,6 +769,7 @@ class MainWindow(QMainWindow):
         for idx, qname in enumerate(queries_order, start=1):
             qinfo = active_report.get_query(qname)
             if not qinfo or not qinfo.file_path.exists():
+                failed_node_name = qname
                 err = f"Query '{qname}' SQL file not found."
                 errors.append(err)
                 results_log.append(f"[{idx}/{len(queries_order)}] ❌ {qname}: {err}")
@@ -714,23 +793,32 @@ class MainWindow(QMainWindow):
                 if res.get("has_output_tables"):
                     log_parts.append(f"Table(s): {', '.join(res.get('output_tables', []))}")
                 if res.get("is_export"):
-                    log_parts.append(f"Exported {res.get('row_count', 0):,} rows to {res.get('output_file')}")
+                    details = res.get("export_details", [])
+                    if details:
+                        exp_lines = [f"Exported {len(details)} table{'s' if len(details) != 1 else ''}:"]
+                        for d in details:
+                            exp_lines.append(f"* {d['filename']} ({d['row_count']:,} rows)")
+                        log_parts.append("\n".join(exp_lines))
+                    else:
+                        log_parts.append(f"Exported {res.get('row_count', 0):,} rows to {res.get('output_file')}")
                 if not log_parts:
                     log_parts.append("Executed successfully.")
 
-                results_log.append(f"[{idx}/{len(queries_order)}] 📦 {qname}: {' | '.join(log_parts)}")
+                results_log.append(f"[{idx}/{len(queries_order)}] 📦 {qname}:\n" + "\n".join(log_parts) if any("\n" in p for p in log_parts) else f"[{idx}/{len(queries_order)}] 📦 {qname}: {' | '.join(log_parts)}")
             except Exception as e:
+                failed_node_name = qname
                 err = f"Execution failed: {e}"
                 errors.append(f"{qname}: {e}")
                 results_log.append(f"[{idx}/{len(queries_order)}] ❌ {qname}: {err}")
                 break
 
         if errors:
+            failed_node_header = f"Error in node: '{failed_node_name}'\n\n" if failed_node_name else ""
             self.status_bar.showMessage(f"Process flow '{flow_ctrl.flow_name}' failed.", 5000)
             QMessageBox.critical(
                 self,
                 "Process Flow Execution Error",
-                f"Process flow stopped due to an error:\n\n" + "\n".join(results_log),
+                f"{failed_node_header}Process flow stopped due to an error:\n\n" + "\n".join(results_log),
             )
         else:
             self.status_bar.showMessage(f"Process flow '{flow_ctrl.flow_name}' completed.", 5000)

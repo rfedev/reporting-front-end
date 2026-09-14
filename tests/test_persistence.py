@@ -90,6 +90,22 @@ class TestPersistence(unittest.TestCase):
         self.assertEqual(self.repo.get_selected_flow("report1"), "Process Flow 01")
         self.assertEqual(self.repo.get_selected_query("report1"), "query1")
 
+    def test_working_directories(self):
+        # Default should return list with Default alias and cwd
+        dirs = self.repo.get_working_directories()
+        self.assertIsInstance(dirs, list)
+        self.assertTrue(len(dirs) >= 1)
+        self.assertEqual(dirs[0]["alias"], "Default")
+
+        # Set multiple working directories
+        new_dirs = [
+            {"alias": "Main", "path": "/path/to/main"},
+            {"alias": "Archive", "path": "/path/to/archive"},
+        ]
+        self.repo.set_working_directories(new_dirs)
+        loaded_dirs = self.repo.get_working_directories()
+        self.assertEqual(loaded_dirs, new_dirs)
+
 
 if __name__ == "__main__":
     unittest.main()

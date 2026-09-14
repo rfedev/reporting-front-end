@@ -1,29 +1,27 @@
 # Instructions
 
+
+
+## Multiple working directories
+Be able to add multiple working directories in the settings window. Each working directory can be given an alias. 
+When creating a new report in the main window, in the 'Add Report' dialog where the user specifies the report name, add a dropdown with the working directory aliases to choose which working directory the report wil be created in. 
+Wehen selecting a report in the main window, the dropdown list will show all reports from all working directories.
+Make sure that all downstream effects of this change are handled. If you have any queries about how to handle it, let me know.
+
+
+
 ## Process flow editor:
-For the process flow editor title, have the window title be 'Process Flow - <report-name> - <process-flow-name> 
 
-Introduce a right click menu for the left hand panel when right clicking on a query. Put 'Add', 'Delete' and 'Rename' as options in the menu to delete or rename the query or add a new one. Use the existing functionality to process these requests.
-
-
-Add a expandable/collapsable list to the top left section of the canvas.
-Populate it with a list of the parameters used in the process flow and allow the user to enter values for them. If a parameter name has the word 'date' (not case-sensitive) then add a drop down list with the following options:
-pick date
-prev week
-prev month
-prev quarter
-prev year
-prev half year
+### Imports
+When importing a csv, make the 'browse for CSV file..' button is square.
+Rename the 'Import csv' to 'Import Files' as I want it to be able to import csvs and xlsx files.
 
 
-'pick date' is the default but the last selected option will be remembered.
-if 'pick date' is selected, add a date picker to allow the user to pick a date which will be in the format YYYY-MM-DD
+### Excel file import
+Also, add the ability to select xlsx files for import too. Implement the functionality to import xlsx files into a project dataset if an xlsx file is selected.
 
-This will replace the parameter dialog that appears when running from the process flow editor.
-
-Update the parameter dialog that is used when running a process flow from the main window. Update it to have the same functionality for date parameters.
-
-There should not be a minimum width of the left panel. It's size should be remembered when reopening process flows.
-
+### Manage schemas
+Implement a method to either use an auto-schema, or manually set one using
+Currently the schema is auto-identified. Add an 'Auto-Schema' tickbox for this (below the 'Headers' tickbox). If either the 'Auto-Schema' of 'Headers' tick boxes are not ticked, there will be a button appear (icon is a right facing arrow with the tooltip 'Schema details'). This button will open up a dialog window for editing the headers and field types. It will have 2 columns: 'Field Name' and 'Field Type'. If the 'headers' tickbox is ticked, the field names will be populated by the first row of the file.
 
 

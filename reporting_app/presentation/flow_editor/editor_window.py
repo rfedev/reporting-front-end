@@ -2204,6 +2204,7 @@ class ProcessFlowEditorWindow(QMainWindow):
 
         total_steps = len(ordered_items)
         self.status_bar.showMessage(f"Running {context_title} ({total_steps} step(s))...")
+        failed_node_name = None
 
         for idx, item in enumerate(ordered_items, start=1):
             ntype = item.get("type")
@@ -2244,6 +2245,7 @@ class ProcessFlowEditorWindow(QMainWindow):
                         cnt_str = f"{row_cnt:,} rows" if row_cnt is not None else "completed"
                         results_log.append(f"[{idx}/{total_steps}] 📥 Imported CSV '{c_path}' into '{d_table}' ({cnt_str})")
                     except Exception as e:
+                        failed_node_name = nname or "Import csv"
                         err_msg = f"Import CSV failed for {d_table}: {e}"
                         errors.append(err_msg)
                         results_log.append(f"[{idx}/{total_steps}] ❌ {err_msg}")
@@ -2255,6 +2257,7 @@ class ProcessFlowEditorWindow(QMainWindow):
                 qname = nname
                 qinfo = self.report.get_query(qname)
                 if not qinfo or not qinfo.file_path.exists():
+                    failed_node_name = qname
                     err = f"Query '{qname}' SQL file not found."
                     errors.append(err)
                     results_log.append(f"[{idx}/{total_steps}] ❌ {qname}: {err}")
@@ -2275,10 +2278,18 @@ class ProcessFlowEditorWindow(QMainWindow):
                         output_filename=custom_csv,
                     )
                     if res.get("is_export"):
-                        results_log.append(f"[{idx}/{total_steps}] ✅ {qname}: Exported {res.get('row_count', 0):,} rows to {res.get('output_file')}")
+                        details = res.get("export_details", [])
+                        if details:
+                            lines = [f"[{idx}/{total_steps}] ✅ {qname}: Exported {len(details)} table{'s' if len(details) != 1 else ''}:"]
+                            for d in details:
+                                lines.append(f"* {d['filename']} ({d['row_count']:,} rows)")
+                            results_log.append("\n".join(lines))
+                        else:
+                            results_log.append(f"[{idx}/{total_steps}] ✅ {qname}: Exported {res.get('row_count', 0):,} rows to {res.get('output_file')}")
                     else:
                         results_log.append(f"[{idx}/{total_steps}] ✅ {qname}: Executed table creation/update in BigQuery")
                 except Exception as e:
+                    failed_node_name = qname
                     err_msg = str(e)
                     errors.append(f"{qname}: {err_msg}")
                     results_log.append(f"[{idx}/{total_steps}] ❌ {qname}: Failed ({err_msg})")
@@ -2288,10 +2299,11 @@ class ProcessFlowEditorWindow(QMainWindow):
         self.status_bar.showMessage(f"{context_title} execution finished.", 5000)
 
         if errors:
+            failed_node_header = f"Error in node: '{failed_node_name}'\n\n" if failed_node_name else ""
             QMessageBox.critical(
                 self,
                 f"{context_title} Execution Error",
-                f"Execution failed with errors:\n\n{summary_text}\n\nNote: If authentication failed, please run 'gcloud auth application-default login' in terminal.",
+                f"{failed_node_header}Execution failed with errors:\n\n{summary_text}\n\nNote: If authentication failed, please run 'gcloud auth application-default login' in terminal.",
             )
         else:
             QMessageBox.information(

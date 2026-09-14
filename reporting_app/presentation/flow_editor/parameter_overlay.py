@@ -18,6 +18,8 @@ from PySide6.QtWidgets import (
 
 from reporting_app.utils.date_calc import DATE_OPTIONS, calculate_date_for_option, is_date_param
 
+REPORT_DATE_PARAM = "Report Date"
+
 
 class CanvasParameterOverlay(QFrame):
     """Expandable/collapsible overlay displaying Flow Parameters cleanly over the flow canvas."""
@@ -59,6 +61,36 @@ class CanvasParameterOverlay(QFrame):
             QPushButton#toggle_btn:hover {
                 color: #ffffff;
             }
+            QPushButton#add_report_date_btn {
+                background-color: #2d3748;
+                color: #e2e8f0;
+                border: 1px solid #4a5568;
+                border-radius: 3px;
+                font-weight: bold;
+                font-size: 13px;
+                padding: 0px;
+                line-height: 14px;
+            }
+            QPushButton#add_report_date_btn:hover {
+                background-color: #3b465a;
+                color: #ffffff;
+                border-color: #718096;
+            }
+            QPushButton#add_report_date_btn:disabled {
+                background-color: rgba(30, 34, 42, 0.4);
+                color: #4a5568;
+                border-color: #2d3748;
+            }
+            QPushButton#del_report_date_btn {
+                background: transparent;
+                color: #a0aec0;
+                border: none;
+                font-size: 11px;
+                padding: 0px;
+            }
+            QPushButton#del_report_date_btn:hover {
+                color: #fc8181;
+            }
             QCheckBox {
                 spacing: 0px;
             }
@@ -69,6 +101,7 @@ class CanvasParameterOverlay(QFrame):
         """)
 
         self._is_collapsed = False
+        self._has_report_date = False
         self._param_names: List[str] = []
         self._param_values: Dict[str, str] = {}
         self._last_selected_date_options: Dict[str, str] = {}
@@ -85,15 +118,24 @@ class CanvasParameterOverlay(QFrame):
         self.main_layout.setContentsMargins(10, 8, 12, 10)
         self.main_layout.setSpacing(6)
 
-        # Header bar with toggle arrow and title
+        # Header bar with toggle arrow, title, and + button
         header_layout = QHBoxLayout()
         header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(6)
 
         self.toggle_btn = QPushButton("▼ Flow Parameters")
         self.toggle_btn.setObjectName("toggle_btn")
         self.toggle_btn.setCursor(Qt.PointingHandCursor)
         self.toggle_btn.clicked.connect(self.toggle_collapsed)
         header_layout.addWidget(self.toggle_btn)
+
+        self.add_report_date_btn = QPushButton("+")
+        self.add_report_date_btn.setObjectName("add_report_date_btn")
+        self.add_report_date_btn.setFixedSize(18, 18)
+        self.add_report_date_btn.setCursor(Qt.PointingHandCursor)
+        self.add_report_date_btn.setToolTip("Add Report Date parameter")
+        self.add_report_date_btn.clicked.connect(self.add_report_date_parameter)
+        header_layout.addWidget(self.add_report_date_btn)
 
         header_layout.addStretch()
         self.main_layout.addLayout(header_layout)
@@ -143,9 +185,19 @@ class CanvasParameterOverlay(QFrame):
         current_defaults: Optional[Dict[str, str]] = None,
         date_option_defaults: Optional[Dict[str, str]] = None,
         selected_filename_date_param: Optional[str] = None,
+        has_report_date: Optional[bool] = None,
     ) -> None:
         """Populate the parameters in the list cleanly with exact sizing and state preservation."""
-        new_names = list(param_names)
+        if has_report_date is not None:
+            self._has_report_date = bool(has_report_date)
+        elif current_defaults and REPORT_DATE_PARAM in current_defaults:
+            self._has_report_date = True
+
+        raw_names = [p for p in param_names if p != REPORT_DATE_PARAM]
+        if self._has_report_date:
+            new_names = [REPORT_DATE_PARAM] + raw_names
+        else:
+            new_names = list(raw_names)
 
         # Preserve current values from UI
         for pname, edit in self._param_edits.items():
@@ -164,7 +216,22 @@ class CanvasParameterOverlay(QFrame):
         if selected_filename_date_param is not None:
             self._selected_filename_date_param = selected_filename_date_param
 
-        # Only rebuild widgets if parameter names on canvas have actually changed
+        # If Report Date is active, ensure defaults and always use as filename date
+        if self._has_report_date:
+            self._selected_filename_date_param = REPORT_DATE_PARAM
+            if REPORT_DATE_PARAM not in self._param_values:
+                self._param_values[REPORT_DATE_PARAM] = QDate.currentDate().toString("yyyy-MM-dd")
+            if REPORT_DATE_PARAM not in self._last_selected_date_options:
+                self._last_selected_date_options[REPORT_DATE_PARAM] = "today"
+
+        # Update the + button state
+        self.add_report_date_btn.setEnabled(not self._has_report_date)
+        if self._has_report_date:
+            self.add_report_date_btn.setToolTip("Report Date parameter already added")
+        else:
+            self.add_report_date_btn.setToolTip("Add Report Date parameter")
+
+        # Only rebuild widgets if parameter list has changed or needs rebuild
         if self._param_names == new_names and (self._param_edits or self._date_combos or not new_names):
             return
 
@@ -198,7 +265,9 @@ class CanvasParameterOverlay(QFrame):
 
         # Determine date parameters
         date_param_names = [p for p in self._param_names if is_date_param(p)]
-        if len(date_param_names) == 1:
+        if self._has_report_date or REPORT_DATE_PARAM in self._param_names:
+            self._selected_filename_date_param = REPORT_DATE_PARAM
+        elif len(date_param_names) == 1:
             self._selected_filename_date_param = date_param_names[0]
         elif len(date_param_names) > 1:
             if not self._selected_filename_date_param or self._selected_filename_date_param not in date_param_names:
@@ -210,8 +279,9 @@ class CanvasParameterOverlay(QFrame):
             lbl = QLabel(f"{pname}:", self.content_widget)
             lbl.setStyleSheet("font-weight: bold; color: #cbd5e0;")
             init_val = self._param_values.get(pname, "")
+            is_report_date = (pname == REPORT_DATE_PARAM)
 
-            if is_date_param(pname):
+            if is_report_date or is_date_param(pname):
                 row_widget = QWidget(self.content_widget)
                 row_layout = QHBoxLayout(row_widget)
                 row_layout.setContentsMargins(0, 0, 0, 0)
@@ -222,7 +292,7 @@ class CanvasParameterOverlay(QFrame):
                 for opt in DATE_OPTIONS:
                     combo.addItem(opt)
 
-                saved_opt = self._last_selected_date_options.get(pname, "pick date")
+                saved_opt = self._last_selected_date_options.get(pname, "today" if is_report_date else "pick date")
                 idx = combo.findText(saved_opt)
                 combo.setCurrentIndex(idx if idx >= 0 else 0)
 
@@ -268,8 +338,17 @@ class CanvasParameterOverlay(QFrame):
                 row_layout.addWidget(combo)
                 row_layout.addWidget(date_picker)
 
-                # Add checkbox if more than one date parameter
-                if len(date_param_names) > 1:
+                if is_report_date:
+                    # Delete icon beside the Report Date entry to remove it
+                    del_btn = QPushButton("🗑", row_widget)
+                    del_btn.setObjectName("del_report_date_btn")
+                    del_btn.setFixedSize(20, 20)
+                    del_btn.setCursor(Qt.PointingHandCursor)
+                    del_btn.setToolTip("Remove Report Date parameter")
+                    del_btn.clicked.connect(self.remove_report_date_parameter)
+                    row_layout.addWidget(del_btn)
+                elif not self._has_report_date and len(date_param_names) > 1:
+                    # Add checkbox only if multiple date params and Report Date is not overriding
                     chk = QCheckBox(row_widget)
                     chk.setToolTip("Set as filename date")
                     chk.setChecked(pname == self._selected_filename_date_param)
@@ -279,7 +358,6 @@ class CanvasParameterOverlay(QFrame):
                         def on_chk_toggled(checked):
                             if checked:
                                 self._selected_filename_date_param = p
-                                # Uncheck others
                                 for other_p, other_chk in self._date_checkboxes.items():
                                     if other_p != p and other_chk.isChecked():
                                         other_chk.blockSignals(True)
@@ -288,7 +366,6 @@ class CanvasParameterOverlay(QFrame):
                                 val = self.get_filename_date()
                                 self.filename_date_changed.emit(val)
                             else:
-                                # Keep checked if clicked while already checked (mutually exclusive)
                                 if self._selected_filename_date_param == p:
                                     target_chk.blockSignals(True)
                                     target_chk.setChecked(True)
@@ -324,6 +401,64 @@ class CanvasParameterOverlay(QFrame):
 
         self._update_overlay_size()
 
+    def add_report_date_parameter(self) -> None:
+        """Add 'Report Date' parameter at the top of the list and set as filename date."""
+        if self._has_report_date and REPORT_DATE_PARAM in self._param_names:
+            return
+
+        self._has_report_date = True
+        self._is_collapsed = False
+
+        if REPORT_DATE_PARAM not in self._param_values:
+            self._param_values[REPORT_DATE_PARAM] = QDate.currentDate().toString("yyyy-MM-dd")
+        if REPORT_DATE_PARAM not in self._last_selected_date_options:
+            self._last_selected_date_options[REPORT_DATE_PARAM] = "today"
+
+        self._selected_filename_date_param = REPORT_DATE_PARAM
+
+        clean_names = [p for p in self._param_names if p != REPORT_DATE_PARAM]
+        new_names = [REPORT_DATE_PARAM] + clean_names
+
+        self._param_names = []  # Force re-render
+        self.set_parameters(
+            new_names,
+            current_defaults=self._param_values,
+            date_option_defaults=self._last_selected_date_options,
+            selected_filename_date_param=REPORT_DATE_PARAM,
+            has_report_date=True,
+        )
+
+        val = self.get_filename_date()
+        self.parameter_changed.emit(REPORT_DATE_PARAM, val)
+        self.filename_date_changed.emit(val)
+
+    def remove_report_date_parameter(self) -> None:
+        """Remove 'Report Date' parameter and re-evaluate filename date parameter."""
+        self._has_report_date = False
+        remaining_names = [p for p in self._param_names if p != REPORT_DATE_PARAM]
+        self._param_values.pop(REPORT_DATE_PARAM, None)
+        self._last_selected_date_options.pop(REPORT_DATE_PARAM, None)
+
+        remaining_dates = [p for p in remaining_names if is_date_param(p)]
+        self._selected_filename_date_param = remaining_dates[0] if remaining_dates else None
+
+        self._param_names = []  # Force re-render
+        self.set_parameters(
+            remaining_names,
+            current_defaults=self._param_values,
+            date_option_defaults=self._last_selected_date_options,
+            selected_filename_date_param=self._selected_filename_date_param,
+            has_report_date=False,
+        )
+
+        val = self.get_filename_date()
+        self.parameter_changed.emit(REPORT_DATE_PARAM, "")
+        self.filename_date_changed.emit(val)
+
+    def has_report_date(self) -> bool:
+        """Return True if Report Date parameter is active."""
+        return self._has_report_date
+
     def get_parameter_values(self) -> Dict[str, str]:
         """Return currently entered values for all parameters."""
         res: Dict[str, str] = {}
@@ -340,10 +475,15 @@ class CanvasParameterOverlay(QFrame):
 
     def get_selected_filename_date_param(self) -> Optional[str]:
         """Return the parameter name currently selected for the filename date."""
+        if self._has_report_date or REPORT_DATE_PARAM in self._param_names:
+            return REPORT_DATE_PARAM
         return self._selected_filename_date_param
 
     def get_filename_date(self) -> str:
         """Return the date value (YYYY-MM-DD) corresponding to the filename date parameter."""
+        if self._has_report_date or REPORT_DATE_PARAM in self._param_names:
+            return self._param_values.get(REPORT_DATE_PARAM, "")
+
         date_param_names = [p for p in self._param_names if is_date_param(p)]
         if not date_param_names:
             return ""

@@ -36,6 +36,7 @@ class FlowStorage:
         splitter_sizes: Optional[List[int]] = None,
         parameter_date_options: Optional[Dict[str, str]] = None,
         selected_filename_date_param: Optional[str] = None,
+        has_report_date: Optional[bool] = None,
     ) -> None:
         """Save process flow JSON data to disk."""
         data = {
@@ -51,6 +52,7 @@ class FlowStorage:
             "splitter_sizes": splitter_sizes,
             "parameter_date_options": parameter_date_options or {},
             "selected_filename_date_param": selected_filename_date_param,
+            "has_report_date": has_report_date,
         }
         file_path.parent.mkdir(parents=True, exist_ok=True)
         file_path.write_text(json.dumps(data, indent=2), encoding="utf-8")

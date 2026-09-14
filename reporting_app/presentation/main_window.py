@@ -710,14 +710,17 @@ class MainWindow(QMainWindow):
 
         # Determine filename_date from flow parameter settings or defaults
         filename_date = ""
-        sel_param = flow_ctrl.get_selected_filename_date_param()
-        if sel_param and sel_param in param_values:
-            filename_date = param_values[sel_param]
+        if "Report Date" in param_values and param_values["Report Date"].strip():
+            filename_date = param_values["Report Date"].strip()
         else:
-            for k, v in param_values.items():
-                if any(token in k.lower() for token in ("date", "dt", "day", "month", "year")):
-                    filename_date = v
-                    break
+            sel_param = flow_ctrl.get_selected_filename_date_param()
+            if sel_param and sel_param in param_values:
+                filename_date = param_values[sel_param]
+            else:
+                for k, v in param_values.items():
+                    if any(token in k.lower() for token in ("date", "dt", "day", "month", "year")):
+                        filename_date = v
+                        break
 
         results_log = []
         errors = []

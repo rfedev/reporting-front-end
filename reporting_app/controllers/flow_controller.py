@@ -215,6 +215,7 @@ class ProcessFlowController(QObject):
         splitter_sizes: Optional[List[int]] = None,
         parameter_date_options: Optional[Dict[str, str]] = None,
         selected_filename_date_param: Optional[str] = None,
+        has_report_date: Optional[bool] = None,
     ) -> None:
         """Save process flow to JSON and update database parameter defaults."""
         self.parameter_defaults.update(parameter_defaults)
@@ -234,6 +235,8 @@ class ProcessFlowController(QObject):
             self.flow_data["parameter_date_options"] = parameter_date_options
         if selected_filename_date_param is not None:
             self.flow_data["selected_filename_date_param"] = selected_filename_date_param
+        if has_report_date is not None:
+            self.flow_data["has_report_date"] = has_report_date
 
         FlowStorage.save(
             file_path=self.file_path,
@@ -249,6 +252,7 @@ class ProcessFlowController(QObject):
             splitter_sizes=self.flow_data.get("splitter_sizes"),
             parameter_date_options=self.flow_data.get("parameter_date_options", {}),
             selected_filename_date_param=self.flow_data.get("selected_filename_date_param"),
+            has_report_date=self.flow_data.get("has_report_date"),
         )
 
         # Update persistence layer defaults if repository is provided

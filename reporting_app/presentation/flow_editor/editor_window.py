@@ -1436,11 +1436,19 @@ class ProcessFlowEditorWindow(QMainWindow):
 
             date_opt_defaults = self.flow_controller.flow_data.get("parameter_date_options", {})
             sel_date_param = self.flow_controller.get_selected_filename_date_param()
+            has_rep_date = self.flow_controller.flow_data.get(
+                "has_report_date",
+                "Report Date" in self.flow_controller.parameter_defaults,
+            )
+            if hasattr(self.param_overlay, "_has_report_date") and self.param_overlay._has_report_date:
+                has_rep_date = True
+
             self.param_overlay.set_parameters(
                 unique_params,
                 current_defaults=self.flow_controller.parameter_defaults,
                 date_option_defaults=date_opt_defaults,
                 selected_filename_date_param=sel_date_param,
+                has_report_date=has_rep_date,
             )
             self.param_overlay.move(14, 14)
             self.param_overlay.raise_()
@@ -2267,11 +2275,16 @@ class ProcessFlowEditorWindow(QMainWindow):
         # Collect parameters and date options from overlay if present
         date_options = {}
         sel_filename_date_param = None
+        has_report_date = False
         if hasattr(self, "param_overlay"):
             overlay_vals = self.param_overlay.get_parameter_values()
             existing_defaults.update(overlay_vals)
             date_options = self.param_overlay.get_date_option_selections()
             sel_filename_date_param = self.param_overlay.get_selected_filename_date_param()
+            has_report_date = self.param_overlay.has_report_date()
+            if not has_report_date:
+                existing_defaults.pop("Report Date", None)
+                date_options.pop("Report Date", None)
 
         self.flow_controller.save_flow(
             active_query_names=active_query_names,
@@ -2284,6 +2297,7 @@ class ProcessFlowEditorWindow(QMainWindow):
             splitter_sizes=cur_splitter_sizes,
             parameter_date_options=date_options,
             selected_filename_date_param=sel_filename_date_param,
+            has_report_date=has_report_date,
         )
 
         if self.app_controller:

@@ -729,35 +729,41 @@ class MainWindow(QMainWindow):
         for group in csv_imports:
             imp_items = group.get("items", []) if isinstance(group, dict) and "items" in group else [group]
             for item in imp_items:
-                c_path = item.get("csv_path", "").strip()
+                f_path = (item.get("file_path") or item.get("csv_path") or "").strip()
                 d_table = item.get("output_table", "").strip()
                 headers = item.get("has_headers", True)
-                if not c_path or not d_table:
+                sheet_name = item.get("sheet_name")
+                schema_mode = item.get("schema_mode", "auto")
+                manual_schema = item.get("manual_schema")
+                if not f_path or not d_table:
                     continue
                 if filename_date:
-                    c_path = format_filename_with_date(c_path, filename_date)
+                    f_path = format_filename_with_date(f_path, filename_date)
 
-                resolved_csv = Path(c_path)
-                if not resolved_csv.is_absolute() and active_report and active_report.folder_path:
-                    candidate = active_report.folder_path / "inputs" / resolved_csv
-                    if candidate.exists() or not resolved_csv.exists():
-                        resolved_csv = candidate
+                resolved_file = Path(f_path)
+                if not resolved_file.is_absolute() and active_report and active_report.folder_path:
+                    candidate = active_report.folder_path / "inputs" / resolved_file
+                    if candidate.exists() or not resolved_file.exists():
+                        resolved_file = candidate
 
-                self.status_bar.showMessage(f"Importing {resolved_csv.name} -> {d_table}...")
+                self.status_bar.showMessage(f"Importing {resolved_file.name} -> {d_table}...")
                 QApplication.processEvents()
                 try:
-                    from reporting_app.core.bigquery_run import run_bigquery_import_csv
-                    imp_res = run_bigquery_import_csv(
-                        csv_path=resolved_csv,
+                    from reporting_app.core.bigquery_run import run_bigquery_import_file
+                    imp_res = run_bigquery_import_file(
+                        file_path=resolved_file,
                         destination_table=d_table,
                         has_headers=headers,
+                        sheet_name=sheet_name,
+                        schema_mode=schema_mode,
+                        manual_schema=manual_schema,
                     )
                     row_cnt = imp_res.get("row_count")
                     cnt_str = f"{row_cnt:,} rows" if row_cnt is not None else "completed"
-                    results_log.append(f"📥 Imported CSV '{c_path}' into '{d_table}' ({cnt_str})")
+                    results_log.append(f"📥 Imported '{f_path}' into '{d_table}' ({cnt_str})")
                 except Exception as e:
-                    failed_node_name = group.get("node_name", "Import csv") if isinstance(group, dict) else "Import csv"
-                    err_msg = f"Import CSV failed for {d_table}: {e}"
+                    failed_node_name = group.get("node_name", "Import Files") if isinstance(group, dict) else "Import Files"
+                    err_msg = f"Import failed for {d_table}: {e}"
                     errors.append(err_msg)
                     results_log.append(f"❌ {err_msg}")
                     break

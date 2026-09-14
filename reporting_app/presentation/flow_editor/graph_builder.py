@@ -75,8 +75,10 @@ class ProcessFlowGraphBuilder:
 
         # Remove keys belonging to queries no longer present on canvas
         active_query_names = {q.name for q in queries}
+        active_query_names.add("Import Files")
         active_query_names.add("Import csv")
         for idx in range(len(import_csv_data) + 5):
+            active_query_names.add(f"Import Files {idx}")
             active_query_names.add(f"Import csv {idx}")
 
         keys_to_remove = [
@@ -99,7 +101,7 @@ class ProcessFlowGraphBuilder:
             for out_t in q.output_tables:
                 table_producers[out_t] = q.name
         for idx, imp_group in enumerate(import_csv_data):
-            imp_name = imp_group.get("node_name", "Import csv" if idx == 0 else f"Import csv {idx}")
+            imp_name = imp_group.get("node_name", "Import Files" if idx == 0 else f"Import Files {idx}")
             for item in imp_group.get("items", []):
                 t = item.get("output_table", "").strip()
                 if t:
@@ -181,10 +183,9 @@ class ProcessFlowGraphBuilder:
 
             col_x += 650
 
-        # 4. Create ImportCsvNode(s) if import_csv_data is provided
         import_nodes: Dict[str, ImportCsvNode] = {}
         for idx, imp_group in enumerate(import_csv_data):
-            imp_name = imp_group.get("node_name", "Import csv" if idx == 0 else f"Import csv {idx}")
+            imp_name = imp_group.get("node_name", "Import Files" if idx == 0 else f"Import Files {idx}")
             ipos = existing_positions.get(imp_name, (col_x, 0))
             inode: ImportCsvNode = graph.create_node(
                 "reporting.nodes.ImportCsvNode",

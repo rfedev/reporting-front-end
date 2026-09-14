@@ -315,9 +315,9 @@ class QueryNode(BaseNode):
 
 
 class ImportCsvItem(NodeItem):
-    """Custom graphics item for ImportCsvNode."""
+    """Custom graphics item for ImportCsvNode / ImportFilesNode."""
 
-    def __init__(self, name="Import csv", parent=None):
+    def __init__(self, name="Import Files", parent=None):
         super().__init__(name, parent)
         if hasattr(self, "_text_item") and self._text_item:
             try:
@@ -333,12 +333,11 @@ class ImportCsvItem(NodeItem):
         super().paint(painter, option, widget)
 
 
-
 class ImportCsvNode(BaseNode):
-    """Node representing one or more CSV file imports into BigQuery tables."""
+    """Node representing one or more CSV or Excel file imports into BigQuery tables."""
 
     __identifier__ = "reporting.nodes"
-    NODE_NAME = "Import csv"
+    NODE_NAME = "Import Files"
 
     def __init__(self):
         super().__init__(ImportCsvItem)
@@ -353,8 +352,8 @@ class ImportCsvNode(BaseNode):
         self.add_output("tables_out", multi_output=True, display_name=True, color=(COLOR_DARK_ORANGE[0], COLOR_DARK_ORANGE[1], COLOR_DARK_ORANGE[2]))
 
         # Custom properties
-        self.create_property("import_name", "Import csv")
-        self.create_property("imports_json", "[]")  # list of {"csv_path": ..., "has_headers": bool, "output_table": ...}
+        self.create_property("import_name", "Import Files")
+        self.create_property("imports_json", "[]")  # list of {"file_path": ..., "has_headers": bool, "output_table": ..., ...}
 
         # Visual styling - Purple
         self.set_color(COLOR_DARK_PURPLE[0], COLOR_DARK_PURPLE[1], COLOR_DARK_PURPLE[2])
@@ -380,7 +379,7 @@ class ImportCsvNode(BaseNode):
     def get_input_files(self) -> List[str]:
         files = []
         for item in self.get_imports():
-            f = item.get("csv_path", "").strip()
+            f = (item.get("file_path") or item.get("csv_path") or "").strip()
             if f and f not in files:
                 files.append(f)
         return files
@@ -392,6 +391,10 @@ class ImportCsvNode(BaseNode):
             if t and t not in tables:
                 tables.append(t)
         return tables
+
+
+ImportFilesItem = ImportCsvItem
+ImportFilesNode = ImportCsvNode
 
 
 class TableBoxNode(BaseNode):

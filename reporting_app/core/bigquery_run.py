@@ -233,35 +233,48 @@ def run_bigquery_script(
     }
 
 
-def run_bigquery_import_csv(
-    csv_path: str | Path,
-    destination_table: str,
+def run_bigquery_import_file(
+    file_path: Optional[str | Path] = None,
+    destination_table: str = "",
     has_headers: bool = True,
+    sheet_name: Optional[str] = None,
+    schema_mode: str = "auto",
+    manual_schema: Optional[List[Dict[str, Any]]] = None,
     project_id: Optional[str] = None,
     client: Optional[Any] = None,
+    csv_path: Optional[str | Path] = None,
+    **kwargs,
 ) -> Dict[str, Any]:
-    """Import a local CSV file into BigQuery with schema auto-detection.
+    """Import a local CSV or XLSX file into BigQuery with auto or manual schema.
 
     Parameters:
-        csv_path: Path to the local CSV file.
+        file_path: Path to the local CSV or XLSX file.
         destination_table: BigQuery table reference (e.g. 'project-id.dataset_id.table_id').
-        has_headers: Whether the CSV file has header row for column names.
-        project_id: Optional GCP project ID override (extracted from table name if not given).
+        has_headers: Whether the source file has a header row for column names.
+        sheet_name: Worksheet name if importing an Excel (.xlsx) file.
+        schema_mode: 'auto' for BigQuery autodetect, or 'manual' to apply manual_schema.
+        manual_schema: List of dicts [{'name': '...', 'type': '...', 'mode': '...'}].
+        project_id: Optional GCP project ID override.
         client: Optional pre-configured bigquery.Client.
+        csv_path: Optional backwards-compatible alias for file_path.
 
     Returns:
         Dictionary with status, destination_table, row_count, project_id.
     """
     from reporting_app.core.sql_parser import clean_table_name
+    import pandas as pd
 
-    csv_p = Path(csv_path)
-    if not csv_p.exists():
-        raise FileNotFoundError(f"CSV file not found: {csv_p}")
+    actual_path = file_path or csv_path
+    if not actual_path:
+        raise ValueError("file_path or csv_path must be provided.")
+
+    file_p = Path(actual_path)
+    if not file_p.exists():
+        raise FileNotFoundError(f"Import file not found: {file_p}")
 
     clean_dest = clean_table_name(destination_table)
     parts = clean_dest.split(".")
     if len(parts) == 1 and clean_dest:
-        # Only tablename given (no periods), prepend workbench dataset
         try:
             from reporting_app.persistence.database import DatabaseManager
             from reporting_app.persistence.repository import Repository
@@ -290,17 +303,56 @@ def run_bigquery_import_csv(
     if client is None:
         client = bigquery.Client(project=project_id) if project_id else bigquery.Client()
 
-    job_config = bigquery.LoadJobConfig(
-        source_format=bigquery.SourceFormat.CSV,
-        autodetect=True,
-        skip_leading_rows=1 if has_headers else 0,
-        write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
-    )
+    bq_schema = None
+    if schema_mode == "manual" and manual_schema:
+        bq_schema = [
+            bigquery.SchemaField(
+                name=f["name"].strip(),
+                field_type=f.get("type", "STRING").upper(),
+                mode=f.get("mode", "NULLABLE").upper(),
+                description=f.get("description") or None,
+            )
+            for f in manual_schema
+            if f.get("name") and f["name"].strip()
+        ]
 
-    logger.info(f"Loading CSV {csv_p} into BigQuery table {clean_dest} (Headers: {has_headers})")
-    with open(csv_p, "rb") as source_file:
-        job = client.load_table_from_file(source_file, clean_dest, job_config=job_config, project=project_id)
+    ext = file_p.suffix.lower()
+
+    if ext in (".xlsx", ".xls"):
+        # Excel file import using pandas and openpyxl
+        sheet = sheet_name or 0
+        df = pd.read_excel(file_p, sheet_name=sheet, header=0 if has_headers else None, engine="openpyxl")
+        if not has_headers:
+            if bq_schema and len(bq_schema) == len(df.columns):
+                df.columns = [f.name for f in bq_schema]
+            else:
+                df.columns = [f"col_{i+1}" for i in range(len(df.columns))]
+        else:
+            df.columns = [str(c).strip() for c in df.columns]
+
+        job_config = bigquery.LoadJobConfig(
+            schema=bq_schema if bq_schema else None,
+            autodetect=False if bq_schema else True,
+            write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
+        )
+
+        logger.info(f"Loading Excel sheet '{sheet}' from {file_p} into BigQuery table {clean_dest}")
+        job = client.load_table_from_dataframe(df, clean_dest, job_config=job_config, project=project_id)
         job.result()
+    else:
+        # CSV file import
+        job_config = bigquery.LoadJobConfig(
+            source_format=bigquery.SourceFormat.CSV,
+            schema=bq_schema if bq_schema else None,
+            autodetect=False if bq_schema else True,
+            skip_leading_rows=1 if has_headers else 0,
+            write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
+        )
+
+        logger.info(f"Loading CSV {file_p} into BigQuery table {clean_dest} (Headers: {has_headers}, Schema: {schema_mode})")
+        with open(file_p, "rb") as source_file:
+            job = client.load_table_from_file(source_file, clean_dest, job_config=job_config, project=project_id)
+            job.result()
 
     row_count = None
     try:
@@ -315,3 +367,7 @@ def run_bigquery_import_csv(
         "row_count": row_count,
         "project_id": project_id,
     }
+
+
+# Backwards-compatible alias
+run_bigquery_import_csv = run_bigquery_import_file

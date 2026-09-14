@@ -1,5 +1,5 @@
 -- Query: test
-#comment
+#comment {fileDate}
 # output: sel1.csv
 SELECT '{repdate}' as reporting_date, 1 as num;
 

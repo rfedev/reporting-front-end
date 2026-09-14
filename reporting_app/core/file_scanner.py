@@ -10,6 +10,7 @@ Features:
 import json
 import logging
 from pathlib import Path
+import re
 from typing import Dict, List, Optional, Set
 
 from reporting_app.core.models import (
@@ -129,8 +130,15 @@ class FileScanner:
             working_directory=working_directory,
         )
 
+    def parse_query(self, qinfo: QueryInfo, force: bool = False) -> QueryInfo:
+        """Parse a query on-demand and update internal cache."""
+        res = parse_single_query(qinfo, force=force)
+        cache_key = str(qinfo.file_path.resolve())
+        self._query_cache[cache_key] = res
+        return res
+
     def _scan_queries(self, report_dir: Path, report_name: str) -> List[QueryInfo]:
-        """Scan SQL files in ./queries/*.sql, ./code/*.sql, and root/*.sql."""
+        """Discover SQL files in ./queries/*.sql, ./code/*.sql, and root/*.sql without reading or parsing file content."""
         sql_files: List[Path] = []
 
         # Primary location: ./<report>/queries/*.sql
@@ -149,45 +157,24 @@ class FileScanner:
             if p not in sql_files:
                 sql_files.append(p)
 
-        # Collect existing CSV names in report outputs directory
-        existing_report_csvs: Set[str] = set()
-        outputs_dir = report_dir / "outputs"
-        if outputs_dir.exists() and outputs_dir.is_dir():
-            for cf in outputs_dir.glob("*.csv"):
-                existing_report_csvs.add(cf.name)
-
         queries: List[QueryInfo] = []
         for file_path in sorted(sql_files, key=lambda x: x.name):
             try:
-                # Sync # ouput: comments for standalone SELECT statements
-                csv_files = sync_query_csv_comments(file_path, existing_report_csvs)
-                existing_report_csvs.update(csv_files)
-
-                mtime = file_path.stat().st_mtime
                 cache_key = str(file_path.resolve())
+                mtime = file_path.stat().st_mtime
 
                 # Check if cache is still valid
                 cached = self._query_cache.get(cache_key)
-                if cached and cached.mtime == mtime:
+                if cached:
                     queries.append(cached)
                     continue
-
-                # Parse file content
-                content = file_path.read_text(encoding="utf-8", errors="replace")
-                param_names = scan_query_parameters(content)
-                input_tables, output_tables, output_csv_tables = scan_query_tables(content)
-                if csv_files:
-                    output_csv_tables = csv_files
 
                 query_info = QueryInfo(
                     name=file_path.stem,
                     file_path=file_path,
                     report_name=report_name,
-                    parameters=[QueryParameter(name=p) for p in param_names],
-                    input_tables=input_tables,
-                    output_tables=output_tables,
-                    output_csv_tables=output_csv_tables,
                     mtime=mtime,
+                    is_parsed=False,
                 )
                 self._query_cache[cache_key] = query_info
                 queries.append(query_info)
@@ -195,6 +182,7 @@ class FileScanner:
                 logger.error(f"Failed to scan query file {file_path}: {e}")
 
         return queries
+
 
     def _scan_process_flows(self, report_dir: Path, report_name: str) -> List[ProcessFlowInfo]:
         """Scan JSON files representing process flows in ./queries/*.json and root/*.json."""
@@ -251,3 +239,84 @@ class FileScanner:
                 logger.error(f"Failed to scan process flow file {file_path}: {e}")
 
         return flows
+
+
+def parse_single_query(qinfo: QueryInfo, force: bool = False) -> QueryInfo:
+    """Parse query parameters, input/output tables, and sync CSV comments for a single query."""
+    if not qinfo.file_path or not qinfo.file_path.exists():
+        qinfo.is_parsed = True
+        return qinfo
+
+    try:
+        mtime = qinfo.file_path.stat().st_mtime
+    except Exception:
+        mtime = 0.0
+
+    if qinfo.is_parsed and not force and getattr(qinfo, "mtime", 0.0) == mtime:
+        return qinfo
+
+    # Collect existing CSV names in report outputs directory
+    existing_report_csvs: Set[str] = set()
+    report_dir = qinfo.file_path.parent
+    if report_dir.name in ("queries", "code"):
+        report_dir = report_dir.parent
+    outputs_dir = report_dir / "outputs"
+    if outputs_dir.exists() and outputs_dir.is_dir():
+        for cf in outputs_dir.glob("*.csv"):
+            existing_report_csvs.add(cf.name)
+
+    # Collect existing output comments and reserve table_NN.csv for alphabetically earlier SQL files
+    all_sql_files = sorted(report_dir.glob("**/*.sql"), key=lambda p: p.name)
+    uncommented_earlier_files = []
+    for sql_file in all_sql_files:
+        if sql_file == qinfo.file_path:
+            continue
+        try:
+            txt = sql_file.read_text(encoding="utf-8", errors="replace")
+            has_comments = False
+            for m in re.finditer(r"(?:#|--)\s*out?put\s*:\s*([^\r\n;]+)", txt, re.IGNORECASE):
+                has_comments = True
+                for part in m.group(1).split(","):
+                    p = part.strip()
+                    if p:
+                        if not p.lower().endswith(".csv"):
+                            p = f"{p}.csv"
+                        existing_report_csvs.add(p)
+            if not has_comments and sql_file.name < qinfo.file_path.name:
+                from reporting_app.core.sql_parser import find_standalone_select_statements
+                stmts = find_standalone_select_statements(txt)
+                if stmts:
+                    uncommented_earlier_files.extend([sql_file] * len(stmts))
+        except Exception:
+            pass
+
+    for _ in uncommented_earlier_files:
+        num = 1
+        while f"table_{num:02d}.csv" in existing_report_csvs:
+            num += 1
+        existing_report_csvs.add(f"table_{num:02d}.csv")
+
+    try:
+        # Sync # output: comments for standalone SELECT statements
+        csv_files = sync_query_csv_comments(qinfo.file_path, existing_report_csvs)
+        mtime = qinfo.file_path.stat().st_mtime
+
+        # Parse file content
+        content = qinfo.file_path.read_text(encoding="utf-8", errors="replace")
+        param_names = scan_query_parameters(content)
+        input_tables, output_tables, output_csv_tables = scan_query_tables(content)
+        if csv_files:
+            output_csv_tables = csv_files
+
+        qinfo.parameters = [QueryParameter(name=p) for p in param_names]
+        qinfo.input_tables = input_tables
+        qinfo.output_tables = output_tables
+        qinfo.output_csv_tables = output_csv_tables
+        qinfo.mtime = mtime
+        qinfo.is_parsed = True
+    except Exception as e:
+        logger.error(f"Failed to parse query file {qinfo.file_path}: {e}")
+        qinfo.is_parsed = True
+
+    return qinfo
+

@@ -301,9 +301,13 @@ class ImportCsvDialog(QDialog):
         row_layout.addLayout(r1)
         row_layout.addLayout(r2)
 
+        path_combo.text = path_combo.currentText
+        path_combo.setText = path_combo.setEditText
+
         row_data = {
             "widget": section_box,
             "path_combo": path_combo,
+            "path_edit": path_combo,
             "headers_cb": headers_cb,
             "table_edit": table_edit,
             "del_btn": del_btn,
@@ -1024,7 +1028,7 @@ class ProcessFlowEditorWindow(QMainWindow):
         self._query_watcher.directoryChanged.connect(self._on_query_file_modified)
         self._setup_query_file_watcher()
         self._sync_timer = QTimer(self)
-        self._sync_timer.setInterval(1000)
+        self._sync_timer.setInterval(2000)
         self._sync_timer.timeout.connect(self._sync_query_files_and_parameters)
         self._sync_timer.start()
 
@@ -1036,8 +1040,14 @@ class ProcessFlowEditorWindow(QMainWindow):
         queries_dir = self.report.folder_path / "queries"
         if queries_dir.exists():
             files_to_watch.append(str(queries_dir.resolve()))
-        for q in self.report.queries:
-            if q.file_path and q.file_path.exists():
+        active_qnames = {
+            n.get_property("query_name") or n.name()
+            for n in self.graph.all_nodes()
+            if isinstance(n, QueryNode) or getattr(n, "type_", "") == "reporting.nodes.QueryNode"
+        }
+        for qname in active_qnames:
+            q = self._get_working_query(qname)
+            if q and q.file_path and q.file_path.exists():
                 files_to_watch.append(str(q.file_path.resolve()))
         if files_to_watch:
             existing = self._query_watcher.files() + self._query_watcher.directories()
@@ -1131,28 +1141,23 @@ class ProcessFlowEditorWindow(QMainWindow):
         self.left_panel.set_queries(query_names)
 
     def _sync_all_query_csv_comments(self) -> None:
-        """Ensure all query files have synchronized # ouput: comments for standalone SELECT statements."""
+        """Ensure active query files in the current flow have synchronized # output: comments."""
         if not self.report or not self.report.folder_path:
             return
-        existing_csvs: Set[str] = set()
-        outputs_dir = self.report.folder_path / "outputs"
-        if outputs_dir.exists() and outputs_dir.is_dir():
-            for cf in outputs_dir.glob("*.csv"):
-                existing_csvs.add(cf.name)
-
-        csv_topology_changed = False
-        for q in self.report.queries:
-            if q.file_path and q.file_path.exists():
-                csv_files = sync_query_csv_comments(q.file_path, existing_csvs)
-                existing_csvs.update(csv_files)
-                if csv_files != q.output_csv_tables:
-                    q.output_csv_tables = csv_files
-                    if csv_files:
-                        self.flow_controller.set_csv_filename(q.name, ", ".join(csv_files))
-                    else:
-                        flow_csvs = self.flow_controller.get_csv_filenames()
-                        flow_csvs.pop(q.name, None)
-                    csv_topology_changed = True
+        active_qnames = {
+            n.get_property("query_name") or n.name()
+            for n in self.graph.all_nodes()
+            if isinstance(n, QueryNode) or getattr(n, "type_", "") == "reporting.nodes.QueryNode"
+        }
+        for qname in active_qnames:
+            q = self._get_working_query(qname)
+            if q:
+                q.ensure_parsed(force=True)
+                if q.output_csv_tables:
+                    self.flow_controller.set_csv_filename(q.name, ", ".join(q.output_csv_tables))
+                else:
+                    flow_csvs = self.flow_controller.get_csv_filenames()
+                    flow_csvs.pop(q.name, None)
 
         # Update any active CSV nodes on canvas immediately
         for node in self.graph.all_nodes():
@@ -1160,55 +1165,76 @@ class ProcessFlowEditorWindow(QMainWindow):
                 btype = node.get_property("box_type") or getattr(getattr(node, "view", None), "table_box_type", "")
                 if btype == "Output CSV":
                     qname = node.get_property("query_owner") or node.name().replace(" [CSV]", "").strip()
-                    qinfo = self.report.get_query(qname)
+                    qinfo = self._get_working_query(qname)
                     if qinfo and qinfo.output_csv_tables:
                         node.setup_as_csv_output(qinfo.output_csv_tables)
                         node.set_display_mode(self.show_full_table_names)
 
-        if csv_topology_changed:
-            self._sync_graph_topology()
-
-
     def _sync_query_files_and_parameters(self) -> None:
-        """Sync CSV comments and reload query parameters from disk if modified, updating canvas nodes and overlay."""
-        self._sync_all_query_csv_comments()
+        """Reload active query parameters and CSV comments from disk if modified, updating canvas nodes and overlay."""
         if not self.report:
             return
 
-        # Check for query file modifications and re-parse parameters
-        from reporting_app.core.sql_parser import scan_query_parameters, scan_query_tables
+        active_qnames = {
+            n.get_property("query_name") or n.name()
+            for n in self.graph.all_nodes()
+            if isinstance(n, QueryNode) or getattr(n, "type_", "") == "reporting.nodes.QueryNode"
+        }
+        if not active_qnames:
+            return
+
         has_table_changes = False
         has_param_changes = False
+        has_csv_changes = False
 
-        for q in self.report.queries:
-            if q.file_path and q.file_path.exists():
-                try:
-                    mtime = q.file_path.stat().st_mtime
-                    if mtime != getattr(q, "mtime", None) or not q.parameters:
-                        content = q.file_path.read_text(encoding="utf-8", errors="replace")
-                        param_names = scan_query_parameters(content)
-                        input_tables, output_tables, _ = scan_query_tables(content)
-                        if input_tables != q.input_tables or output_tables != q.output_tables:
-                            has_table_changes = True
-                        if param_names != [p.name for p in q.parameters]:
-                            has_param_changes = True
-                        q.parameters = [QueryParameter(name=p) for p in param_names]
-                        q.input_tables = input_tables
-                        q.output_tables = output_tables
-                        q.mtime = mtime
+        for qname in active_qnames:
+            q = self._get_working_query(qname)
+            if not q or not q.file_path or not q.file_path.exists():
+                continue
+            try:
+                mtime = q.file_path.stat().st_mtime
+                if mtime != getattr(q, "mtime", None):
+                    old_tables = (list(q.input_tables), list(q.output_tables))
+                    old_params = [p.name for p in q.parameters]
+                    old_csvs = list(q.output_csv_tables)
 
-                        # Update node on canvas if present
-                        for node in self.graph.all_nodes():
-                            if isinstance(node, QueryNode) or getattr(node, "type_", "") == "reporting.nodes.QueryNode":
-                                n_qname = node.get_property("query_name") or node.name()
-                                if n_qname == q.name:
-                                    node.set_parameters(param_names)
-                except Exception as e:
-                    logger.debug(f"Error syncing query file {q.file_path}: {e}")
+                    q.ensure_parsed(force=True)
+
+                    if (list(q.input_tables), list(q.output_tables)) != old_tables:
+                        has_table_changes = True
+                    if [p.name for p in q.parameters] != old_params:
+                        has_param_changes = True
+                    if q.output_csv_tables != old_csvs:
+                        has_csv_changes = True
+                        if q.output_csv_tables:
+                            self.flow_controller.set_csv_filename(q.name, ", ".join(q.output_csv_tables))
+                        else:
+                            flow_csvs = self.flow_controller.get_csv_filenames()
+                            flow_csvs.pop(q.name, None)
+
+                    # Update node on canvas if present
+                    for node in self.graph.all_nodes():
+                        if isinstance(node, QueryNode) or getattr(node, "type_", "") == "reporting.nodes.QueryNode":
+                            n_qname = node.get_property("query_name") or node.name()
+                            if n_qname == q.name:
+                                node.set_parameters(q.parameter_names)
+            except Exception as e:
+                logger.debug(f"Error syncing query file {q.file_path}: {e}")
+
+        if has_csv_changes:
+            for node in self.graph.all_nodes():
+                if isinstance(node, TableBoxNode) or getattr(node, "type_", "") == "reporting.nodes.TableBoxNode":
+                    btype = node.get_property("box_type") or getattr(getattr(node, "view", None), "table_box_type", "")
+                    if btype == "Output CSV":
+                        qname = node.get_property("query_owner") or node.name().replace(" [CSV]", "").strip()
+                        qinfo = self._get_working_query(qname)
+                        if qinfo and qinfo.output_csv_tables:
+                            node.setup_as_csv_output(qinfo.output_csv_tables)
+                            node.set_display_mode(self.show_full_table_names)
 
         self._setup_query_file_watcher()
 
-        if has_table_changes:
+        if has_table_changes or has_csv_changes:
             self._sync_graph_topology()
         elif has_param_changes:
             self._refresh_parameter_overlay()
@@ -1267,8 +1293,17 @@ class ProcessFlowEditorWindow(QMainWindow):
 
     def _load_initial_graph(self) -> None:
         """Load saved session or automatically add flow queries if brand new."""
-        self._sync_query_files_and_parameters()
+        flow_queries = set(self.flow_controller.get_query_names())
         session_data = self.flow_controller.get_graph_session()
+        if session_data and "nodes" in session_data:
+            for ndata in session_data["nodes"].values():
+                if isinstance(ndata, dict) and ndata.get("type_") == "reporting.nodes.QueryNode":
+                    qn = ndata.get("custom", {}).get("query_name") or ndata.get("name")
+                    if qn:
+                        flow_queries.add(qn)
+        if self.report and flow_queries:
+            self.report.ensure_queries_parsed(flow_queries)
+
         view_state = self.flow_controller.get_view_state()
         viewer = self.graph.viewer()
 
@@ -1448,6 +1483,11 @@ class ProcessFlowEditorWindow(QMainWindow):
         if not qinfo:
             logger.warning(f"Query {query_name} not found in report.")
             return None
+
+        if not qinfo.is_parsed:
+            qinfo.ensure_parsed()
+            if qinfo.output_csv_tables:
+                self.flow_controller.set_csv_filename(qinfo.name, ", ".join(qinfo.output_csv_tables))
 
         # Check if already on canvas
         for node in self.graph.all_nodes():

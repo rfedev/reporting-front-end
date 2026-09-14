@@ -101,6 +101,36 @@ class TestFileScanner(unittest.TestCase):
             self.assertIn(("rep_gamma", "Secondary"), names_and_aliases)
 
 
+    def test_lazy_query_parsing_and_on_demand_selective_parsing(self):
+        """Verify queries are discovered lazily without parsing, and only parsed on demand."""
+        scanner = FileScanner([{"alias": "Primary", "path": str(self.root)}])
+        reports = scanner.scan_all_reports()
+        rep = reports[0]
+
+        q1 = rep.get_query("query_01")
+        q2 = rep.get_query("query_02")
+        self.assertIsNotNone(q1)
+        self.assertIsNotNone(q2)
+
+        # Before demand parsing: is_parsed is False
+        self.assertFalse(q1.is_parsed)
+        self.assertFalse(q2.is_parsed)
+
+        # Parse only q1 (e.g. as part of a flow containing query_01)
+        rep.ensure_queries_parsed(["query_01"])
+        self.assertTrue(q1.is_parsed)
+        self.assertFalse(q2.is_parsed)  # q2 must remain unparsed
+
+        # q1 details are populated
+        self.assertEqual(q1.parameter_names, ["repDate"])
+        self.assertEqual(q1.input_tables, ["in_table"])
+
+        # Parse q2 on demand
+        q2.ensure_parsed()
+        self.assertTrue(q2.is_parsed)
+        self.assertEqual(q2.output_tables, ["out_table"])
+
+
 if __name__ == "__main__":
     unittest.main()
 

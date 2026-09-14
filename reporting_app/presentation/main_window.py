@@ -591,7 +591,7 @@ class MainWindow(QMainWindow):
         if not query_name:
             return
 
-        qinfo = self.controller.get_query_info(query_name)
+        qinfo = self.controller.get_query_info(query_name, ensure_parsed=True)
         if not qinfo:
             return
 
@@ -679,6 +679,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Empty Flow", "There are no queries in this process flow to run.")
             return
 
+        active_report.ensure_queries_parsed(queries_order)
         unique_params = flow_ctrl.get_unique_parameters(queries_order)
         param_values = dict(flow_ctrl.parameter_defaults)
 

@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Dict, List
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QAbstractScrollArea,
     QCheckBox,
     QDialog,
     QDialogButtonBox,
@@ -16,6 +17,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -36,7 +38,7 @@ class SettingsDialog(QDialog):
     ):
         super().__init__(parent)
         self.setWindowTitle("Settings")
-        self.resize(640, 420)
+        self.setMinimumWidth(640)
 
         # Deep copy the list so changes can be cancelled
         self._working_dirs: List[Dict[str, str]] = [dict(d) for d in working_directories]
@@ -51,8 +53,9 @@ class SettingsDialog(QDialog):
         layout.setSpacing(14)
 
         # Working Directories Group
-        dirs_group = QGroupBox("Working Directories")
-        dirs_layout = QVBoxLayout(dirs_group)
+        self.dirs_group = QGroupBox("Working Directories")
+        dirs_layout = QVBoxLayout(self.dirs_group)
+        dirs_layout.setContentsMargins(8, 12, 8, 8)
 
         self.table = QTableWidget(0, 2, self)
         self.table.setHorizontalHeaderLabels(["Alias", "Directory Path"])
@@ -61,7 +64,10 @@ class SettingsDialog(QDialog):
         self.table.setColumnWidth(0, 160)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.SingleSelection)
+        self.table.verticalHeader().setDefaultSectionSize(26)
+        self.table.horizontalHeader().setFixedHeight(26)
         dirs_layout.addWidget(self.table)
+        layout.addWidget(self.dirs_group)
 
         btn_row = QHBoxLayout()
         add_btn = QPushButton("Add Directory...")
@@ -77,8 +83,7 @@ class SettingsDialog(QDialog):
         btn_row.addWidget(remove_btn)
 
         btn_row.addStretch()
-        dirs_layout.addLayout(btn_row)
-        layout.addWidget(dirs_group)
+        layout.addLayout(btn_row)
 
         # General Settings
         form_layout = QFormLayout()
@@ -111,6 +116,24 @@ class SettingsDialog(QDialog):
 
             self.table.setItem(row, 0, alias_item)
             self.table.setItem(row, 1, path_item)
+        self._update_table_height()
+
+    def _update_table_height(self) -> None:
+        """Adjust table height and section height to fit entries vertically and refresh immediately."""
+        header_h = 26
+        row_count = self.table.rowCount()
+        rows_h = row_count * 26
+        total_h = header_h + rows_h + (self.table.frameWidth() * 2) + 2
+        self.table.setFixedHeight(total_h)
+        self.table.updateGeometry()
+
+        self.dirs_group.updateGeometry()
+        self.dirs_group.setFixedHeight(self.dirs_group.sizeHint().height())
+
+        if self.layout():
+            self.layout().activate()
+        self.resize(self.width(), self.sizeHint().height())
+
 
     def _on_add_directory(self) -> None:
         chosen = QFileDialog.getExistingDirectory(
@@ -178,6 +201,7 @@ class SettingsDialog(QDialog):
             self.table.removeRow(row)
             if row < len(self._working_dirs):
                 self._working_dirs.pop(row)
+            self._update_table_height()
 
     def _on_accept(self) -> None:
         # Validate table entries

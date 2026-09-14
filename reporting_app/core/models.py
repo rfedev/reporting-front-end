@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 
 @dataclass
@@ -30,17 +30,29 @@ class QueryInfo:
     output_tables: List[str] = field(default_factory=list)
     output_csv_tables: List[str] = field(default_factory=list)
     mtime: float = 0.0
+    is_parsed: bool = False
 
     @property
     def filename(self) -> str:
         return self.file_path.name
 
+    def ensure_parsed(self, force: bool = False) -> "QueryInfo":
+        """Parse query parameters, input/output tables, and CSV comments if not yet parsed."""
+        if self.is_parsed and not force:
+            return self
+        from reporting_app.core.file_scanner import parse_single_query
+        return parse_single_query(self, force=force)
+
     @property
     def parameter_names(self) -> List[str]:
+        if not self.is_parsed:
+            self.ensure_parsed()
         return [p.name for p in self.parameters]
 
     @property
     def has_output_csv(self) -> bool:
+        if not self.is_parsed:
+            self.ensure_parsed()
         return len(self.output_csv_tables) > 0
 
 
@@ -66,13 +78,29 @@ class Report:
     directory_alias: str = ""
     working_directory: Optional[Path] = None
 
-    def get_query(self, query_name: str) -> Optional[QueryInfo]:
+    def get_query(self, query_name: str, ensure_parsed: bool = False) -> Optional[QueryInfo]:
         """Find a query by base name or filename."""
         clean_name = query_name[:-4] if query_name.endswith(".sql") else query_name
         for q in self.queries:
             if q.name == clean_name or q.filename == query_name:
+                if ensure_parsed and not q.is_parsed:
+                    q.ensure_parsed()
                 return q
         return None
+
+    def ensure_queries_parsed(self, query_names: Optional[Any] = None) -> List[QueryInfo]:
+        """Ensure specific queries (or all in report if None) are parsed."""
+        if query_names is None:
+            targets = list(self.queries)
+        else:
+            targets = []
+            for qn in query_names:
+                q = self.get_query(qn)
+                if q:
+                    targets.append(q)
+        for q in targets:
+            q.ensure_parsed()
+        return targets
 
     def get_process_flow(self, flow_name: str) -> Optional[ProcessFlowInfo]:
         """Find a process flow by name."""

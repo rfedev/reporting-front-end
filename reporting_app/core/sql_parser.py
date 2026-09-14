@@ -17,8 +17,8 @@ _COMMENT_RE = re.compile(
     re.DOTALL | re.MULTILINE
 )
 
-# Regex for {parameter_name} - anything inside curly brackets (ignoring double curly brackets if any)
-_PARAM_RE = re.compile(r"\{([^{}]+)\}")
+# Regex for {parameter_name} or :parameter_name
+_PARAM_RE = re.compile(r"\{([^{}]+)\}|(?<!:):([a-zA-Z_][a-zA-Z0-9_]*)(?!:)")
 
 # Table name token pattern (allows backticks, dots, hyphens, alphanumeric, underscores)
 # e.g., `my-project.my_dataset.my_table` or dataset.table or table
@@ -68,7 +68,8 @@ def scan_query_parameters(sql: str) -> List[str]:
     seen: Set[str] = set()
 
     for match in _PARAM_RE.finditer(cleaned_sql):
-        param = match.group(1).strip()
+        raw = match.group(1) or match.group(2) or ""
+        param = raw.strip()
         if param and param not in seen:
             seen.add(param)
             found.append(param)
@@ -221,9 +222,18 @@ def find_standalone_select_statements(sql: str) -> List[dict]:
             continue
 
         # Found standalone select statement
-        m_token = re.search(r"\b(?:WITH|SELECT)\b", raw_stmt, re.IGNORECASE)
-        code_char_offset = start_char + (m_token.start() if m_token else 0)
-        code_line_idx = sql[:code_char_offset].count("\n")
+        code_line_idx = None
+        curr_char_idx = start_char
+        for line in raw_stmt.splitlines(keepends=True):
+            clean_line = strip_comments(line)
+            clean_line = re.sub(r"#[^\n]*", "", clean_line).strip()
+            if clean_line and re.search(r"\b(?:WITH|SELECT)\b", clean_line, re.IGNORECASE):
+                code_line_idx = sql[:curr_char_idx].count("\n")
+                break
+            curr_char_idx += len(line)
+
+        if code_line_idx is None:
+            code_line_idx = sql[:start_char].count("\n")
 
         comment_line_idx = None
         csv_filename = None
@@ -252,26 +262,6 @@ def find_standalone_select_statements(sql: str) -> List[dict]:
                 continue
             # Hit actual code from preceding statement
             break
-
-        # 2. If not found, check within raw_stmt lines before the SELECT/WITH keyword
-        if csv_filename is None and m_token and m_token.start() > 0:
-            prefix = raw_stmt[:m_token.start()]
-            for line_in_prefix in reversed(prefix.splitlines()):
-                line_clean = line_in_prefix.strip()
-                if not line_clean:
-                    continue
-                fname = extract_csv_filename_from_comment(line_clean)
-                if fname:
-                    csv_filename = fname
-                    for l_idx, l_content in enumerate(lines):
-                        if l_content.strip() == line_clean:
-                            comment_line_idx = l_idx
-                            break
-                    break
-                # If we encounter a commented-out SQL query or non-comment text, stop looking further up
-                clean_comment_text = line_clean.lstrip("-/*#* ").strip()
-                if clean_comment_text.lower().startswith(("create", "insert", "select", "update", "delete", "with", "merge")):
-                    break
 
         results.append({
             "statement_index": idx,

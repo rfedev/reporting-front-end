@@ -41,6 +41,7 @@ class AppController(QObject):
         self._update_watcher_directories(working_dirs)
         self.watcher.set_enabled(self.repo.get_auto_scan())
         self.watcher.directory_changed.connect(self.scan)
+        self.watcher.file_changed.connect(self._on_file_changed)
 
         # Runtime state
         self.reports_by_key: Dict[str, Report] = {}  # key: f"{r.name} [{r.directory_alias}]"
@@ -131,10 +132,11 @@ class AppController(QObject):
 
         self.reports_by_name = {r.name: r for r in reports}
 
-        # Update SQLite table catalog for all queries
+        # Update SQLite table catalog for parsed queries
         for r in reports:
             for q in r.queries:
-                self.repo.record_query_tables(r.name, q.name, q.input_tables, q.output_tables)
+                if q.is_parsed:
+                    self.repo.record_query_tables(r.name, q.name, q.input_tables, q.output_tables)
 
         display_keys = list(self.reports_by_key.keys())
         self.reports_updated.emit(display_keys)
@@ -220,11 +222,40 @@ class AppController(QObject):
         if self.active_report and query_name:
             self.repo.set_selected_query(query_name, self.active_report.name)
 
-    def get_query_info(self, query_name: str) -> Optional[QueryInfo]:
+    def get_query_info(self, query_name: str, ensure_parsed: bool = False) -> Optional[QueryInfo]:
         """Fetch QueryInfo for the currently active report."""
         if not self.active_report:
             return None
-        return self.active_report.get_query(query_name)
+        return self.active_report.get_query(query_name, ensure_parsed=ensure_parsed)
+
+    def _on_file_changed(self, file_path: Path) -> None:
+        """Handle selective file modification detected by FileWatcherService."""
+        resolved = file_path.resolve()
+        suffix = resolved.suffix.lower()
+
+        if suffix == ".sql":
+            for report in self.reports_by_name.values():
+                for q in report.queries:
+                    if q.file_path and q.file_path.resolve() == resolved:
+                        if q.is_parsed:
+                            q.ensure_parsed(force=True)
+                            self.repo.record_query_tables(report.name, q.name, q.input_tables, q.output_tables)
+                            if self.active_report and self.active_report.name == report.name:
+                                self.report_updated.emit(self.active_report)
+                        return
+
+        elif suffix == ".json":
+            for report in self.reports_by_name.values():
+                try:
+                    if resolved.is_relative_to(report.folder_path.resolve()):
+                        flows = self.scanner._scan_process_flows(report.folder_path, report.name)
+                        report.process_flows = flows
+                        if self.active_report and self.active_report.name == report.name:
+                            self.process_flows_updated.emit([pf.name for pf in flows])
+                            self.report_updated.emit(self.active_report)
+                        return
+                except Exception:
+                    pass
 
     def open_query_in_editor(self, query_name: str) -> bool:
         """Open query .sql file using the default OS application."""

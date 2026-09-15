@@ -19,10 +19,13 @@
 test/
 tests/
 
-# working directory
-wd/
-
 agent.md
 instructions.md
 misc-notes.txt
 *.kate-swp
+
+
+# working directory
+wd/
+
+

@@ -188,6 +188,8 @@ class MainWindow(QMainWindow):
         main_layout.setSpacing(16)
         main_layout.setContentsMargins(20, 20, 20, 20)
 
+        BTN_SIZE = 32
+
         # ---------------------------------------------------------------------
         # 1. Reports Section (Requirement 3: inline dropdown and icon buttons)
         # ---------------------------------------------------------------------
@@ -198,19 +200,31 @@ class MainWindow(QMainWindow):
         self.reports_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         self.reports_combo.currentTextChanged.connect(self._on_report_selected)
 
+        self.rename_report_btn = QPushButton("✏")
+        self.rename_report_btn.setToolTip("Rename Report")
+        self.rename_report_btn.setFixedSize(BTN_SIZE, BTN_SIZE)
+        self.rename_report_btn.clicked.connect(self._on_rename_report)
+
         self.add_report_btn = QPushButton("➕")
         self.add_report_btn.setToolTip("Add Report")
-        self.add_report_btn.setFixedWidth(36)
+        self.add_report_btn.setFixedSize(BTN_SIZE, BTN_SIZE)
         self.add_report_btn.clicked.connect(self._on_add_report)
+
+        self.open_folder_btn = QPushButton("📁")
+        self.open_folder_btn.setToolTip("Open Report Folder in File Browser")
+        self.open_folder_btn.setFixedSize(BTN_SIZE, BTN_SIZE)
+        self.open_folder_btn.clicked.connect(self._on_open_report_folder)
 
         self.remove_report_btn = QPushButton("🗑")
         self.remove_report_btn.setToolTip("Remove Report")
-        self.remove_report_btn.setFixedWidth(36)
+        self.remove_report_btn.setFixedSize(BTN_SIZE, BTN_SIZE)
         self.remove_report_btn.clicked.connect(self._on_remove_report)
 
         report_layout.addWidget(report_label)
         report_layout.addWidget(self.reports_combo, 1)
+        report_layout.addWidget(self.rename_report_btn)
         report_layout.addWidget(self.add_report_btn)
+        report_layout.addWidget(self.open_folder_btn)
         report_layout.addWidget(self.remove_report_btn)
         main_layout.addLayout(report_layout)
 
@@ -227,29 +241,35 @@ class MainWindow(QMainWindow):
         self.flows_combo = QComboBox(self)
         self.flows_combo.currentTextChanged.connect(self._on_flow_selected)
 
+        self.rename_flow_btn = QPushButton("🏷")
+        self.rename_flow_btn.setToolTip("Rename Process Flow")
+        self.rename_flow_btn.setFixedSize(BTN_SIZE, BTN_SIZE)
+        self.rename_flow_btn.clicked.connect(self._on_rename_process_flow)
+
         self.edit_flow_btn = QPushButton("✏")
         self.edit_flow_btn.setToolTip("Edit Process Flow")
-        self.edit_flow_btn.setFixedWidth(36)
+        self.edit_flow_btn.setFixedSize(BTN_SIZE, BTN_SIZE)
         self.edit_flow_btn.clicked.connect(self._on_edit_process_flow)
 
         self.add_flow_btn = QPushButton("➕")
         self.add_flow_btn.setToolTip("Add Process Flow")
-        self.add_flow_btn.setFixedWidth(36)
+        self.add_flow_btn.setFixedSize(BTN_SIZE, BTN_SIZE)
         self.add_flow_btn.clicked.connect(self._on_new_process_flow)
 
         self.remove_flow_btn = QPushButton("🗑")
         self.remove_flow_btn.setToolTip("Remove Process Flow")
-        self.remove_flow_btn.setFixedWidth(36)
+        self.remove_flow_btn.setFixedSize(BTN_SIZE, BTN_SIZE)
         self.remove_flow_btn.clicked.connect(self._on_remove_process_flow)
 
         self.run_flow_btn = QPushButton("▶")
         self.run_flow_btn.setToolTip("Run Process Flow")
-        self.run_flow_btn.setFixedWidth(36)
+        self.run_flow_btn.setFixedSize(BTN_SIZE, BTN_SIZE)
         self.run_flow_btn.setStyleSheet("font-weight: bold; color: #2a82da;")
         self.run_flow_btn.clicked.connect(self._on_run_process_flow)
 
         flow_row1.addWidget(flow_label)
         flow_row1.addWidget(self.flows_combo, 1)
+        flow_row1.addWidget(self.rename_flow_btn)
         flow_row1.addWidget(self.edit_flow_btn)
         flow_row1.addWidget(self.add_flow_btn)
         flow_row1.addWidget(self.remove_flow_btn)
@@ -273,22 +293,22 @@ class MainWindow(QMainWindow):
 
         self.edit_query_btn = QPushButton("✏")
         self.edit_query_btn.setToolTip("Edit Query (Open in Editor)")
-        self.edit_query_btn.setFixedWidth(36)
+        self.edit_query_btn.setFixedSize(BTN_SIZE, BTN_SIZE)
         self.edit_query_btn.clicked.connect(self._on_edit_query)
 
         self.add_query_btn = QPushButton("➕")
         self.add_query_btn.setToolTip("Add Query")
-        self.add_query_btn.setFixedWidth(36)
+        self.add_query_btn.setFixedSize(BTN_SIZE, BTN_SIZE)
         self.add_query_btn.clicked.connect(self._on_add_query)
 
         self.remove_query_btn = QPushButton("🗑")
         self.remove_query_btn.setToolTip("Remove Query")
-        self.remove_query_btn.setFixedWidth(36)
+        self.remove_query_btn.setFixedSize(BTN_SIZE, BTN_SIZE)
         self.remove_query_btn.clicked.connect(self._on_remove_query)
 
         self.run_query_btn = QPushButton("▶")
         self.run_query_btn.setToolTip("Run Query")
-        self.run_query_btn.setFixedWidth(36)
+        self.run_query_btn.setFixedSize(BTN_SIZE, BTN_SIZE)
         self.run_query_btn.setStyleSheet("font-weight: bold; color: #2a82da;")
         self.run_query_btn.clicked.connect(self._on_run_query)
 
@@ -305,7 +325,7 @@ class MainWindow(QMainWindow):
         main_layout.addStretch()
 
         # ---------------------------------------------------------------------
-        # 4. Bottom Controls: Settings Cog & Manual Sync
+        # 4. Bottom Controls: Settings Cog, Manual Sync & Auth
         # ---------------------------------------------------------------------
         bottom_layout = QHBoxLayout()
 
@@ -318,6 +338,11 @@ class MainWindow(QMainWindow):
         self.sync_btn.setToolTip("Manually scan for reports, process flows, and queries")
         self.sync_btn.clicked.connect(self.controller.scan)
         bottom_layout.addWidget(self.sync_btn)
+
+        self.auth_btn = QPushButton("Auth")
+        self.auth_btn.setToolTip("Run 'gcloud auth application-default login' in a terminal")
+        self.auth_btn.clicked.connect(self._on_auth_login)
+        bottom_layout.addWidget(self.auth_btn)
 
         bottom_layout.addStretch()
         main_layout.addLayout(bottom_layout)
@@ -371,12 +396,16 @@ class MainWindow(QMainWindow):
         has_reports = len(report_names) > 0
         self.flows_group.setEnabled(has_reports)
         self.queries_group.setEnabled(has_reports)
+        self.rename_report_btn.setEnabled(has_reports)
+        self.open_folder_btn.setEnabled(has_reports)
         self.remove_report_btn.setEnabled(has_reports)
 
     def _on_report_model_changed(self, report: Optional[Report]) -> None:
         has_report = report is not None
         self.flows_group.setEnabled(has_report)
         self.queries_group.setEnabled(has_report)
+        self.rename_report_btn.setEnabled(has_report)
+        self.open_folder_btn.setEnabled(has_report)
         self.remove_report_btn.setEnabled(has_report)
 
     def _update_flows_dropdown(self, flow_names: List[str]) -> None:
@@ -394,6 +423,7 @@ class MainWindow(QMainWindow):
         self.flows_combo.blockSignals(False)
 
         has_flows = len(flow_names) > 0
+        self.rename_flow_btn.setEnabled(has_flows)
         self.edit_flow_btn.setEnabled(has_flows)
         self.remove_flow_btn.setEnabled(has_flows)
         self.run_flow_btn.setEnabled(has_flows)
@@ -447,6 +477,50 @@ class MainWindow(QMainWindow):
                 if rep:
                     self.status_bar.showMessage(f"Report '{rep.name}' created in [{selected_alias}].", 3000)
 
+    def _on_rename_report(self) -> None:
+        rep = self.controller.active_report
+        if not rep:
+            QMessageBox.information(self, "No Report", "Please select a report first.")
+            return
+        new_name, ok = QInputDialog.getText(
+            self,
+            "Rename Report",
+            "Enter new report name:",
+            text=rep.name,
+        )
+        if ok and new_name.strip() and new_name.strip() != rep.name:
+            current_key = self.reports_combo.currentText()
+            success = self.controller.rename_report(current_key, new_name.strip())
+            if success:
+                self.status_bar.showMessage(f"Report renamed to '{new_name.strip()}'.", 3000)
+            else:
+                QMessageBox.warning(self, "Rename Failed", f"Could not rename report to '{new_name.strip()}'.")
+
+    def _on_open_report_folder(self) -> None:
+        """Open the active report folder in the native file browser."""
+        rep = self.controller.active_report
+        if not rep or not rep.folder_path.exists():
+            QMessageBox.information(self, "No Report", "Please select a report first.")
+            return
+
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        folder_url = QUrl.fromLocalFile(str(rep.folder_path.resolve()))
+        opened = QDesktopServices.openUrl(folder_url)
+        if not opened:
+            import os, platform, subprocess
+            sys_name = platform.system()
+            path_str = str(rep.folder_path.resolve())
+            try:
+                if sys_name == "Windows":
+                    os.startfile(path_str)
+                elif sys_name == "Darwin":
+                    subprocess.Popen(["open", path_str])
+                else:
+                    subprocess.Popen(["xdg-open", path_str])
+            except Exception as e:
+                logger.error(f"Failed to open report folder: {e}")
+
     def _on_remove_report(self) -> None:
         current = self.reports_combo.currentText()
         if not current:
@@ -461,6 +535,40 @@ class MainWindow(QMainWindow):
         if confirm == QMessageBox.Yes:
             self.controller.remove_report(current)
             self.status_bar.showMessage(f"Report '{current}' removed.", 3000)
+
+    def _on_rename_process_flow(self) -> None:
+        report = self.controller.active_report
+        if not report:
+            QMessageBox.information(self, "No Report Selected", "Please select a report first.")
+            return
+        current_flow = self.flows_combo.currentText().strip()
+        if not current_flow:
+            QMessageBox.information(self, "No Flow Selected", "Please select a process flow first.")
+            return
+        new_name, ok = QInputDialog.getText(
+            self,
+            "Rename Process Flow",
+            "Enter new process flow name:",
+            text=current_flow,
+        )
+        if ok and new_name.strip() and new_name.strip() != current_flow:
+            success = self.controller.rename_process_flow(current_flow, new_name.strip())
+            if success:
+                self.status_bar.showMessage(f"Process flow renamed to '{new_name.strip()}'.", 3000)
+            else:
+                QMessageBox.warning(self, "Rename Failed", f"Could not rename process flow to '{new_name.strip()}'.")
+
+    def _on_auth_login(self) -> None:
+        """Run 'gcloud auth application-default login' in a terminal."""
+        from reporting_app.utils.terminal import launch_in_terminal
+        self.status_bar.showMessage("Opening terminal for gcloud authentication...", 3000)
+        success = launch_in_terminal("gcloud auth application-default login", title="Google Cloud Authentication")
+        if not success:
+            QMessageBox.warning(
+                self,
+                "Authentication Error",
+                "Could not launch terminal automatically.\nPlease run 'gcloud auth application-default login' manually in a terminal.",
+            )
 
     def _on_remove_process_flow(self) -> None:
         current = self.flows_combo.currentText()

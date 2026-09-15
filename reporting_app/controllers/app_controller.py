@@ -332,6 +332,37 @@ class AppController(QObject):
             logger.error(f"Failed to remove report folder {rep.folder_path}: {e}")
             return False
 
+    def rename_report(self, report_key: str, new_name: str) -> bool:
+        """Rename a report folder on disk and update selections."""
+        clean_new_name = new_name.strip()
+        if not clean_new_name:
+            return False
+
+        rep = self.reports_by_key.get(report_key) or self.reports_by_name.get(report_key)
+        if not rep or not rep.folder_path.exists():
+            return False
+
+        if rep.name == clean_new_name:
+            return True
+
+        target_folder = rep.folder_path.parent / clean_new_name
+        if target_folder.exists():
+            logger.error(f"Target folder {target_folder} already exists.")
+            return False
+
+        try:
+            rep.folder_path.rename(target_folder)
+            self.repo.set_selected_report(clean_new_name)
+            self.scan()
+            for k, r in self.reports_by_key.items():
+                if r.folder_path == target_folder or r.name == clean_new_name:
+                    self.select_report(k)
+                    break
+            return True
+        except Exception as e:
+            logger.error(f"Failed to rename report: {e}")
+            return False
+
     def add_process_flow(self, flow_name: str, source_flow_name: Optional[str] = None) -> Optional[ProcessFlowInfo]:
         """Create a new process flow in the active report, optionally cloning from an existing flow."""
         if not self.active_report:
@@ -389,6 +420,50 @@ class AppController(QObject):
             return True
         except Exception as e:
             logger.error(f"Failed to remove process flow {flow_name}: {e}")
+            return False
+
+    def rename_process_flow(self, old_flow_name: str, new_flow_name: str) -> bool:
+        """Rename a process flow JSON file on disk and update internal flow_name."""
+        if not self.active_report:
+            return False
+
+        clean_old = old_flow_name.strip()
+        if clean_old.endswith(".json"):
+            clean_old = clean_old[:-5]
+
+        clean_new = new_flow_name.strip()
+        if clean_new.endswith(".json"):
+            clean_new = clean_new[:-5]
+
+        if not clean_new:
+            return False
+        if clean_old == clean_new:
+            return True
+
+        flow_info = self.active_report.get_process_flow(clean_old)
+        if not flow_info or not flow_info.file_path.exists():
+            return False
+
+        target_file = flow_info.file_path.parent / f"{clean_new}.json"
+        if target_file.exists():
+            logger.error(f"Target process flow file {target_file} already exists.")
+            return False
+
+        import json
+        try:
+            try:
+                data = json.loads(flow_info.file_path.read_text(encoding="utf-8"))
+                data["flow_name"] = clean_new
+                flow_info.file_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+
+            flow_info.file_path.rename(target_file)
+            self.scan()
+            self.select_process_flow(clean_new)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to rename process flow: {e}")
             return False
 
     def add_query(self, query_name: str, template_sql: str = "") -> Optional[QueryInfo]:

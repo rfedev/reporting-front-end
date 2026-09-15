@@ -1,5 +1,5 @@
 
-**/__pycache__/
+
 
 # Don't sync input/ouput folders.
 **/input/
@@ -11,9 +11,15 @@
 **/outputs/
 **/Outputs/
 
+# build files
+/build
+/dist
+**/__pycache__/
+.reporting_app.db
 test/
 tests/
 
+# working directory
 wd/
 
 agent.md

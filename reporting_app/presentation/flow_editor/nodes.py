@@ -1,5 +1,5 @@
 """Custom NodeGraphQt nodes for queries and table lists."""
-
+from pathlib import Path
 from typing import List, Optional, Tuple
 from PySide6 import QtCore, QtGui, QtWidgets
 from NodeGraphQt import BaseNode
@@ -445,8 +445,8 @@ class TableBoxNode(BaseNode):
             or getattr(getattr(self, "view", None), "table_box_type", "") == "Output CSV"
         )
         for t in self.raw_tables:
-            if is_csv or t.lower().endswith(".csv"):
-                name = t
+            if is_csv or t.lower().endswith(".csv") or t.lower().endswith(".xlsx"):
+                name = t if self.show_full_path else Path(t).name
             else:
                 name = t if self.show_full_path else t.split(".")[-1]
             lines.append(f"• {name}")

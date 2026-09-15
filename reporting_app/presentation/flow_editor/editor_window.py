@@ -1242,15 +1242,15 @@ class ProcessFlowEditorWindow(QMainWindow):
         self.right_panel.setVisible(not is_visible)
         self.toggle_right_btn.setText("◀" if is_visible else "▶")
 
-    def _toggle_table_names_display(self) -> None:
-        """Toggle full table address vs short table name across all TableBoxNodes."""
-        self.show_full_table_names = self.toggle_table_names_btn.isChecked()
-        self.toggle_table_names_btn.setText(
-            "🏷 Full Table Address" if self.show_full_table_names else "🏷 Short Table Name"
-        )
-        for node in self.graph.all_nodes():
-            if isinstance(node, TableBoxNode) or node.type_ == "reporting.nodes.TableBoxNode":
-                node.set_display_mode(self.show_full_table_names)
+    # def _toggle_table_names_display(self) -> None:
+    #     """Toggle full table address vs short table name across all TableBoxNodes."""
+    #     self.show_full_table_names = self.toggle_table_names_btn.isChecked()
+    #     self.toggle_table_names_btn.setText(
+    #         "🏷 Full Table Address" if self.show_full_table_names else "🏷 Short Table Name"
+    #     )
+    #     for node in self.graph.all_nodes():
+    #         if isinstance(node, TableBoxNode) or node.type_ == "reporting.nodes.TableBoxNode":
+    #             node.set_display_mode(self.show_full_table_names)
 
     def _toggle_table_names_display(self) -> None:
         """Toggle full table address vs short table name across all TableBoxNodes."""

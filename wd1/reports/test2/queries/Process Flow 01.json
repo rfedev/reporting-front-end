@@ -1,9 +1,0 @@
-{
-  "flow_name": "Process Flow 01",
-  "report_name": "test2",
-  "query_names": [],
-  "parameter_defaults": {},
-  "show_full_table_names": false,
-  "csv_filenames": {},
-  "graph_session": {}
-}

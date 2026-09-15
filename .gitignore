@@ -1,12 +1,22 @@
 
-# Don't sync ouput folders.
+**/__pycache__/
+
+# Don't sync input/ouput folders.
+**/input/
+**/Input/
+**/inputs/
+**/Inputs/
 **/output/
-**/outputs/
 **/Output/
+**/outputs/
 **/Outputs/
 
-/tests/
+test/
+tests/
 
-#/instructions.md
-/misc-notes.txt
+wd/
+
+agent.md
+instructions.md
+misc-notes.txt
 *.kate-swp

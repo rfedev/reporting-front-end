@@ -154,6 +154,74 @@ select * from `link-to-cloud.test_dataset.test-import`;
         csv_tables = scan_select_output_tables(sql)
         self.assertEqual(csv_tables, ["sel1.csv", "sel2.csv", "sel3.csv"])
 
+    def test_sqlglot_standalone_select_detection(self):
+        """sqlglot identifies standalone SELECT and WITH...SELECT while ignoring CREATE/INSERT."""
+        from reporting_app.core.sql_parser import find_standalone_select_statements
+
+        sql = """
+        -- Statement 1: CREATE TABLE
+        CREATE OR REPLACE TABLE `prj.ds.t1` AS
+        SELECT * FROM `prj.ds.raw`;
+
+        -- Statement 2: INSERT INTO
+        INSERT INTO `prj.ds.t2`
+        SELECT * FROM `prj.ds.raw2`;
+
+        -- Statement 3: WITH ... SELECT (should be standalone SELECT)
+        -- Query description here
+        WITH my_cte AS (
+            SELECT id FROM `prj.ds.users`
+        )
+        SELECT * FROM my_cte;
+
+        -- Statement 4: Normal SELECT
+        SELECT count(*) FROM `prj.ds.orders`;
+        """
+        stmts = find_standalone_select_statements(sql)
+        self.assertEqual(len(stmts), 2)
+        # Verify first line indices point to the start of the statements
+        lines = sql.splitlines(keepends=True)
+        self.assertIn("-- Statement 3", lines[stmts[0]["first_line_idx"]])
+        self.assertIn("-- Statement 4", lines[stmts[1]["first_line_idx"]])
+
+    def test_sync_query_csv_comments_places_at_first_line(self):
+        """sync_query_csv_comments places '# output: table_01.csv' at the very top of the statement."""
+        import tempfile
+        from pathlib import Path
+        from reporting_app.core.sql_parser import sync_query_csv_comments
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".sql", delete=False) as f:
+            f.write("-- Header comment\n-- More details\nSELECT 1;\n")
+            temp_path = Path(f.name)
+
+        try:
+            csvs = sync_query_csv_comments(temp_path)
+            self.assertEqual(csvs, ["table_01.csv"])
+            content = temp_path.read_text(encoding="utf-8")
+            self.assertTrue(content.startswith("# output: table_01.csv\n-- Header comment"))
+        finally:
+            if temp_path.exists():
+                temp_path.unlink()
+
+    def test_comment_anywhere_in_statement_detected(self):
+        """A comment containing .csv anywhere in the statement is recognized."""
+        from reporting_app.core.sql_parser import find_standalone_select_statements
+
+        sql = """
+        SELECT col1, col2
+        /* output: block_output.csv */
+        FROM `prj.ds.tbl`;
+
+        SELECT colA
+        FROM `prj.ds.tbl2`
+        WHERE x = 1; -- inline_output.csv
+        """
+        stmts = find_standalone_select_statements(sql)
+        self.assertEqual(len(stmts), 2)
+        self.assertEqual(stmts[0]["csv_filename"], "block_output.csv")
+        self.assertEqual(stmts[1]["csv_filename"], "inline_output.csv")
+
 
 if __name__ == "__main__":
     unittest.main()
+

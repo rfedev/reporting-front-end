@@ -1,52 +1,31 @@
-"""SQL parsing utilities for BigQuery SQL files.
-
-Extracts:
-1. Query Parameters wrapped in curly brackets: {parameter-name}
-2. Input tables from FROM and JOIN statements
-3. Output tables from CREATE TABLE and INSERT INTO statements
-"""
+"""SQL parsing utilities for BigQuery SQL files using sqlglot."""
 
 from pathlib import Path
 import re
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
+import sqlglot
+from sqlglot import exp
 
-# Regex for removing single line and multi-line comments
-_COMMENT_RE = re.compile(
-    r"(--[^\n]*)|(/\*.*?\*/)",
-    re.DOTALL | re.MULTILINE
-)
 
-# Regex for {parameter_name} or :parameter_name
+# Regex for parameter extraction {parameter_name} or :parameter_name
 _PARAM_RE = re.compile(r"\{([^{}]+)\}|(?<!:):([a-zA-Z_][a-zA-Z0-9_]*)(?!:)")
 
-# Table name token pattern (allows backticks, dots, hyphens, alphanumeric, underscores)
-# e.g., `my-project.my_dataset.my_table` or dataset.table or table
-_TABLE_TOKEN = r"(?:`[a-zA-Z0-9_\-\.]+`|[a-zA-Z0-9_\-\.]+)"
-
-# Regex for FROM and JOIN clauses
-_INPUT_TABLE_RE = re.compile(
-    rf"\b(?:FROM|JOIN)\s+({_TABLE_TOKEN})",
-    re.IGNORECASE
+# Comment regexes for CSV output annotations
+_CSV_COMMENT_RE = re.compile(
+    r"^\s*(?:#|--|/\*)\s*out?put\s*:\s*([^\s;\*]+)",
+    re.IGNORECASE,
 )
-
-# Regex for CREATE TABLE and INSERT INTO statements
-_OUTPUT_TABLE_RE = re.compile(
-    rf"\b(?:CREATE\s+(?:OR\s+REPLACE\s+)?(?:TEMP\s+|TEMPORARY\s+)?TABLE(?:\s+IF\s+NOT\s+EXISTS)?|INSERT(?:\s+INTO)?|MERGE(?:\s+INTO)?)\s+({_TABLE_TOKEN})",
-    re.IGNORECASE
-)
-
-# Regex for Common Table Expressions (WITH cte AS (...) or , cte AS (...))
-_CTE_RE = re.compile(
-    r"(?:\bWITH|,)\s*([a-zA-Z0-9_\-\.]+)\s+AS\s*\(",
-    re.IGNORECASE
+_CSV_IN_COMMENT_RE = re.compile(
+    r"^\s*(?:#|--|/\*|\*)\s*(?:out?put\s*:\s*)?([^\s;\*'\"]+\.csv)",
+    re.IGNORECASE,
 )
 
 
 def strip_comments(sql: str) -> str:
     """Remove SQL comments (-- ..., /* ... */, and # ...) to avoid false positives."""
-    clean = _COMMENT_RE.sub("", sql)
-    clean = re.sub(r"#[^\n]*", "", clean)
+    clean = re.sub(r"--[^\n]*|#[^\n]*", "", sql)
+    clean = re.sub(r"/\*.*?\*/", "", clean, flags=re.DOTALL)
     return clean
 
 
@@ -59,50 +38,50 @@ def clean_table_name(table_ref: str) -> str:
 
 
 def scan_query_parameters(sql: str) -> List[str]:
-    """Scan SQL text for parameters in curly brackets like {startDate} or {repDate}.
+    """Scan SQL text for parameters in curly brackets like {startDate} or :param.
 
     Returns a list of unique parameter names preserving appearance order.
     """
-    cleaned_sql = strip_comments(sql)
+    cleaned = strip_comments(sql)
     found: List[str] = []
     seen: Set[str] = set()
-
-    for match in _PARAM_RE.finditer(cleaned_sql):
-        raw = match.group(1) or match.group(2) or ""
-        param = raw.strip()
+    for match in _PARAM_RE.finditer(cleaned):
+        param = (match.group(1) or match.group(2) or "").strip()
         if param and param not in seen:
             seen.add(param)
             found.append(param)
-
     return found
 
 
-_CSV_COMMENT_RE = re.compile(
-    r"^\s*(?:#|--)\s*out?put\s*:\s*([^\s;]+)",
-    re.IGNORECASE
-)
-
-
 def extract_csv_filename_from_comment(line: str) -> Optional[str]:
-    """Extract filename from # ouput: filename.csv or # output: filename.csv line.
+    """Extract CSV filename from a SQL comment line.
 
-    Handles with/without spaces, case-insensitive, with/without quotes.
-    Automatically appends .csv if omitted.
+    Supports #, --, and /* ... */ comments.
+    Matches explicit 'output: filename.csv' (or 'ouput:') as well as comments
+    naming a .csv file directly.
     """
-    m = _CSV_COMMENT_RE.match(line)
-    if not m:
+    clean_line = line.strip()
+    if not clean_line.startswith(("#", "--", "/*", "*")):
         return None
-    fname = m.group(1).strip().strip("'\"")
-    if not fname.lower().endswith(".csv"):
-        fname = f"{fname}.csv"
-    return fname
+
+    m = _CSV_COMMENT_RE.match(clean_line)
+    if m:
+        fname = m.group(1).strip().strip("'\"*").rstrip("*/").strip()
+        if not fname.lower().endswith(".csv"):
+            fname = f"{fname}.csv"
+        return fname
+
+    m2 = _CSV_IN_COMMENT_RE.match(clean_line)
+    if m2:
+        return m2.group(1).strip().strip("'\"*").rstrip("*/").strip()
+
+    return None
 
 
 def get_next_available_table_csv(existing_names: Iterable[str]) -> str:
     r"""Determine the next available table_NN.csv filename.
 
     Finds existing numbers from names matching table_(\d+) and increments from the maximum.
-    If table_05.csv exists, returns table_06.csv. Defaults to table_01.csv.
     """
     used_numbers: Set[int] = set()
     used_names_lower: Set[str] = set()
@@ -127,149 +106,98 @@ def get_next_available_table_csv(existing_names: Iterable[str]) -> str:
 
 
 def split_sql_statements(sql: str) -> List[Tuple[int, int, str]]:
-    """Split SQL into individual statements with start/end character offsets."""
+    """Split SQL into individual statements with start/end character offsets using sqlglot."""
+    try:
+        tokens = sqlglot.tokenize(sql, dialect="bigquery")
+    except Exception:
+        tokens = []
+
+    if not tokens:
+        trimmed = sql.strip()
+        return [(0, len(sql), sql)] if trimmed else []
+
     statements: List[Tuple[int, int, str]] = []
     start = 0
-    i = 0
-    n = len(sql)
+    for tok in tokens:
+        if tok.token_type == sqlglot.TokenType.SEMICOLON:
+            chunk = sql[start:tok.end].strip()
+            if chunk:
+                statements.append((start, tok.end, sql[start:tok.end]))
+            start = tok.end
 
-    in_single_quote = False
-    in_double_quote = False
-    in_triple_single = False
-    in_triple_double = False
-    in_line_comment = False
-    in_block_comment = False
-
-    while i < n:
-        if not in_line_comment and not in_block_comment:
-            if not in_single_quote and not in_double_quote:
-                if sql[i:i+3] == "'''":
-                    in_triple_single = not in_triple_single
-                    i += 3
-                    continue
-                elif sql[i:i+3] == '"""':
-                    in_triple_double = not in_triple_double
-                    i += 3
-                    continue
-
-            if not in_triple_single and not in_triple_double:
-                if sql[i] == "'" and not in_double_quote:
-                    if in_single_quote and i + 1 < n and sql[i+1] == "'":
-                        i += 2
-                        continue
-                    in_single_quote = not in_single_quote
-                    i += 1
-                    continue
-                elif sql[i] == '"' and not in_single_quote:
-                    if in_double_quote and i + 1 < n and sql[i+1] == '"':
-                        i += 2
-                        continue
-                    in_double_quote = not in_double_quote
-                    i += 1
-                    continue
-
-        if not in_single_quote and not in_double_quote and not in_triple_single and not in_triple_double:
-            if not in_line_comment and not in_block_comment:
-                if sql[i:i+2] == "--" or sql[i] == "#":
-                    in_line_comment = True
-                    i += 1
-                    continue
-                elif sql[i:i+2] == "/*":
-                    in_block_comment = True
-                    i += 2
-                    continue
-                elif sql[i] == ";":
-                    stmt = sql[start:i].strip()
-                    if stmt:
-                        statements.append((start, i, sql[start:i]))
-                    start = i + 1
-                    i += 1
-                    continue
-            elif in_line_comment:
-                if sql[i] == "\n":
-                    in_line_comment = False
-            elif in_block_comment:
-                if sql[i:i+2] == "*/":
-                    in_block_comment = False
-                    i += 2
-                    continue
-        i += 1
-
-    remaining = sql[start:].strip()
-    if remaining:
-        statements.append((start, n, sql[start:]))
+    if start < len(sql):
+        chunk = sql[start:].strip()
+        if chunk:
+            statements.append((start, len(sql), sql[start:]))
 
     return statements
 
 
 def find_standalone_select_statements(sql: str) -> List[dict]:
-    """Find all standalone SELECT statements in a SQL script."""
-    statements = split_sql_statements(sql)
-    lines = sql.splitlines(keepends=True)
-    results = []
+    """Find all standalone SELECT statements in a SQL script using sqlglot.
 
-    for idx, (start_char, end_char, raw_stmt) in enumerate(statements):
-        clean = strip_comments(raw_stmt)
-        clean = re.sub(r"#[^\n]*", "", clean).strip()
+    For each statement:
+    - Parses with sqlglot and checks if type(statement).__name__.upper() == "SELECT".
+    - Finds the first line of the SQL statement (first non-blank line).
+    - Checks the lines within the statement for any existing comment containing .csv or output:.
+    """
+    raw_statements = split_sql_statements(sql)
+    results: List[dict] = []
+    select_idx = 0
+
+    for start_char, end_char, raw_stmt in raw_statements:
+        clean = strip_comments(raw_stmt).strip()
         if not clean:
             continue
 
-        if _OUTPUT_TABLE_RE.search(clean):
-            continue
-        if re.search(r"\b(?:UPDATE|DELETE\s+FROM)\b", clean, re.IGNORECASE):
-            continue
-        if not re.search(r"\bSELECT\b", clean, re.IGNORECASE):
+        try:
+            parsed = [s for s in sqlglot.parse(raw_stmt, dialect="bigquery") if s is not None]
+        except Exception:
+            parsed = []
+
+        is_select = False
+        if parsed:
+            is_select = type(parsed[0]).__name__.upper() == "SELECT"
+        else:
+            is_select = bool(re.search(r"\bSELECT\b", clean, re.IGNORECASE)) and not bool(
+                re.search(r"\b(?:CREATE|INSERT|UPDATE|DELETE|MERGE)\b", clean, re.IGNORECASE)
+            )
+
+        if not is_select:
             continue
 
-        # Found standalone select statement
-        code_line_idx = None
-        curr_char_idx = start_char
-        for line in raw_stmt.splitlines(keepends=True):
-            clean_line = strip_comments(line)
-            clean_line = re.sub(r"#[^\n]*", "", clean_line).strip()
-            if clean_line and re.search(r"\b(?:WITH|SELECT)\b", clean_line, re.IGNORECASE):
-                code_line_idx = sql[:curr_char_idx].count("\n")
-                break
-            curr_char_idx += len(line)
+        stmt_lines = raw_stmt.splitlines(keepends=True)
+        first_rel_idx = 0
+        while first_rel_idx < len(stmt_lines) and not stmt_lines[first_rel_idx].strip():
+            first_rel_idx += 1
+        if first_rel_idx >= len(stmt_lines):
+            first_rel_idx = 0
 
-        if code_line_idx is None:
-            code_line_idx = sql[:start_char].count("\n")
+        lead_chars = sum(len(stmt_lines[k]) for k in range(first_rel_idx))
+        first_line_idx = sql[:start_char + lead_chars].count("\n")
 
         comment_line_idx = None
         csv_filename = None
-
-        # 1. Check lines immediately preceding code_line_idx:
-        # Stop if we hit non-empty line that isn't a comment, or reach the previous statement's end.
-        prev_stmt_line_idx = sql[:start_char].count("\n")
-        cur = code_line_idx - 1
-        while cur >= prev_stmt_line_idx:
-            line_str = lines[cur].strip()
-            if not line_str:
-                cur -= 1
-                continue
-            fname = extract_csv_filename_from_comment(line_str)
-            if fname:
-                comment_line_idx = cur
-                csv_filename = fname
-                break
-            # If line is a comment, keep looking back a few lines (up to 3 comment lines)
-            if line_str.startswith(("--", "/*", "*", "#")):
-                # But do NOT jump over other comments that look like commented-out statements
-                clean_comment_text = line_str.lstrip("-/*#* ").strip()
-                if clean_comment_text.lower().startswith(("create", "insert", "select", "update", "delete", "with", "merge")):
+        curr_offset = start_char
+        for line in stmt_lines:
+            line_str = line.strip()
+            if line_str:
+                fname = extract_csv_filename_from_comment(line_str)
+                if fname:
+                    csv_filename = fname
+                    comment_line_idx = sql[:curr_offset].count("\n")
                     break
-                cur -= 1
-                continue
-            # Hit actual code from preceding statement
-            break
+            curr_offset += len(line)
 
         results.append({
-            "statement_index": idx,
+            "statement_index": select_idx,
             "raw_statement": raw_stmt,
-            "code_line_idx": code_line_idx,
+            "first_line_idx": first_line_idx,
+            "code_line_idx": first_line_idx,
             "comment_line_idx": comment_line_idx,
             "csv_filename": csv_filename,
         })
+        select_idx += 1
 
     return results
 
@@ -277,7 +205,7 @@ def find_standalone_select_statements(sql: str) -> List[dict]:
 def sync_query_csv_comments(file_path: Path, existing_csv_names: Optional[Iterable[str]] = None) -> List[str]:
     """Inspect standalone SELECT statements in a .sql file.
 
-    If preceding # output: (or -- output:) comment is missing, inserts # output: table_NN.csv above the select.
+    If output table comment is missing, inserts '# output: table_NN.csv' at the top of the SQL statement.
     Returns list of CSV filenames for standalone SELECT statements in this file.
     """
     if not file_path.exists():
@@ -296,8 +224,8 @@ def sync_query_csv_comments(file_path: Path, existing_csv_names: Optional[Iterab
             known_csvs.add(s["csv_filename"])
 
     modified = False
-    insertions = []
-    result_csvs = []
+    insertions: List[Tuple[int, str]] = []
+    result_csvs: List[str] = []
 
     for s in statements:
         if s["csv_filename"]:
@@ -306,7 +234,8 @@ def sync_query_csv_comments(file_path: Path, existing_csv_names: Optional[Iterab
             next_csv = get_next_available_table_csv(known_csvs)
             known_csvs.add(next_csv)
             result_csvs.append(next_csv)
-            insertions.append((s["code_line_idx"], f"# output: {next_csv}\n"))
+            insert_idx = s.get("first_line_idx", s.get("code_line_idx", 0))
+            insertions.append((insert_idx, f"# output: {next_csv}\n"))
             modified = True
 
     if modified:
@@ -318,7 +247,7 @@ def sync_query_csv_comments(file_path: Path, existing_csv_names: Optional[Iterab
 
 
 def update_query_csv_comment(file_path: Path, select_index: int, new_filename: str) -> None:
-    """Update the # output: (or -- output:) comment for the specified standalone SELECT statement in a .sql file."""
+    """Update or insert the output table comment for the specified standalone SELECT statement in a .sql file."""
     if not file_path.exists():
         return
 
@@ -336,25 +265,17 @@ def update_query_csv_comment(file_path: Path, select_index: int, new_filename: s
 
     if stmt["comment_line_idx"] is not None and stmt["comment_line_idx"] < len(lines):
         orig_line = lines[stmt["comment_line_idx"]]
-        # If original comment used '--', preserve '--', otherwise use default '#'
         prefix = "--" if orig_line.lstrip().startswith("--") else "#"
         lines[stmt["comment_line_idx"]] = f"{prefix} output: {clean_name}\n"
     else:
-        lines.insert(stmt["code_line_idx"], f"# output: {clean_name}\n")
+        insert_idx = stmt.get("first_line_idx", stmt.get("code_line_idx", 0))
+        lines.insert(insert_idx, f"# output: {clean_name}\n")
 
     file_path.write_text("".join(lines), encoding="utf-8")
 
 
 def scan_select_output_tables(sql: str) -> List[str]:
-    """Scan SQL text for output tables referenced in SELECT statements that export to CSV.
-
-    If # output: (or # ouput:, -- output:) comment exists directly before the select statement, uses the comment's filename.
-    Otherwise falls back to extracting primary source table(s) from FROM clauses.
-    """
-    cleaned_sql = strip_comments(sql).strip()
-    if not cleaned_sql:
-        return []
-
+    """Scan SQL text for output tables referenced in SELECT statements that export to CSV."""
     statements = find_standalone_select_statements(sql)
     if not statements:
         return []
@@ -369,113 +290,95 @@ def scan_select_output_tables(sql: str) -> List[str]:
                 seen.add(fname)
                 csv_tables.append(fname)
         else:
-            stmt = strip_comments(stmt_info["raw_statement"]).strip()
-            found = False
-            for match in _INPUT_TABLE_RE.finditer(stmt):
-                raw_name = match.group(1)
-                name = clean_table_name(raw_name)
-                if name.upper() not in {"SELECT", "UNNEST", "LATERAL"} and name not in seen:
-                    seen.add(name)
-                    csv_tables.append(name)
-                    found = True
-                    break
+            raw = stmt_info["raw_statement"]
+            primary_table = None
+            try:
+                parsed = [s for s in sqlglot.parse(raw, dialect="bigquery") if s is not None]
+                if parsed:
+                    from_clause = parsed[0].find(exp.From)
+                    if from_clause:
+                        tbl = from_clause.find(exp.Table)
+                        if tbl:
+                            primary_table = clean_table_name(tbl.sql(dialect="bigquery"))
+            except Exception:
+                pass
 
-            if not found:
-                name = "output"
-                if name not in seen:
-                    seen.add(name)
-                    csv_tables.append(name)
+            name = primary_table or "output"
+            if name not in seen:
+                seen.add(name)
+                csv_tables.append(name)
 
     return csv_tables
 
 
 def extract_project_id_from_sql(sql: str) -> Optional[str]:
-    """Extract BigQuery project_id based on the first 'from' statement table address.
+    """Extract BigQuery project_id based on the first 3-part table address (project.dataset.table)."""
+    try:
+        statements = [s for s in sqlglot.parse(sql, dialect="bigquery") if s is not None]
+    except Exception:
+        statements = []
 
-    Per instructions: All tables have the name format 'project-id.dataset_id.table_id'.
-    Returns the project-id string if found, else None.
-    """
-    cleaned_sql = strip_comments(sql)
-    for match in _INPUT_TABLE_RE.finditer(cleaned_sql):
-        raw_match = match.group(0)
-        # Check that it's a FROM clause
-        if re.match(r"\bFROM\b", raw_match, re.IGNORECASE):
-            raw_name = match.group(1)
-            name = clean_table_name(raw_name)
-            if name.upper() not in {"SELECT", "UNNEST", "LATERAL"}:
-                parts = name.split(".")
-                if len(parts) >= 3:
-                    return parts[0]
-                elif len(parts) == 2:
-                    return None
+    for stmt in statements:
+        # Check FROM clauses first
+        for from_clause in stmt.find_all(exp.From):
+            table = from_clause.find(exp.Table)
+            if table and table.catalog:
+                return clean_table_name(table.catalog)
 
-    # Fallback: check any FROM or JOIN table address with 3 parts
-    for match in _INPUT_TABLE_RE.finditer(cleaned_sql):
-        name = clean_table_name(match.group(1))
-        if name.upper() not in {"SELECT", "UNNEST", "LATERAL"}:
-            parts = name.split(".")
-            if len(parts) >= 3:
-                return parts[0]
-
-    # Fallback: check output table address
-    for match in _OUTPUT_TABLE_RE.finditer(cleaned_sql):
-        name = clean_table_name(match.group(1))
-        if name.upper() not in {"SELECT", "UNNEST"}:
-            parts = name.split(".")
-            if len(parts) >= 3:
-                return parts[0]
+        # Then check any table referenced in the statement
+        for table in stmt.find_all(exp.Table):
+            if table.catalog:
+                return clean_table_name(table.catalog)
 
     return None
 
 
 def scan_query_tables(sql: str) -> Tuple[List[str], List[str], List[str]]:
-    """Determine input, output, and CSV output tables from BigQuery SQL.
+    """Determine input, output, and CSV output tables from BigQuery SQL using sqlglot.
 
-    Input tables: extracted from FROM and JOIN clauses (excluding CTEs and created tables).
-    Output tables: extracted from CREATE TABLE, INSERT INTO, and MERGE statements.
-    Output CSV tables: extracted from standalone SELECT statements exporting to CSV.
+    Input tables: tables referenced in FROM and JOIN clauses (excluding CTEs).
+    Output tables: targets of CREATE TABLE, INSERT INTO, and MERGE statements.
+    Output CSV tables: standalone SELECT statements exporting to CSV.
 
     Returns:
         Tuple of (input_tables, output_tables, output_csv_tables)
     """
-    cleaned_sql = strip_comments(sql)
-
-    # Detect Common Table Expressions (CTEs) so they aren't marked as external input tables
-    cte_names: Set[str] = set()
-    for match in _CTE_RE.finditer(cleaned_sql):
-        cte_name = clean_table_name(match.group(1))
-        cte_names.add(cte_name)
-
     input_tables: List[str] = []
-    seen_inputs: Set[str] = set()
-
     output_tables: List[str] = []
+    seen_inputs: Set[str] = set()
     seen_outputs: Set[str] = set()
 
-    # Extract output tables first
-    for match in _OUTPUT_TABLE_RE.finditer(cleaned_sql):
-        raw_name = match.group(1)
-        name = clean_table_name(raw_name)
-        # Skip subqueries / keywords
-        if name.upper() in {"SELECT", "UNNEST"}:
-            continue
-        if name and name not in seen_outputs:
-            seen_outputs.add(name)
-            output_tables.append(name)
+    try:
+        statements = [s for s in sqlglot.parse(sql, dialect="bigquery") if s is not None]
+    except Exception:
+        statements = []
 
-    # Extract input tables
-    for match in _INPUT_TABLE_RE.finditer(cleaned_sql):
-        raw_name = match.group(1)
-        name = clean_table_name(raw_name)
-        # Skip subqueries / special BigQuery keywords / CTEs
-        if name.upper() in {"SELECT", "UNNEST", "LATERAL"}:
-            continue
-        if name in cte_names:
-            continue
-        if name and name not in seen_inputs and name not in seen_outputs:
-            seen_inputs.add(name)
-            input_tables.append(name)
+    for stmt in statements:
+        # Collect CTE names defined in this statement to exclude from external inputs
+        cte_names = {clean_table_name(cte.alias_or_name) for cte in stmt.ctes}
 
-    output_csv_tables = scan_select_output_tables(cleaned_sql)
+        # Output tables: CREATE, INSERT, MERGE
+        if isinstance(stmt, (exp.Create, exp.Insert, exp.Merge)):
+            target = stmt.find(exp.Table)
+            if target:
+                out_name = clean_table_name(target.sql(dialect="bigquery"))
+                if out_name and out_name not in seen_outputs:
+                    seen_outputs.add(out_name)
+                    output_tables.append(out_name)
 
+        # Input tables: FROM and JOIN clauses
+        for from_or_join in stmt.find_all(exp.From, exp.Join):
+            table = from_or_join.find(exp.Table)
+            if table:
+                in_name = clean_table_name(table.sql(dialect="bigquery"))
+                if (
+                    in_name
+                    and in_name not in cte_names
+                    and in_name not in seen_inputs
+                    and in_name not in seen_outputs
+                ):
+                    seen_inputs.add(in_name)
+                    input_tables.append(in_name)
+
+    output_csv_tables = scan_select_output_tables(sql)
     return input_tables, output_tables, output_csv_tables

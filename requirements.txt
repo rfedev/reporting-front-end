@@ -17,3 +17,4 @@ pandas
 openpyxl>=3.1.0
 pyarrow
 db-dtypes
+sqlglot>=20.0.0

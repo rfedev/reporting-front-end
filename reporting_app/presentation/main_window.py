@@ -644,15 +644,19 @@ class MainWindow(QMainWindow):
             working_directories=self.controller.get_working_directories(),
             auto_scan=self.controller.get_auto_scan(),
             workbench_dataset=self.controller.repo.get_workbench_dataset(),
+            log_database_path=self.controller.get_log_database_path(),
             parent=self,
         )
         if dialog.exec() == SettingsDialog.Accepted:
             new_dirs = dialog.get_working_directories()
             new_auto_scan = dialog.get_auto_scan()
             new_wb = dialog.get_workbench_dataset()
+            new_log_db = dialog.get_log_database_path()
 
             self.controller.set_auto_scan(new_auto_scan)
             self.controller.repo.set_workbench_dataset(new_wb)
+            if new_log_db and new_log_db != self.controller.get_log_database_path():
+                self.controller.set_log_database_path(new_log_db)
             self._update_sync_button_visibility()
 
             if new_dirs != self.controller.get_working_directories():
@@ -778,8 +782,11 @@ class MainWindow(QMainWindow):
                     msgs.append(f"Created/updated table(s){rc_str}:\n{tbls}")
                 if res.get("is_export"):
                     details = res.get("export_details", [])
-                    if details:
-                        lines = [f"Exported {len(details)} table{'s' if len(details) != 1 else ''}:"]
+                    if len(details) == 1:
+                        d = details[0]
+                        msgs.append(f"Exported '{d['filename']}' ({d['row_count']:,} rows)")
+                    elif len(details) > 1:
+                        lines = [f"Exported {len(details)} tables:"]
                         for d in details:
                             lines.append(f"* {d['filename']} ({d['row_count']:,} rows)")
                         msgs.append("\n".join(lines))
@@ -987,8 +994,11 @@ class MainWindow(QMainWindow):
                     log_parts.append(f"Table(s): {', '.join(res.get('output_tables', []))}")
                 if res.get("is_export"):
                     details = res.get("export_details", [])
-                    if details:
-                        exp_lines = [f"Exported {len(details)} table{'s' if len(details) != 1 else ''}:"]
+                    if len(details) == 1:
+                        d = details[0]
+                        log_parts.append(f"Exported '{d['filename']}' ({d['row_count']:,} rows)")
+                    elif len(details) > 1:
+                        exp_lines = [f"Exported {len(details)} tables:"]
                         for d in details:
                             exp_lines.append(f"* {d['filename']} ({d['row_count']:,} rows)")
                         log_parts.append("\n".join(exp_lines))

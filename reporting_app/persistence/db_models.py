@@ -1,7 +1,7 @@
 """SQLAlchemy ORM models for application persistence."""
 
 from sqlalchemy import Column, Float, Integer, String, Text, UniqueConstraint
-from reporting_app.persistence.database import Base
+from reporting_app.persistence.database import Base, LogBase
 
 
 class AppSetting(Base):
@@ -60,7 +60,7 @@ class CachedQueryMeta(Base):
     )
 
 
-class ExecutionLog(Base):
+class ExecutionLog(LogBase):
     """Log record for query and file import executions."""
 
     __tablename__ = "execution_logs"

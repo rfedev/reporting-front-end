@@ -15,9 +15,32 @@ from reporting_app.persistence.db_models import (
 class Repository:
     """Provides high-level data access methods using SQLAlchemy."""
 
-    def __init__(self, db_manager: DatabaseManager):
+    DEFAULT_LOG_DB_PATH = ".log.db"
+
+    def __init__(self, db_manager: DatabaseManager, log_db_manager: Optional[DatabaseManager] = None):
         self.db_manager = db_manager
         self.db_manager.initialize_schema()
+
+        if log_db_manager is not None:
+            self.log_db_manager = log_db_manager
+        else:
+            log_path_str = self.get_setting("log_database_path", self.DEFAULT_LOG_DB_PATH).strip()
+            if not log_path_str:
+                log_path_str = self.DEFAULT_LOG_DB_PATH
+            self.log_db_manager = DatabaseManager(Path(log_path_str))
+
+        self.log_db_manager.initialize_schema()
+
+    def get_log_database_path(self) -> str:
+        """Return configured path to the log database SQLite file."""
+        return self.get_setting("log_database_path", self.DEFAULT_LOG_DB_PATH)
+
+    def set_log_database_path(self, path_str: str) -> None:
+        """Update configured path to the log database SQLite file and reinitialize manager."""
+        cleaned = path_str.strip() or self.DEFAULT_LOG_DB_PATH
+        self.set_setting("log_database_path", cleaned)
+        self.log_db_manager = DatabaseManager(Path(cleaned))
+        self.log_db_manager.initialize_schema()
 
     # --- Settings ---
 
@@ -205,7 +228,7 @@ class Repository:
     def record_execution_log(self, log_data: Dict[str, Any]) -> None:
         """Insert a single node execution log record."""
         import json
-        with self.db_manager.get_session() as session:
+        with self.log_db_manager.get_session() as session:
             with session.begin():
                 export_json = log_data.get("export_details_json")
                 if isinstance(export_json, (list, dict)):
@@ -244,7 +267,7 @@ class Repository:
         node_name: Optional[str] = None,
     ) -> List[str]:
         """Return distinct dates (YYYY-MM-DD) from flow_start_time in descending order."""
-        with self.db_manager.get_session() as session:
+        with self.log_db_manager.get_session() as session:
             stmt = select(ExecutionLog.flow_start_time)
             if report_name:
                 stmt = stmt.where(ExecutionLog.report_name == report_name)
@@ -269,7 +292,7 @@ class Repository:
         node_name: Optional[str] = None,
     ) -> List[ExecutionLog]:
         """Fetch execution logs filtered by date, run_id, report, flow, or node."""
-        with self.db_manager.get_session() as session:
+        with self.log_db_manager.get_session() as session:
             stmt = select(ExecutionLog)
             if date_str:
                 stmt = stmt.where(ExecutionLog.flow_start_time.startswith(date_str))
@@ -324,7 +347,7 @@ class Repository:
         """Prune logs older than N days. Returns count of deleted logs."""
         from datetime import datetime, timedelta, timezone
         cutoff = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).isoformat()
-        with self.db_manager.get_session() as session:
+        with self.log_db_manager.get_session() as session:
             with session.begin():
                 stmt = delete(ExecutionLog).where(ExecutionLog.flow_start_time < cutoff)
                 result = session.execute(stmt)

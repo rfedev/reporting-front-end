@@ -149,13 +149,13 @@ def run_bigquery_script(
     def export_row_iterator_to_file(row_iter: Any, out_file: Path) -> int:
         written_count = 0
         total_rows_meta = getattr(row_iter, "total_rows", None)
-        auto_stream = (total_rows_meta is not None and total_rows_meta > 500_000)
+        auto_stream = (isinstance(total_rows_meta, (int, float)) and total_rows_meta > 500_000)
         use_stream = stream_to_csv or auto_stream
 
         if auto_stream and not stream_to_csv:
             logger.info(
                 f"Auto-enabling stream_to_csv for {out_file.name}: "
-                f"result set has {total_rows_meta:,} rows (> 500,000 threshold)."
+                f"result set has {int(total_rows_meta):,} rows (> 500,000 threshold)."
             )
 
         if use_stream:
@@ -227,8 +227,8 @@ def run_bigquery_script(
     else:
         # Determine rows created/added to destination or created table(s)
         dml_rows = getattr(query_job, "num_dml_affected_rows", None)
-        if dml_rows is not None and dml_rows >= 0:
-            total_row_count = dml_rows
+        if isinstance(dml_rows, (int, float)) and dml_rows >= 0:
+            total_row_count = int(dml_rows)
         else:
             dest_ref = getattr(query_job, "destination", None)
             if dest_ref:

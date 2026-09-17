@@ -37,12 +37,14 @@ class SettingsDialog(QDialog):
     """Dialog allowing configuration of multiple working directories, workbench dataset, and auto-scan preferences."""
 
     DEFAULT_WORKBENCH_DATASET = "iw-gid-prd-01-c683.gid_art_yourworkbenchID"
+    DEFAULT_LOG_DB_PATH = ".log.db"
 
     def __init__(
         self,
         working_directories: List[Dict[str, str]],
         auto_scan: bool,
         workbench_dataset: str = "",
+        log_database_path: str = "",
         parent=None,
     ):
         super().__init__(parent)
@@ -53,6 +55,7 @@ class SettingsDialog(QDialog):
         self._working_dirs: List[Dict[str, str]] = [dict(d) for d in working_directories]
         self._auto_scan = auto_scan
         self._workbench_dataset = workbench_dataset
+        self._log_database_path = log_database_path
 
         self._build_ui()
         self._populate_table()
@@ -101,6 +104,16 @@ class SettingsDialog(QDialog):
         self.workbench_edit = QLineEdit(initial_workbench)
         self.workbench_edit.setPlaceholderText(self.DEFAULT_WORKBENCH_DATASET)
         form_layout.addRow("Workbench Dataset:", self.workbench_edit)
+
+        initial_log_db = self._log_database_path or self.DEFAULT_LOG_DB_PATH
+        log_db_layout = QHBoxLayout()
+        self.log_db_edit = QLineEdit(initial_log_db)
+        self.log_db_edit.setPlaceholderText(self.DEFAULT_LOG_DB_PATH)
+        log_db_layout.addWidget(self.log_db_edit)
+        self.log_db_browse_btn = QPushButton("Browse...")
+        self.log_db_browse_btn.clicked.connect(self._on_browse_log_db)
+        log_db_layout.addWidget(self.log_db_browse_btn)
+        form_layout.addRow("Log Database File:", log_db_layout)
 
         self.auto_scan_checkbox = QCheckBox("Enable auto-scanning for reports, flows, and queries")
         self.auto_scan_checkbox.setChecked(self._auto_scan)
@@ -246,6 +259,17 @@ class SettingsDialog(QDialog):
         self._working_dirs = dirs
         self.accept()
 
+    def _on_browse_log_db(self) -> None:
+        current_val = self.log_db_edit.text().strip() or self.DEFAULT_LOG_DB_PATH
+        chosen, _ = QFileDialog.getSaveFileName(
+            self,
+            "Select or Create Log Database File",
+            current_val,
+            "SQLite Database (*.db *.sqlite);;All Files (*)",
+        )
+        if chosen:
+            self.log_db_edit.setText(chosen)
+
     def get_working_directories(self) -> List[Dict[str, str]]:
         return self._working_dirs
 
@@ -254,6 +278,9 @@ class SettingsDialog(QDialog):
 
     def get_auto_scan(self) -> bool:
         return self.auto_scan_checkbox.isChecked()
+
+    def get_log_database_path(self) -> str:
+        return self.log_db_edit.text().strip()
 
 
 

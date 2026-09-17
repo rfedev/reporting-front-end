@@ -16,6 +16,8 @@
 /dist
 **/__pycache__/
 .reporting_app.db
+.log.db
+*.db
 test/
 tests/
 

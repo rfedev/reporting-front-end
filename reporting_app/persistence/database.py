@@ -5,6 +5,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 
 Base = declarative_base()
+LogBase = declarative_base()
 
 
 class DatabaseManager:
@@ -27,6 +28,7 @@ class DatabaseManager:
     def initialize_schema(self) -> None:
         """Create all tables in SQLite."""
         Base.metadata.create_all(self.engine)
+        LogBase.metadata.create_all(self.engine)
 
     def get_session(self) -> Session:
         """Provide a new SQLAlchemy session."""

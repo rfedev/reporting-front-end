@@ -27,10 +27,15 @@ class AppController(QObject):
 
     DEFAULT_PROCESS_FLOW_NAME = "Process Flow 01"
 
-    def __init__(self, db_manager: Optional[DatabaseManager] = None, parent: Optional[QObject] = None):
+    def __init__(
+        self,
+        db_manager: Optional[DatabaseManager] = None,
+        log_db_manager: Optional[DatabaseManager] = None,
+        parent: Optional[QObject] = None,
+    ):
         super().__init__(parent)
         self.db_manager = db_manager or DatabaseManager()
-        self.repo = Repository(self.db_manager)
+        self.repo = Repository(self.db_manager, log_db_manager=log_db_manager)
 
         # Initialize working directories from database or default
         working_dirs = self.repo.get_working_directories()
@@ -81,6 +86,13 @@ class AppController(QObject):
         """Update auto-scan preference."""
         self.repo.set_auto_scan(enabled)
         self.watcher.set_enabled(enabled)
+
+    def get_log_database_path(self) -> str:
+        return self.repo.get_log_database_path()
+
+    def set_log_database_path(self, path_str: str) -> None:
+        """Update configured log database path."""
+        self.repo.set_log_database_path(path_str)
 
     def _create_default_process_flow(self, report: Report) -> ProcessFlowInfo:
         """Create a default 'Process Flow 01' if none exists for the report (Requirement 2)."""
@@ -237,11 +249,10 @@ class AppController(QObject):
             for report in self.reports_by_name.values():
                 for q in report.queries:
                     if q.file_path and q.file_path.resolve() == resolved:
-                        if q.is_parsed:
-                            q.ensure_parsed(force=True)
-                            self.repo.record_query_tables(report.name, q.name, q.input_tables, q.output_tables)
-                            if self.active_report and self.active_report.name == report.name:
-                                self.active_report_changed.emit(self.active_report)
+                        q.ensure_parsed(force=True)
+                        self.repo.record_query_tables(report.name, q.name, q.input_tables, q.output_tables)
+                        if self.active_report and self.active_report.name == report.name:
+                            self.active_report_changed.emit(self.active_report)
                         return
 
         elif suffix == ".json":

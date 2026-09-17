@@ -2591,8 +2591,13 @@ class ProcessFlowEditorWindow(QMainWindow):
                     )
                     if res.get("is_export"):
                         details = res.get("export_details", [])
-                        if details:
-                            lines = [f"[{idx}/{total_steps}] ✅ {qname}: Exported {len(details)} table{'s' if len(details) != 1 else ''}:"]
+                        if len(details) == 1:
+                            d = details[0]
+                            results_log.append(
+                                f"[{idx}/{total_steps}] ✅ {qname}: Exported '{d['filename']}' ({d['row_count']:,} rows)"
+                            )
+                        elif len(details) > 1:
+                            lines = [f"[{idx}/{total_steps}] ✅ {qname}: Exported {len(details)} tables:"]
                             for d in details:
                                 lines.append(f"* {d['filename']} ({d['row_count']:,} rows)")
                             results_log.append("\n".join(lines))

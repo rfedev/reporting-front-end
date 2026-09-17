@@ -153,6 +153,18 @@ class LogViewerDialog(QDialog):
             self.node_combo.addItem(n)
 
         if self.filter_node and self.filter_node in nodes:
+            dates = self.repo.get_distinct_log_dates(
+                report_name=self.report_name,
+                flow_name=self.flow_name,
+                node_name=self.filter_node,
+            )
+            if dates:
+                latest_date = QDate.fromString(dates[0], "yyyy-MM-dd")
+                if latest_date.isValid():
+                    self.date_picker.blockSignals(True)
+                    self.date_picker.setDate(latest_date)
+                    self.date_picker.blockSignals(False)
+
             self.node_combo.setCurrentText(self.filter_node)
 
     def _on_show_all_toggled(self, checked: bool) -> None:
@@ -166,6 +178,19 @@ class LogViewerDialog(QDialog):
             self._populate_runs()
 
     def _on_node_filter_changed(self, text: str) -> None:
+        if text != "All Nodes" and not self.show_all_cb.isChecked():
+            curr_date_str = self.date_picker.date().toString("yyyy-MM-dd")
+            dates = self.repo.get_distinct_log_dates(
+                report_name=self.report_name,
+                flow_name=self.flow_name,
+                node_name=text,
+            )
+            if dates and curr_date_str not in dates:
+                latest_date = QDate.fromString(dates[0], "yyyy-MM-dd")
+                if latest_date.isValid():
+                    self.date_picker.blockSignals(True)
+                    self.date_picker.setDate(latest_date)
+                    self.date_picker.blockSignals(False)
         self._populate_runs()
 
     def _populate_runs(self) -> None:
@@ -200,6 +225,7 @@ class LogViewerDialog(QDialog):
             grouped_by_date[d].append(s)
 
         first_top_item = None
+        item_to_select = None
         for d, s_list in sorted(grouped_by_date.items(), reverse=True):
             date_item = QTreeWidgetItem([f"📅 {d} ({len(s_list)} run{'s' if len(s_list) != 1 else ''})"])
             date_item.setData(0, Qt.UserRole, {"type": "date", "date": d, "sessions": s_list})
@@ -226,14 +252,18 @@ class LogViewerDialog(QDialog):
                     node_item.setData(0, Qt.UserRole, {"type": "node", "node": n, "session": s})
                     run_item.addChild(node_item)
 
+                    if item_to_select is None and node_filter and n.node_name == node_filter:
+                        item_to_select = node_item
+
                 run_item.setExpanded(True)
 
             date_item.setExpanded(True)
 
-        # Select first date or run by default
-        if first_top_item:
-            self.run_tree.setCurrentItem(first_top_item)
-            self._on_tree_item_clicked(first_top_item, 0)
+        target = item_to_select or first_top_item
+        if target:
+            self.run_tree.setCurrentItem(target)
+            self.run_tree.scrollToItem(target)
+            self._on_tree_item_clicked(target, 0)
 
     def _on_tree_item_clicked(self, item: QTreeWidgetItem, column: int) -> None:
         data = item.data(0, Qt.UserRole)

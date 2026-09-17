@@ -70,19 +70,18 @@ def format_single_node_log(
     if not is_success and err_msg:
         lines.append(f"\n> ⚠️ **Execution Error:**\n> {err_msg}\n")
 
-    lines.append("&nbsp;")
-
     if node_type == "query":
         # Data Size and Volume
+        lines.append("\n&nbsp;\n")
         lines.append("### 📊 Data Size & Volume")
         lines.append(f"* **Total Bytes Processed:** {format_bytes(getattr(log, 'total_bytes_processed', None))}")
         lines.append(f"* **Total Bytes Billed:** {format_bytes(getattr(log, 'total_bytes_billed', None))}")
         out_rows = getattr(log, "output_rows", None)
         row_cnt_str = f"{out_rows:,} rows" if out_rows is not None else "N/A"
         lines.append(f"* **Output Rows:** {row_cnt_str}")
-        lines.append("&nbsp;")
 
         # Compute & Cost Efficiency
+        lines.append("\n&nbsp;\n")
         lines.append("### ⚡ Compute & Cost Efficiency")
         sm = getattr(log, "slot_millis", None)
         slot_str = f"{sm:,} ms" if sm is not None else "N/A"
@@ -97,7 +96,7 @@ def format_single_node_log(
             try:
                 exports = json.loads(exp_json) if isinstance(exp_json, str) else exp_json
                 if exports:
-                    lines.append("&nbsp;")
+                    lines.append("\n&nbsp;\n")
                     lines.append("### 📁 Exported Files")
                     for exp in exports:
                         fn = exp.get("filename", "output.csv")
@@ -112,13 +111,14 @@ def format_single_node_log(
             sub_query = getattr(log, "submitted_query", None)
             if sub_query:
                 clean_query = sub_query.strip()
-                lines.append("&nbsp;")
+                lines.append("\n&nbsp;\n")
                 lines.append("### Bigquery SQL\n")
                 lines.append("```sql")
                 lines.append(clean_query)
                 lines.append("```\n")
 
     elif node_type == "import_csv":
+        lines.append("\n&nbsp;\n")
         lines.append("### 📥 Import Details")
         out_rows = getattr(log, "output_rows", None)
         if out_rows is not None:
@@ -164,6 +164,8 @@ def format_run_session_logs(
         f_time = format_timestamp(getattr(first, "flow_start_time", ""))
         doc.append(f"# Execution Run ({f_time})\n")
 
+    doc.append("&nbsp;\n")
+
     # Overall Summary
     total_duration = sum(getattr(l, "duration_seconds", 0.0) for l in logs)
     total_bytes = sum(getattr(l, "total_bytes_processed", 0) or 0 for l in logs)
@@ -208,6 +210,7 @@ def format_day_summary_logs(
 
     doc = []
     doc.append(f"# 📅 Daily Execution Summary: `{date_str}`")
+    doc.append("&nbsp;")
 
     total_duration = sum(getattr(l, "duration_seconds", 0.0) for l in all_logs)
     total_bytes = sum(getattr(l, "total_bytes_processed", 0) or 0 for l in all_logs)
@@ -232,6 +235,7 @@ def format_day_summary_logs(
 
     doc.append("---")
     doc.append("## 🔄 Process Flow Runs Summary")
+    doc.append("&nbsp;")
 
     matching_sessions = [
         s for s in sessions

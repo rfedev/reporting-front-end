@@ -30,6 +30,20 @@ class Repository:
             self.log_db_manager = DatabaseManager(Path(log_path_str))
 
         self.log_db_manager.initialize_schema()
+        self._ensure_log_columns()
+
+    def _ensure_log_columns(self) -> None:
+        """Add any missing columns to existing execution_logs table."""
+        from sqlalchemy import text
+        try:
+            with self.log_db_manager.engine.connect() as conn:
+                res = conn.execute(text("PRAGMA table_info(execution_logs)")).fetchall()
+                existing_cols = {row[1] for row in res}
+                if existing_cols and "bq_duration_seconds" not in existing_cols:
+                    conn.execute(text("ALTER TABLE execution_logs ADD COLUMN bq_duration_seconds FLOAT"))
+                    conn.commit()
+        except Exception:
+            pass
 
     def get_log_database_path(self) -> str:
         """Return configured path to the log database SQLite file."""
@@ -41,6 +55,7 @@ class Repository:
         self.set_setting("log_database_path", cleaned)
         self.log_db_manager = DatabaseManager(Path(cleaned))
         self.log_db_manager.initialize_schema()
+        self._ensure_log_columns()
 
     # --- Settings ---
 
@@ -243,6 +258,7 @@ class Repository:
                     node_start_time=log_data.get("node_start_time", ""),
                     node_end_time=log_data.get("node_end_time", ""),
                     duration_seconds=float(log_data.get("duration_seconds", 0.0)),
+                    bq_duration_seconds=float(log_data["bq_duration_seconds"]) if log_data.get("bq_duration_seconds") is not None else None,
                     report_name=log_data.get("report_name", ""),
                     flow_name=log_data.get("flow_name", ""),
                     node_type=log_data.get("node_type", "query"),

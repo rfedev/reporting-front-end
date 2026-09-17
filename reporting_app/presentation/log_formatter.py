@@ -63,7 +63,10 @@ def format_single_node_log(
     lines.append(f"* **Report:** `{getattr(log, 'report_name', '')}`")
     lines.append(f"* **Flow Started:** `{format_timestamp(getattr(log, 'flow_start_time', ''))}`")
     lines.append(f"* **Node Started:** `{format_timestamp(getattr(log, 'node_start_time', ''))}`")
-    lines.append(f"* **Execution Duration:** `{format_duration(getattr(log, 'duration_seconds', 0.0))}`")
+    lines.append(f"* **Full Runtime:** `{format_duration(getattr(log, 'duration_seconds', 0.0))}`")
+    bq_dur = getattr(log, "bq_duration_seconds", None)
+    if bq_dur is not None:
+        lines.append(f"* **BigQuery Cloud Execution Duration:** `{format_duration(bq_dur)}`")
     lines.append(f"* **Status:** **{getattr(log, 'status', '')}**")
 
     err_msg = getattr(log, "error_message", None)
@@ -85,7 +88,7 @@ def format_single_node_log(
         lines.append("### ⚡ Compute & Cost Efficiency")
         sm = getattr(log, "slot_millis", None)
         slot_str = f"{sm:,} ms" if sm is not None else "N/A"
-        lines.append(f"* **Slot Millis (CPU):** {slot_str}")
+        lines.append(f"* **Combined Slot Millis (CPU):** {slot_str}")
         ch = getattr(log, "cache_hit", None)
         cache_str = "True (Cached - $0 cost)" if ch else ("False" if ch is not None else "N/A")
         lines.append(f"* **Cache Hit:** {cache_str}")
@@ -168,6 +171,7 @@ def format_run_session_logs(
 
     # Overall Summary
     total_duration = sum(getattr(l, "duration_seconds", 0.0) for l in logs)
+    total_bq_duration = sum(getattr(l, "bq_duration_seconds", 0.0) or 0.0 for l in logs)
     total_bytes = sum(getattr(l, "total_bytes_processed", 0) or 0 for l in logs)
     total_billed = sum(getattr(l, "total_bytes_billed", 0) or 0 for l in logs)
     all_success = all(getattr(l, "status", "") == "SUCCESS" for l in logs)
@@ -176,7 +180,9 @@ def format_run_session_logs(
     doc.append("### Summary Overview")
     doc.append(f"* **Overall Status:** {status_icon}")
     doc.append(f"* **Total Nodes Executed:** {len(logs)}")
-    doc.append(f"* **Combined Duration:** `{format_duration(total_duration)}`")
+    doc.append(f"* **Full Runtime:** `{format_duration(total_duration)}`")
+    if total_bq_duration > 0:
+        doc.append(f"* **BigQuery Cloud Execution Duration:** `{format_duration(total_bq_duration)}`")
     if total_bytes > 0:
         doc.append(f"* **Total Bytes Processed:** `{format_bytes(total_bytes)}`")
         doc.append(f"* **Total Bytes Billed:** `{format_bytes(total_billed)}`")
@@ -213,6 +219,7 @@ def format_day_summary_logs(
     doc.append("&nbsp;")
 
     total_duration = sum(getattr(l, "duration_seconds", 0.0) for l in all_logs)
+    total_bq_duration = sum(getattr(l, "bq_duration_seconds", 0.0) or 0.0 for l in all_logs)
     total_bytes = sum(getattr(l, "total_bytes_processed", 0) or 0 for l in all_logs)
     total_billed = sum(getattr(l, "total_bytes_billed", 0) or 0 for l in all_logs)
     total_slots = sum(getattr(l, "slot_millis", 0) or 0 for l in all_logs)
@@ -225,10 +232,14 @@ def format_day_summary_logs(
         "## 📈 Day Totals",
         f"* **Total Runs:** {total_runs}",
         f"* **Total Nodes Executed:** {total_nodes} ({successful_nodes} succeeded, {failed_nodes} failed)",
-        f"* **Combined Duration:** `{format_duration(total_duration)}`",
+        f"* **Full Runtime:** `{format_duration(total_duration)}`",
+    ]
+    if total_bq_duration > 0:
+        day_totals.append(f"* **BigQuery Cloud Execution Duration:** `{format_duration(total_bq_duration)}`")
+    day_totals.extend([
         f"* **Total Bytes Processed:** `{format_bytes(total_bytes)}`",
         f"* **Total Bytes Billed:** `{format_bytes(total_billed)}`",
-    ]
+    ])
     if total_slots > 0:
         day_totals.append(f"* **Total Slot Millis:** `{total_slots:,} ms`")
     doc.append("\n".join(day_totals))
@@ -255,6 +266,7 @@ def format_day_summary_logs(
         time_str = raw_ts[11:19] if len(raw_ts) >= 19 else raw_ts
 
         s_dur = sum(getattr(n, "duration_seconds", 0.0) for n in s_nodes)
+        s_bq_dur = sum(getattr(n, "bq_duration_seconds", 0.0) or 0.0 for n in s_nodes)
         s_bytes = sum(getattr(n, "total_bytes_processed", 0) or 0 for n in s_nodes)
         s_billed = sum(getattr(n, "total_bytes_billed", 0) or 0 for n in s_nodes)
         s_slots = sum(getattr(n, "slot_millis", 0) or 0 for n in s_nodes)
@@ -262,8 +274,10 @@ def format_day_summary_logs(
         run_lines = [
             f"### {s_badge} Run #{run_num}: {time_str} ({len(s_nodes)} node{'s' if len(s_nodes) != 1 else ''})",
             f"* **Status:** {s_status}",
-            f"* **Duration:** `{format_duration(s_dur)}`",
+            f"* **Full Runtime:** `{format_duration(s_dur)}`",
         ]
+        if s_bq_dur > 0:
+            run_lines.append(f"* **BigQuery Cloud Execution Duration:** `{format_duration(s_bq_dur)}`")
         if s_bytes > 0:
             run_lines.append(f"* **Bytes Processed:** `{format_bytes(s_bytes)}`")
             run_lines.append(f"* **Bytes Billed:** `{format_bytes(s_billed)}`")

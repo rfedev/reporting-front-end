@@ -799,12 +799,14 @@ class MainWindow(QMainWindow):
 
                 if repo:
                     t1 = datetime.now(timezone.utc)
+                    wall_node_dur = (t1 - t0).total_seconds()
                     repo.record_execution_log({
                         "run_id": run_id,
                         "flow_start_time": start_ts,
                         "node_start_time": start_ts,
-                        "node_end_time": res.get("job_ended") or t1.isoformat(),
-                        "duration_seconds": res.get("duration_seconds") or (t1 - t0).total_seconds(),
+                        "node_end_time": t1.isoformat(),
+                        "duration_seconds": max(float(res.get("duration_seconds", 0.0) or 0.0), wall_node_dur),
+                        "bq_duration_seconds": res.get("bq_duration_seconds"),
                         "report_name": active_report.name,
                         "flow_name": "Standalone",
                         "node_type": "query",

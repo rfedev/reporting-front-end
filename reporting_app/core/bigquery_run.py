@@ -9,6 +9,7 @@ Features:
 """
 
 import csv
+from datetime import datetime, timezone
 import logging
 from pathlib import Path
 import re
@@ -78,6 +79,8 @@ def run_bigquery_script(
         Dictionary with execution details: query_name, is_export, output_file, row_count, status.
     """
     from reporting_app.core.sql_parser import extract_project_id_from_sql, scan_query_tables
+
+    t_start = datetime.now(timezone.utc)
 
     sql_path = Path(sql_script_path)
     if not sql_path.exists():
@@ -188,24 +191,33 @@ def run_bigquery_script(
                             written_count += 1
         return written_count
 
-    if should_export:
-        # Check child jobs for multi-statement scripts
-        child_select_results: List[Any] = []
+    # Check child jobs for multi-statement scripts or telemetry
+    child_jobs: List[Any] = []
+    try:
+        if client is not None and hasattr(client, "list_jobs"):
+            raw_jobs = client.list_jobs(parent_job=query_job)
+            if hasattr(raw_jobs, "__iter__"):
+                child_jobs = list(raw_jobs)
+    except Exception as e:
+        logger.debug(f"Checking multi-query script child jobs: {e}")
+
+    # In case list_jobs returns in reverse chronological order, ensure proper order
+    if len(child_jobs) > 1:
         try:
-            for child_job in client.list_jobs(parent_job=query_job):
-                if hasattr(child_job, "destination") and child_job.destination:
+            child_jobs.reverse()
+        except Exception:
+            pass
+
+    if should_export:
+        child_select_results: List[Any] = []
+        for child_job in child_jobs:
+            if hasattr(child_job, "destination") and child_job.destination:
+                try:
                     child_res = child_job.result()
                     if getattr(child_res, "total_rows", 0) is not None and child_res.total_rows > 0:
                         child_select_results.append(child_res)
-        except Exception as e:
-            logger.debug(f"Checking multi-query script child jobs: {e}")
-
-        # In case list_jobs returns in reverse chronological order, ensure proper order
-        if len(child_select_results) > 1:
-            try:
-                child_select_results.reverse()
-            except Exception:
-                pass
+                except Exception as c_err:
+                    logger.debug(f"Error fetching child job result: {c_err}")
 
         if child_select_results:
             for idx, c_res in enumerate(child_select_results):
@@ -251,13 +263,75 @@ def run_bigquery_script(
         logger.info(f"Query {query_name} completed table creation/update in BigQuery ({total_row_count} rows).")
 
     exported_path_str = ", ".join(exported_paths) if exported_paths else None
+    t_end = datetime.now(timezone.utc)
+    wall_duration_sec = (t_end - t_start).total_seconds()
 
     # BigQuery Execution Telemetry
     job_started_iso = query_job.started.isoformat() if getattr(query_job, "started", None) else None
     job_ended_iso = query_job.ended.isoformat() if getattr(query_job, "ended", None) else None
-    duration_sec = 0.0
+    bq_duration_sec = 0.0
     if getattr(query_job, "started", None) and getattr(query_job, "ended", None):
-        duration_sec = (query_job.ended - query_job.started).total_seconds()
+        try:
+            bq_duration_sec = (query_job.ended - query_job.started).total_seconds()
+        except Exception:
+            pass
+
+    # Use wall-clock duration as primary so it includes queueing and local file export
+    duration_sec = max(wall_duration_sec, bq_duration_sec)
+
+    # Telemetry attributes with fallback to child jobs for multi-statement scripts
+    cache_hit = getattr(query_job, "cache_hit", None)
+    if not isinstance(cache_hit, bool):
+        cache_hit = None
+
+    total_bytes_processed = getattr(query_job, "total_bytes_processed", None)
+    if not isinstance(total_bytes_processed, (int, float)):
+        total_bytes_processed = None
+
+    total_bytes_billed = getattr(query_job, "total_bytes_billed", None)
+    if not isinstance(total_bytes_billed, (int, float)):
+        total_bytes_billed = None
+
+    slot_millis = getattr(query_job, "slot_millis", None)
+    if not isinstance(slot_millis, (int, float)):
+        slot_millis = None
+
+    if child_jobs:
+        if cache_hit is None:
+            child_hits = [
+                getattr(cj, "cache_hit", None)
+                for cj in child_jobs
+                if isinstance(getattr(cj, "cache_hit", None), bool)
+            ]
+            if child_hits:
+                cache_hit = any(child_hits)
+
+        if total_bytes_processed is None:
+            tb_proc = sum(
+                int(getattr(cj, "total_bytes_processed", 0))
+                for cj in child_jobs
+                if isinstance(getattr(cj, "total_bytes_processed", None), (int, float))
+            )
+            if tb_proc > 0:
+                total_bytes_processed = tb_proc
+
+        if total_bytes_billed is None:
+            tb_bill = sum(
+                int(getattr(cj, "total_bytes_billed", 0))
+                for cj in child_jobs
+                if isinstance(getattr(cj, "total_bytes_billed", None), (int, float))
+            )
+            if tb_bill > 0:
+                total_bytes_billed = tb_bill
+
+        if slot_millis is None:
+            sm = sum(
+                int(getattr(cj, "slot_millis", 0))
+                for cj in child_jobs
+                if isinstance(getattr(cj, "slot_millis", None), (int, float))
+            )
+            if sm > 0:
+                slot_millis = sm
 
     return {
         "query_name": query_name,
@@ -274,10 +348,11 @@ def run_bigquery_script(
         "job_started": job_started_iso,
         "job_ended": job_ended_iso,
         "duration_seconds": duration_sec,
-        "total_bytes_processed": getattr(query_job, "total_bytes_processed", None),
-        "total_bytes_billed": getattr(query_job, "total_bytes_billed", None),
-        "slot_millis": getattr(query_job, "slot_millis", None),
-        "cache_hit": getattr(query_job, "cache_hit", None),
+        "bq_duration_seconds": bq_duration_sec,
+        "total_bytes_processed": total_bytes_processed,
+        "total_bytes_billed": total_bytes_billed,
+        "slot_millis": slot_millis,
+        "cache_hit": cache_hit,
     }
 
 

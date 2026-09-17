@@ -71,6 +71,7 @@ class ExecutionLog(LogBase):
     node_start_time = Column(String(32), nullable=False)  # ISO timestamp
     node_end_time = Column(String(32), nullable=False)  # ISO timestamp
     duration_seconds = Column(Float, nullable=False, default=0.0)
+    bq_duration_seconds = Column(Float, nullable=True)
     report_name = Column(String(128), nullable=False, index=True)
     flow_name = Column(String(128), nullable=False, index=True)
     node_type = Column(String(32), nullable=False)  # "query" or "import_csv"

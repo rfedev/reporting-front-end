@@ -219,6 +219,13 @@ def run_bigquery_script(
 
     exported_path_str = ", ".join(exported_paths) if exported_paths else None
 
+    # BigQuery Execution Telemetry
+    job_started_iso = query_job.started.isoformat() if getattr(query_job, "started", None) else None
+    job_ended_iso = query_job.ended.isoformat() if getattr(query_job, "ended", None) else None
+    duration_sec = 0.0
+    if getattr(query_job, "started", None) and getattr(query_job, "ended", None):
+        duration_sec = (query_job.ended - query_job.started).total_seconds()
+
     return {
         "query_name": query_name,
         "is_export": should_export,
@@ -230,6 +237,14 @@ def run_bigquery_script(
         "row_count": total_row_count if should_export else None,
         "status": "SUCCESS",
         "project_id": project_id,
+        "submitted_query": substituted_sql,
+        "job_started": job_started_iso,
+        "job_ended": job_ended_iso,
+        "duration_seconds": duration_sec,
+        "total_bytes_processed": getattr(query_job, "total_bytes_processed", None),
+        "total_bytes_billed": getattr(query_job, "total_bytes_billed", None),
+        "slot_millis": getattr(query_job, "slot_millis", None),
+        "cache_hit": getattr(query_job, "cache_hit", None),
     }
 
 
@@ -361,11 +376,23 @@ def run_bigquery_import_file(
     except Exception as e:
         logger.debug(f"Could not fetch table num_rows: {e}")
 
+    job_started_iso = job.started.isoformat() if getattr(job, "started", None) else None
+    job_ended_iso = job.ended.isoformat() if getattr(job, "ended", None) else None
+    duration_sec = 0.0
+    if getattr(job, "started", None) and getattr(job, "ended", None):
+        duration_sec = (job.ended - job.started).total_seconds()
+
     return {
         "status": "SUCCESS",
         "destination_table": clean_dest,
         "row_count": row_count,
         "project_id": project_id,
+        "file_path": str(file_p),
+        "job_started": job_started_iso,
+        "job_ended": job_ended_iso,
+        "duration_seconds": duration_sec,
+        "total_bytes_processed": getattr(job, "total_bytes_processed", None),
+        "total_bytes_billed": getattr(job, "total_bytes_billed", None),
     }
 
 

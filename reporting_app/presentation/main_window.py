@@ -756,6 +756,13 @@ class MainWindow(QMainWindow):
             self.status_bar.showMessage(f"Running '{query_name}' in BigQuery...")
             QApplication.processEvents()
 
+            import uuid
+            from datetime import datetime, timezone
+            run_id = str(uuid.uuid4())
+            start_ts = datetime.now(timezone.utc).isoformat()
+            t0 = datetime.now(timezone.utc)
+            repo = self.controller.repo
+
             try:
                 res = run_bigquery_script(
                     sql_script_path=qinfo.file_path,
@@ -781,10 +788,47 @@ class MainWindow(QMainWindow):
                 if not msgs:
                     msgs.append("Query executed in BigQuery successfully.")
 
+                if repo:
+                    t1 = datetime.now(timezone.utc)
+                    repo.record_execution_log({
+                        "run_id": run_id,
+                        "flow_start_time": start_ts,
+                        "node_start_time": start_ts,
+                        "node_end_time": res.get("job_ended") or t1.isoformat(),
+                        "duration_seconds": res.get("duration_seconds") or (t1 - t0).total_seconds(),
+                        "report_name": active_report.name,
+                        "flow_name": "Standalone",
+                        "node_type": "query",
+                        "node_name": query_name,
+                        "status": "SUCCESS",
+                        "submitted_query": res.get("submitted_query"),
+                        "output_rows": res.get("row_count"),
+                        "total_bytes_processed": res.get("total_bytes_processed"),
+                        "total_bytes_billed": res.get("total_bytes_billed"),
+                        "slot_millis": res.get("slot_millis"),
+                        "cache_hit": res.get("cache_hit"),
+                        "export_details_json": res.get("export_details", []),
+                    })
+
                 msg = f"Query '{query_name}' completed successfully!\n\n" + "\n\n".join(msgs)
                 self.status_bar.showMessage(f"Query '{query_name}' completed.", 5000)
                 QMessageBox.information(self, "Query Completed", msg)
             except Exception as e:
+                if repo:
+                    t1 = datetime.now(timezone.utc)
+                    repo.record_execution_log({
+                        "run_id": run_id,
+                        "flow_start_time": start_ts,
+                        "node_start_time": start_ts,
+                        "node_end_time": t1.isoformat(),
+                        "duration_seconds": (t1 - t0).total_seconds(),
+                        "report_name": active_report.name,
+                        "flow_name": "Standalone",
+                        "node_type": "query",
+                        "node_name": query_name,
+                        "status": "FAILED",
+                        "error_message": str(e),
+                    })
                 self.status_bar.showMessage(f"Query '{query_name}' failed.", 5000)
                 QMessageBox.critical(
                     self,

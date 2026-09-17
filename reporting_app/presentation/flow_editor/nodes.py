@@ -87,6 +87,66 @@ class CustomNodeTextItem(QtWidgets.QGraphicsTextItem):
         return self.parentItem()
 
 
+class CircularInfoButtonItem(QtWidgets.QGraphicsItem):
+    """Circular info (ℹ) button with hover highlight and crisp styling."""
+
+    def __init__(self, parent=None, callback=None):
+        super().__init__(parent)
+        self.callback = callback
+        self._hovered = False
+        self.setAcceptHoverEvents(True)
+        self.setCursor(QtCore.Qt.PointingHandCursor)
+        self.setToolTip("View Execution Log")
+
+    def boundingRect(self):
+        return QtCore.QRectF(-9, -9, 18, 18)
+
+    def paint(self, painter, option, widget):
+        painter.save()
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+
+        rect = QtCore.QRectF(-8, -8, 16, 16)
+        if self._hovered:
+            bg_brush = QtGui.QBrush(QtGui.QColor(43, 120, 228, 230))
+            border_pen = QtGui.QPen(QtGui.QColor(255, 255, 255, 220), 1.2)
+            text_color = QtGui.QColor(255, 255, 255)
+        else:
+            bg_brush = QtGui.QBrush(QtGui.QColor(30, 45, 70, 180))
+            border_pen = QtGui.QPen(QtGui.QColor(140, 180, 230, 180), 1.0)
+            text_color = QtGui.QColor(180, 215, 255)
+
+        painter.setBrush(bg_brush)
+        painter.setPen(border_pen)
+        painter.drawEllipse(rect)
+
+        # Draw "i" in center
+        font = QtGui.QFont("serif", 9, QtGui.QFont.Bold)
+        font.setItalic(True)
+        painter.setFont(font)
+        painter.setPen(text_color)
+        painter.drawText(rect, QtCore.Qt.AlignCenter, "i")
+
+        painter.restore()
+
+    def hoverEnterEvent(self, event):
+        self._hovered = True
+        self.update()
+        super().hoverEnterEvent(event)
+
+    def hoverLeaveEvent(self, event):
+        self._hovered = False
+        self.update()
+        super().hoverLeaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == QtCore.Qt.LeftButton:
+            if callable(self.callback):
+                self.callback()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
 class TableBoxItem(NodeItem):
 
     """Custom graphics item for TableBoxNode with arrow expand/collapse and native text rendering."""
@@ -210,6 +270,15 @@ class QueryNodeItem(NodeItem):
                 pass
         self._text_item = CustomNodeTextItem(self.name, self)
 
+        # Circular Info (i) button in top right of node header
+        self._info_btn = CircularInfoButtonItem(
+            parent=self,
+            callback=self._trigger_info_clicked,
+        )
+
+    def _trigger_info_clicked(self):
+        if self.viewer() and hasattr(self.viewer(), "node_info_clicked"):
+            self.viewer().node_info_clicked.emit(self.name)
 
     def paint(self, painter, option, widget):
         if not self.viewer():
@@ -219,6 +288,13 @@ class QueryNodeItem(NodeItem):
     def set_parameters(self, params: List[str]):
         self.parameter_list = list(params)
         self.draw_node()
+
+    def _align_label_horizontal(self, h_offset, v_offset):
+        super()._align_label_horizontal(h_offset, v_offset)
+        rect = self.boundingRect()
+        y = rect.y() + v_offset + 9
+        # Align circular (i) button in top-right corner
+        self._info_btn.setPos(rect.right() - 15, y)
 
     def _calc_size_horizontal(self):
         w, h = super()._calc_size_horizontal()
@@ -327,10 +403,27 @@ class ImportCsvItem(NodeItem):
                 pass
         self._text_item = CustomNodeTextItem(self.name, self)
 
+        # Circular Info (i) button in top right of node header
+        self._info_btn = CircularInfoButtonItem(
+            parent=self,
+            callback=self._trigger_info_clicked,
+        )
+
+    def _trigger_info_clicked(self):
+        if self.viewer() and hasattr(self.viewer(), "node_info_clicked"):
+            self.viewer().node_info_clicked.emit(self.name)
+
     def paint(self, painter, option, widget):
         if not self.viewer():
             return
         super().paint(painter, option, widget)
+
+    def _align_label_horizontal(self, h_offset, v_offset):
+        super()._align_label_horizontal(h_offset, v_offset)
+        rect = self.boundingRect()
+        y = rect.y() + v_offset + 9
+        # Align circular (i) button in top-right corner
+        self._info_btn.setPos(rect.right() - 15, y)
 
 
 class ImportCsvNode(BaseNode):

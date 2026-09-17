@@ -125,6 +125,90 @@ class TestControllers(unittest.TestCase):
             self.assertIsNotNone(new_rep)
             self.assertTrue(new_rep.folder_path.is_relative_to(root2))
 
+    def test_execution_log_persistence_and_formatting(self):
+        repo = self.controller.repo
+        self.assertIsNotNone(repo)
+
+        # 1. Record a query execution log
+        log_data = {
+            "run_id": "run-abc-123",
+            "flow_start_time": "2026-09-17T08:30:00.000000+00:00",
+            "node_start_time": "2026-09-17T08:30:01.000000+00:00",
+            "node_end_time": "2026-09-17T08:30:04.500000+00:00",
+            "duration_seconds": 3.5,
+            "report_name": "report_01",
+            "flow_name": "flow1",
+            "node_type": "query",
+            "node_name": "q1",
+            "status": "SUCCESS",
+            "submitted_query": "SELECT 1 FROM `t1`;",
+            "output_rows": 1250,
+            "total_bytes_processed": 1024 * 1024 * 50,  # 50 MB
+            "total_bytes_billed": 1024 * 1024 * 60,
+            "slot_millis": 2400,
+            "cache_hit": False,
+            "export_details_json": [{"filename": "q1.csv", "row_count": 1250}],
+        }
+        repo.record_execution_log(log_data)
+
+        # 2. Verify retrieval by date
+        dates = repo.get_distinct_log_dates(report_name="report_01")
+        self.assertIn("2026-09-17", dates)
+
+        # 3. Verify retrieval of run sessions
+        sessions = repo.get_run_sessions(date_str="2026-09-17", report_name="report_01")
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0]["run_id"], "run-abc-123")
+        self.assertEqual(sessions[0]["status"], "SUCCESS")
+        self.assertEqual(len(sessions[0]["nodes"]), 1)
+
+        # 4. Verify markdown formatting
+        from reporting_app.presentation.flow_editor.schema_dialog import (
+            format_single_node_log,
+            format_run_session_logs,
+            format_bytes,
+            format_duration,
+        )
+        self.assertEqual(format_bytes(1024 * 1024 * 50), "50.00 MB")
+        self.assertEqual(format_duration(3.5), "3.50s")
+
+        node_entry = sessions[0]["nodes"][0]
+        md_node = format_single_node_log(node_entry)
+        self.assertIn("## ✅ Query: `q1`", md_node)
+        self.assertIn("50.00 MB", md_node)
+        self.assertIn("1,250 rows", md_node)
+        self.assertIn("SELECT 1 FROM `t1`;", md_node)
+
+        md_session = format_run_session_logs(sessions[0]["nodes"])
+        self.assertIn("Summary Overview", md_session)
+        self.assertIn("✅ Success", md_session)
+
+        # 5. Verify LogViewerDialog instantiates without NameError
+        from reporting_app.presentation.settings_dialog import LogViewerDialog
+        dlg = LogViewerDialog(
+            repo=repo,
+            report_name="report_01",
+            flow_name="flow1",
+            filter_node="q1",
+        )
+        self.assertIsNotNone(dlg)
+        self.assertEqual(dlg.node_combo.currentText(), "q1")
+        self.assertGreater(dlg.run_tree.topLevelItemCount(), 0)
+        dlg.close()
+
+    def test_on_file_changed_signals(self):
+        self.controller.select_report("report_01")
+        emitted_reports = []
+        self.controller.active_report_changed.connect(lambda r: emitted_reports.append(r))
+
+        # Test changing a query file triggers active_report_changed
+        q1_file = self.report_dir / "q1.sql"
+        q1_file.write_text("SELECT 100 FROM `t1`;", encoding="utf-8")
+        self.controller._on_file_changed(q1_file)
+
+        self.assertEqual(len(emitted_reports), 1)
+        self.assertEqual(emitted_reports[0].name, "report_01")
+
 
 if __name__ == "__main__":
     unittest.main()

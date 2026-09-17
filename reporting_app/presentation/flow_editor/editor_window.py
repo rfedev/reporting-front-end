@@ -629,6 +629,15 @@ class ProcessFlowEditorWindow(QMainWindow):
         except Exception as e:
             logger.debug(f"Could not connect viewer node_name_changed: {e}")
 
+        # Wire node (i) info button click to open log viewer pre-filtered to that node
+        viewer = self.graph.viewer()
+        if not hasattr(viewer, "node_info_clicked"):
+            class _ViewerSignalEmitter(QtCore.QObject):
+                node_info_clicked = QtCore.Signal(str)
+            viewer._info_emitter = _ViewerSignalEmitter()
+            viewer.node_info_clicked = viewer._info_emitter.node_info_clicked
+        viewer.node_info_clicked.connect(lambda node_name: self._on_open_logs(filter_node=node_name))
+
     def _setup_canvas_pan_and_select(self) -> None:
         """Configure left-click empty space panning, smooth resize, and Ctrl+drag multi-select on NodeViewer."""
         viewer = self.graph.viewer()
@@ -1069,6 +1078,13 @@ class ProcessFlowEditorWindow(QMainWindow):
         import_files_btn.setToolTip("Add an Import Files node to load CSV or Excel files into BigQuery tables")
         import_files_btn.clicked.connect(self._on_add_import_csv)
         toolbar.addWidget(import_files_btn)
+
+        toolbar.addSeparator()
+
+        self.logs_btn = QPushButton("📜 Logs")
+        self.logs_btn.setToolTip("View Execution Logs for this Process Flow")
+        self.logs_btn.clicked.connect(lambda: self._on_open_logs())
+        toolbar.addWidget(self.logs_btn)
 
         toolbar.addSeparator()
 
@@ -2421,6 +2437,13 @@ class ProcessFlowEditorWindow(QMainWindow):
         outputs_dir.mkdir(parents=True, exist_ok=True)
         csv_map = self.flow_controller.get_csv_filenames()
 
+        import uuid
+        from datetime import datetime, timezone
+        run_id = str(uuid.uuid4())
+        flow_start_time = datetime.now(timezone.utc).isoformat()
+        flow_name = self.flow_controller.flow_name or "Process Flow"
+        repo = self.app_controller.repo if self.app_controller else None
+
         results_log = []
         errors = []
 
@@ -2432,6 +2455,8 @@ class ProcessFlowEditorWindow(QMainWindow):
             ntype = item.get("type")
             nid = item.get("id")
             nname = item.get("name")
+            step_start_time = datetime.now(timezone.utc).isoformat()
+            t0 = datetime.now(timezone.utc)
 
             if ntype == "import_csv":
                 # Find matching ImportCsvNode
@@ -2440,6 +2465,7 @@ class ProcessFlowEditorWindow(QMainWindow):
                     continue
 
                 imp_items = inode.get_imports()
+                imp_records = []
                 for imp in imp_items:
                     f_path = (imp.get("file_path") or imp.get("csv_path") or "").strip()
                     d_table = imp.get("output_table", "").strip()
@@ -2472,14 +2498,57 @@ class ProcessFlowEditorWindow(QMainWindow):
                         row_cnt = imp_res.get("row_count")
                         cnt_str = f"{row_cnt:,} rows" if row_cnt is not None else "completed"
                         results_log.append(f"[{idx}/{total_steps}] 📥 Imported '{f_path}' into '{d_table}' ({cnt_str})")
+                        imp_records.append({
+                            "file_path": str(f_path),
+                            "destination_table": d_table,
+                            "row_count": row_cnt,
+                            "has_headers": headers,
+                            "sheet_name": sheet_name,
+                            "schema_mode": schema_mode,
+                        })
                     except Exception as e:
                         failed_node_name = nname or "Import Files"
                         err_msg = f"Import failed for {d_table}: {e}"
                         errors.append(err_msg)
                         results_log.append(f"[{idx}/{total_steps}] ❌ {err_msg}")
+                        if repo:
+                            t1 = datetime.now(timezone.utc)
+                            repo.record_execution_log({
+                                "run_id": run_id,
+                                "flow_start_time": flow_start_time,
+                                "node_start_time": step_start_time,
+                                "node_end_time": t1.isoformat(),
+                                "duration_seconds": (t1 - t0).total_seconds(),
+                                "report_name": self.report.name,
+                                "flow_name": flow_name,
+                                "node_type": "import_csv",
+                                "node_name": nname or "Import Files",
+                                "status": "FAILED",
+                                "error_message": err_msg,
+                                "import_details_json": imp_records,
+                            })
                         break
+
                 if errors:
                     break
+
+                if repo and imp_records:
+                    t1 = datetime.now(timezone.utc)
+                    total_rows = sum(r.get("row_count") or 0 for r in imp_records)
+                    repo.record_execution_log({
+                        "run_id": run_id,
+                        "flow_start_time": flow_start_time,
+                        "node_start_time": step_start_time,
+                        "node_end_time": t1.isoformat(),
+                        "duration_seconds": (t1 - t0).total_seconds(),
+                        "report_name": self.report.name,
+                        "flow_name": flow_name,
+                        "node_type": "import_csv",
+                        "node_name": nname or "Import Files",
+                        "status": "SUCCESS",
+                        "output_rows": total_rows,
+                        "import_details_json": imp_records,
+                    })
 
             elif ntype == "query":
                 qname = nname
@@ -2489,6 +2558,21 @@ class ProcessFlowEditorWindow(QMainWindow):
                     err = f"Query '{qname}' SQL file not found."
                     errors.append(err)
                     results_log.append(f"[{idx}/{total_steps}] ❌ {qname}: {err}")
+                    if repo:
+                        t1 = datetime.now(timezone.utc)
+                        repo.record_execution_log({
+                            "run_id": run_id,
+                            "flow_start_time": flow_start_time,
+                            "node_start_time": step_start_time,
+                            "node_end_time": t1.isoformat(),
+                            "duration_seconds": (t1 - t0).total_seconds(),
+                            "report_name": self.report.name,
+                            "flow_name": flow_name,
+                            "node_type": "query",
+                            "node_name": qname,
+                            "status": "FAILED",
+                            "error_message": err,
+                        })
                     break
 
                 self.status_bar.showMessage(f"[{idx}/{total_steps}] Running {qname}...")
@@ -2516,11 +2600,48 @@ class ProcessFlowEditorWindow(QMainWindow):
                             results_log.append(f"[{idx}/{total_steps}] ✅ {qname}: Exported {res.get('row_count', 0):,} rows to {res.get('output_file')}")
                     else:
                         results_log.append(f"[{idx}/{total_steps}] ✅ {qname}: Executed table creation/update in BigQuery")
+
+                    if repo:
+                        t1 = datetime.now(timezone.utc)
+                        repo.record_execution_log({
+                            "run_id": run_id,
+                            "flow_start_time": flow_start_time,
+                            "node_start_time": step_start_time,
+                            "node_end_time": res.get("job_ended") or t1.isoformat(),
+                            "duration_seconds": res.get("duration_seconds") or (t1 - t0).total_seconds(),
+                            "report_name": self.report.name,
+                            "flow_name": flow_name,
+                            "node_type": "query",
+                            "node_name": qname,
+                            "status": "SUCCESS",
+                            "submitted_query": res.get("submitted_query"),
+                            "output_rows": res.get("row_count"),
+                            "total_bytes_processed": res.get("total_bytes_processed"),
+                            "total_bytes_billed": res.get("total_bytes_billed"),
+                            "slot_millis": res.get("slot_millis"),
+                            "cache_hit": res.get("cache_hit"),
+                            "export_details_json": res.get("export_details", []),
+                        })
                 except Exception as e:
                     failed_node_name = qname
                     err_msg = str(e)
                     errors.append(f"{qname}: {err_msg}")
                     results_log.append(f"[{idx}/{total_steps}] ❌ {qname}: Failed ({err_msg})")
+                    if repo:
+                        t1 = datetime.now(timezone.utc)
+                        repo.record_execution_log({
+                            "run_id": run_id,
+                            "flow_start_time": flow_start_time,
+                            "node_start_time": step_start_time,
+                            "node_end_time": t1.isoformat(),
+                            "duration_seconds": (t1 - t0).total_seconds(),
+                            "report_name": self.report.name,
+                            "flow_name": flow_name,
+                            "node_type": "query",
+                            "node_name": qname,
+                            "status": "FAILED",
+                            "error_message": err_msg,
+                        })
                     break
 
         summary_text = "\n".join(results_log)
@@ -2539,6 +2660,22 @@ class ProcessFlowEditorWindow(QMainWindow):
                 f"{context_title} Completed",
                 f"{context_title} completed successfully!\n\n{summary_text}",
             )
+
+    def _on_open_logs(self, filter_node: Optional[str] = None) -> None:
+        """Open the rich execution log viewer window."""
+        if not self.app_controller or not self.app_controller.repo:
+            QMessageBox.warning(self, "Logs Unavailable", "Database repository is not available.")
+            return
+
+        from reporting_app.presentation.settings_dialog import LogViewerDialog
+        dlg = LogViewerDialog(
+            repo=self.app_controller.repo,
+            report_name=self.report.name,
+            flow_name=self.flow_controller.flow_name,
+            filter_node=filter_node,
+            parent=self,
+        )
+        dlg.exec()
 
     # Left panel query management callbacks
     def _on_query_added(self, query_name: str) -> None:

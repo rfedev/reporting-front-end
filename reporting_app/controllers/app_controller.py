@@ -241,7 +241,7 @@ class AppController(QObject):
                             q.ensure_parsed(force=True)
                             self.repo.record_query_tables(report.name, q.name, q.input_tables, q.output_tables)
                             if self.active_report and self.active_report.name == report.name:
-                                self.report_updated.emit(self.active_report)
+                                self.active_report_changed.emit(self.active_report)
                         return
 
         elif suffix == ".json":
@@ -252,7 +252,7 @@ class AppController(QObject):
                         report.process_flows = flows
                         if self.active_report and self.active_report.name == report.name:
                             self.process_flows_updated.emit([pf.name for pf in flows])
-                            self.report_updated.emit(self.active_report)
+                            self.active_report_changed.emit(self.active_report)
                         return
                 except Exception:
                     pass

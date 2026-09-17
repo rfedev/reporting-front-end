@@ -58,3 +58,30 @@ class CachedQueryMeta(Base):
     __table_args__ = (
         UniqueConstraint("report_name", "query_name", name="uq_report_query"),
     )
+
+
+class ExecutionLog(Base):
+    """Log record for query and file import executions."""
+
+    __tablename__ = "execution_logs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    run_id = Column(String(64), nullable=False, index=True)
+    flow_start_time = Column(String(32), nullable=False, index=True)  # ISO timestamp
+    node_start_time = Column(String(32), nullable=False)  # ISO timestamp
+    node_end_time = Column(String(32), nullable=False)  # ISO timestamp
+    duration_seconds = Column(Float, nullable=False, default=0.0)
+    report_name = Column(String(128), nullable=False, index=True)
+    flow_name = Column(String(128), nullable=False, index=True)
+    node_type = Column(String(32), nullable=False)  # "query" or "import_csv"
+    node_name = Column(String(128), nullable=False, index=True)
+    status = Column(String(32), nullable=False)  # "SUCCESS" or "FAILED"
+    error_message = Column(Text, nullable=True)
+    submitted_query = Column(Text, nullable=True)
+    output_rows = Column(Integer, nullable=True)
+    total_bytes_processed = Column(Integer, nullable=True)
+    total_bytes_billed = Column(Integer, nullable=True)
+    slot_millis = Column(Integer, nullable=True)
+    cache_hit = Column(Integer, nullable=True)  # 0 or 1
+    export_details_json = Column(Text, nullable=True, default="[]")
+    import_details_json = Column(Text, nullable=True, default="[]")

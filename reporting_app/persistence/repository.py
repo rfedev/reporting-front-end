@@ -303,9 +303,12 @@ class Repository:
         for r in runs:
             rid = r.run_id
             if rid not in sessions_dict:
+                start_ts = r.flow_start_time or ""
+                d_str = start_ts[:10] if len(start_ts) >= 10 else "Unknown Date"
                 sessions_dict[rid] = {
                     "run_id": rid,
-                    "flow_start_time": r.flow_start_time,
+                    "date": d_str,
+                    "flow_start_time": start_ts,
                     "flow_name": r.flow_name,
                     "status": "SUCCESS",
                     "nodes": [],

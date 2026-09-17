@@ -2599,7 +2599,9 @@ class ProcessFlowEditorWindow(QMainWindow):
                         else:
                             results_log.append(f"[{idx}/{total_steps}] ✅ {qname}: Exported {res.get('row_count', 0):,} rows to {res.get('output_file')}")
                     else:
-                        results_log.append(f"[{idx}/{total_steps}] ✅ {qname}: Executed table creation/update in BigQuery")
+                        tbl_rows = res.get("row_count")
+                        tbl_rows_str = f" ({tbl_rows:,} rows)" if tbl_rows is not None else ""
+                        results_log.append(f"[{idx}/{total_steps}] ✅ {qname}: Executed table creation/update in BigQuery{tbl_rows_str}")
 
                     if repo:
                         t1 = datetime.now(timezone.utc)
@@ -2667,7 +2669,7 @@ class ProcessFlowEditorWindow(QMainWindow):
             QMessageBox.warning(self, "Logs Unavailable", "Database repository is not available.")
             return
 
-        from reporting_app.presentation.settings_dialog import LogViewerDialog
+        from reporting_app.presentation.log_viewer_dialog import LogViewerDialog
         dlg = LogViewerDialog(
             repo=self.app_controller.repo,
             report_name=self.report.name,

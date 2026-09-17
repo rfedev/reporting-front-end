@@ -163,9 +163,10 @@ class TestControllers(unittest.TestCase):
         self.assertEqual(len(sessions[0]["nodes"]), 1)
 
         # 4. Verify markdown formatting
-        from reporting_app.presentation.flow_editor.schema_dialog import (
+        from reporting_app.presentation.log_formatter import (
             format_single_node_log,
             format_run_session_logs,
+            format_day_summary_logs,
             format_bytes,
             format_duration,
         )
@@ -173,18 +174,29 @@ class TestControllers(unittest.TestCase):
         self.assertEqual(format_duration(3.5), "3.50s")
 
         node_entry = sessions[0]["nodes"][0]
-        md_node = format_single_node_log(node_entry)
+        md_node = format_single_node_log(node_entry, show_query=True)
         self.assertIn("## ✅ Query: `q1`", md_node)
         self.assertIn("50.00 MB", md_node)
         self.assertIn("1,250 rows", md_node)
+        self.assertIn("### Bigquery SQL", md_node)
         self.assertIn("SELECT 1 FROM `t1`;", md_node)
+        self.assertNotIn("Submitted SQL Query", md_node)
 
-        md_session = format_run_session_logs(sessions[0]["nodes"])
+        # Run level session formatting without query
+        md_session = format_run_session_logs(sessions[0]["nodes"], show_query=False)
         self.assertIn("Summary Overview", md_session)
         self.assertIn("✅ Success", md_session)
+        self.assertNotIn("Bigquery SQL", md_session)
+        self.assertNotIn("Submitted SQL Query", md_session)
 
-        # 5. Verify LogViewerDialog instantiates without NameError
-        from reporting_app.presentation.settings_dialog import LogViewerDialog
+        # Day level summary
+        md_day = format_day_summary_logs("2026-09-17", sessions)
+        self.assertIn("Daily Execution Summary", md_day)
+        self.assertIn("Day Totals", md_day)
+        self.assertIn("Process Flow Runs Summary", md_day)
+
+        # 5. Verify LogViewerDialog instantiates and populates tree with child nodes
+        from reporting_app.presentation.log_viewer_dialog import LogViewerDialog
         dlg = LogViewerDialog(
             repo=repo,
             report_name="report_01",
@@ -194,6 +206,15 @@ class TestControllers(unittest.TestCase):
         self.assertIsNotNone(dlg)
         self.assertEqual(dlg.node_combo.currentText(), "q1")
         self.assertGreater(dlg.run_tree.topLevelItemCount(), 0)
+
+        # Verify tree hierarchy: date -> run -> node
+        date_item = dlg.run_tree.topLevelItem(0)
+        self.assertGreater(date_item.childCount(), 0)
+        run_item = date_item.child(0)
+        self.assertGreater(run_item.childCount(), 0)
+        node_item = run_item.child(0)
+        self.assertIn("q1", node_item.text(0))
+
         dlg.close()
 
     def test_on_file_changed_signals(self):

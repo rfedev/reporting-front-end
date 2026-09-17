@@ -94,6 +94,41 @@ class TestBigQueryRun(unittest.TestCase):
             self.assertIn("Alice", csv_content)
             self.assertIn("Bob", csv_content)
 
+    def test_run_bigquery_script_auto_stream_over_threshold(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            sql_file = temp_path / "large_query.sql"
+            sql_file.write_text("SELECT id FROM `sample`;", encoding="utf-8")
+
+            outputs_dir = temp_path / "outputs"
+
+            # Mock row iterator with total_rows > 500_000 and page iteration
+            mock_results = MagicMock()
+            mock_results.total_rows = 600_000
+            # Pages with mock row objects
+            row1 = {"id": 1}
+            row2 = {"id": 2}
+            mock_results.pages = [[row1, row2]]
+
+            mock_query_job = MagicMock()
+            mock_query_job.result.return_value = mock_results
+
+            mock_client = MagicMock()
+            mock_client.query.return_value = mock_query_job
+
+            with patch("reporting_app.core.bigquery_run.bigquery.Client", return_value=mock_client):
+                result = run_bigquery_script(
+                    sql_script_path=sql_file,
+                    report_name="test_report",
+                    outputs_dir=outputs_dir,
+                    stream_to_csv=False,  # auto-streaming should kick in
+                )
+
+            self.assertTrue(result["is_export"])
+            self.assertEqual(result["row_count"], 2)
+            # Ensure to_dataframe was NOT called because it auto-streamed directly
+            mock_results.to_dataframe.assert_not_called()
+
     def test_run_bigquery_script_create_table_no_csv(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -118,6 +153,31 @@ class TestBigQueryRun(unittest.TestCase):
             self.assertIsNone(result["output_file"])
             # Ensure no CSV was created
             self.assertFalse((outputs_dir / "create_table.csv").exists())
+
+    def test_run_bigquery_script_create_table_row_count(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            sql_file = temp_path / "create_table.sql"
+            sql_file.write_text("CREATE TABLE `proj.dataset.sample` AS SELECT 1;", encoding="utf-8")
+
+            outputs_dir = temp_path / "outputs"
+
+            mock_query_job = MagicMock()
+            mock_query_job.num_dml_affected_rows = 42
+            mock_client = MagicMock()
+            mock_client.query.return_value = mock_query_job
+
+            with patch("reporting_app.core.bigquery_run.bigquery.Client", return_value=mock_client):
+                result = run_bigquery_script(
+                    sql_script_path=sql_file,
+                    report_name="test_report",
+                    outputs_dir=outputs_dir,
+                    parameters={},
+                )
+
+            self.assertFalse(result["is_export"])
+            self.assertTrue(result["has_output_tables"])
+            self.assertEqual(result["row_count"], 42)
 
     def test_run_bigquery_script_auto_extracts_project_id(self):
         with tempfile.TemporaryDirectory() as temp_dir:

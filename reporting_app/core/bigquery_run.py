@@ -148,7 +148,17 @@ def run_bigquery_script(
 
     def export_row_iterator_to_file(row_iter: Any, out_file: Path) -> int:
         written_count = 0
-        if stream_to_csv:
+        total_rows_meta = getattr(row_iter, "total_rows", None)
+        auto_stream = (total_rows_meta is not None and total_rows_meta > 500_000)
+        use_stream = stream_to_csv or auto_stream
+
+        if auto_stream and not stream_to_csv:
+            logger.info(
+                f"Auto-enabling stream_to_csv for {out_file.name}: "
+                f"result set has {total_rows_meta:,} rows (> 500,000 threshold)."
+            )
+
+        if use_stream:
             with open(out_file, "w", newline="", encoding="utf-8") as csvfile:
                 writer = csv.writer(csvfile)
                 header_written = False
@@ -215,7 +225,30 @@ def run_bigquery_script(
             export_details.append({"filename": dest_file.name, "path": str(dest_file), "row_count": cnt})
             logger.info(f"Exported {cnt} rows to {dest_file}")
     else:
-        logger.info(f"Query {query_name} completed table creation/update in BigQuery.")
+        # Determine rows created/added to destination or created table(s)
+        dml_rows = getattr(query_job, "num_dml_affected_rows", None)
+        if dml_rows is not None and dml_rows >= 0:
+            total_row_count = dml_rows
+        else:
+            dest_ref = getattr(query_job, "destination", None)
+            if dest_ref:
+                try:
+                    table_obj = client.get_table(dest_ref)
+                    if getattr(table_obj, "num_rows", None) is not None:
+                        total_row_count = table_obj.num_rows
+                except Exception as e:
+                    logger.debug(f"Failed to fetch num_rows from job destination {dest_ref}: {e}")
+
+            if total_row_count == 0 and output_tables:
+                for tbl in output_tables:
+                    try:
+                        table_obj = client.get_table(tbl)
+                        if getattr(table_obj, "num_rows", None) is not None:
+                            total_row_count += table_obj.num_rows
+                    except Exception as e:
+                        logger.debug(f"Failed to fetch num_rows from table {tbl}: {e}")
+
+        logger.info(f"Query {query_name} completed table creation/update in BigQuery ({total_row_count} rows).")
 
     exported_path_str = ", ".join(exported_paths) if exported_paths else None
 
@@ -234,7 +267,7 @@ def run_bigquery_script(
         "output_file": exported_path_str,
         "output_files": exported_paths,
         "export_details": export_details,
-        "row_count": total_row_count if should_export else None,
+        "row_count": total_row_count if (should_export or has_output_tables or total_row_count > 0) else None,
         "status": "SUCCESS",
         "project_id": project_id,
         "submitted_query": substituted_sql,

@@ -773,7 +773,9 @@ class MainWindow(QMainWindow):
                 msgs = []
                 if res.get("has_output_tables"):
                     tbls = ", ".join(res.get("output_tables", []))
-                    msgs.append(f"Created/updated table(s):\n{tbls}")
+                    rc = res.get("row_count")
+                    rc_str = f" ({rc:,} rows)" if rc is not None else ""
+                    msgs.append(f"Created/updated table(s){rc_str}:\n{tbls}")
                 if res.get("is_export"):
                     details = res.get("export_details", [])
                     if details:

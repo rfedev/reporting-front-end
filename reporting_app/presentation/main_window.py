@@ -185,7 +185,7 @@ class MainWindow(QMainWindow):
         central_widget = QWidget(self)
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
-        main_layout.setSpacing(16)
+        main_layout.setSpacing(10)
         main_layout.setContentsMargins(20, 20, 20, 20)
 
         BTN_SIZE = 32
@@ -200,7 +200,12 @@ class MainWindow(QMainWindow):
         self.reports_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         self.reports_combo.currentTextChanged.connect(self._on_report_selected)
 
-        self.rename_report_btn = QPushButton("✏")
+        self.open_folder_btn = QPushButton("📁")
+        self.open_folder_btn.setToolTip("Open Report Folder in File Browser")
+        self.open_folder_btn.setFixedSize(BTN_SIZE, BTN_SIZE)
+        self.open_folder_btn.clicked.connect(self._on_open_report_folder)
+
+        self.rename_report_btn = QPushButton("✏️")
         self.rename_report_btn.setToolTip("Rename Report")
         self.rename_report_btn.setFixedSize(BTN_SIZE, BTN_SIZE)
         self.rename_report_btn.clicked.connect(self._on_rename_report)
@@ -210,11 +215,6 @@ class MainWindow(QMainWindow):
         self.add_report_btn.setFixedSize(BTN_SIZE, BTN_SIZE)
         self.add_report_btn.clicked.connect(self._on_add_report)
 
-        self.open_folder_btn = QPushButton("📁")
-        self.open_folder_btn.setToolTip("Open Report Folder in File Browser")
-        self.open_folder_btn.setFixedSize(BTN_SIZE, BTN_SIZE)
-        self.open_folder_btn.clicked.connect(self._on_open_report_folder)
-
         self.remove_report_btn = QPushButton("🗑")
         self.remove_report_btn.setToolTip("Remove Report")
         self.remove_report_btn.setFixedSize(BTN_SIZE, BTN_SIZE)
@@ -222,9 +222,9 @@ class MainWindow(QMainWindow):
 
         report_layout.addWidget(report_label)
         report_layout.addWidget(self.reports_combo, 1)
+        report_layout.addWidget(self.open_folder_btn)
         report_layout.addWidget(self.rename_report_btn)
         report_layout.addWidget(self.add_report_btn)
-        report_layout.addWidget(self.open_folder_btn)
         report_layout.addWidget(self.remove_report_btn)
         main_layout.addLayout(report_layout)
 
@@ -241,25 +241,20 @@ class MainWindow(QMainWindow):
         self.flows_combo = QComboBox(self)
         self.flows_combo.currentTextChanged.connect(self._on_flow_selected)
 
-        self.rename_flow_btn = QPushButton("🏷")
+        self.edit_flow_btn = QPushButton("📘 Open")
+        self.edit_flow_btn.setToolTip("Edit Process Flow")
+        self.edit_flow_btn.setFixedSize(80, BTN_SIZE)
+        self.edit_flow_btn.clicked.connect(self._on_edit_process_flow)
+
+        self.rename_flow_btn = QPushButton("✏️")
         self.rename_flow_btn.setToolTip("Rename Process Flow")
         self.rename_flow_btn.setFixedSize(BTN_SIZE, BTN_SIZE)
         self.rename_flow_btn.clicked.connect(self._on_rename_process_flow)
-
-        self.edit_flow_btn = QPushButton("✏")
-        self.edit_flow_btn.setToolTip("Edit Process Flow")
-        self.edit_flow_btn.setFixedSize(BTN_SIZE, BTN_SIZE)
-        self.edit_flow_btn.clicked.connect(self._on_edit_process_flow)
 
         self.add_flow_btn = QPushButton("➕")
         self.add_flow_btn.setToolTip("Add Process Flow")
         self.add_flow_btn.setFixedSize(BTN_SIZE, BTN_SIZE)
         self.add_flow_btn.clicked.connect(self._on_new_process_flow)
-
-        self.remove_flow_btn = QPushButton("🗑")
-        self.remove_flow_btn.setToolTip("Remove Process Flow")
-        self.remove_flow_btn.setFixedSize(BTN_SIZE, BTN_SIZE)
-        self.remove_flow_btn.clicked.connect(self._on_remove_process_flow)
 
         self.run_flow_btn = QPushButton("▶")
         self.run_flow_btn.setToolTip("Run Process Flow")
@@ -267,13 +262,19 @@ class MainWindow(QMainWindow):
         self.run_flow_btn.setStyleSheet("font-weight: bold; color: #2a82da;")
         self.run_flow_btn.clicked.connect(self._on_run_process_flow)
 
+        self.remove_flow_btn = QPushButton("🗑")
+        self.remove_flow_btn.setToolTip("Remove Process Flow")
+        self.remove_flow_btn.setFixedSize(BTN_SIZE, BTN_SIZE)
+        self.remove_flow_btn.clicked.connect(self._on_remove_process_flow)
+
         flow_row1.addWidget(flow_label)
         flow_row1.addWidget(self.flows_combo, 1)
-        flow_row1.addWidget(self.rename_flow_btn)
         flow_row1.addWidget(self.edit_flow_btn)
+        flow_row1.addWidget(self.rename_flow_btn)
         flow_row1.addWidget(self.add_flow_btn)
-        flow_row1.addWidget(self.remove_flow_btn)
         flow_row1.addWidget(self.run_flow_btn)
+        flow_row1.addWidget(self.remove_flow_btn)
+
         flows_layout.addLayout(flow_row1)
 
         main_layout.addWidget(self.flows_group)
@@ -291,20 +292,20 @@ class MainWindow(QMainWindow):
         self.queries_combo = QComboBox(self)
         self.queries_combo.currentTextChanged.connect(self._on_query_selected)
 
-        self.edit_query_btn = QPushButton("✏")
-        self.edit_query_btn.setToolTip("Edit Query (Open in Editor)")
-        self.edit_query_btn.setFixedSize(BTN_SIZE, BTN_SIZE)
+        self.edit_query_btn = QPushButton("📘 Open")
+        self.edit_query_btn.setToolTip("Edit Query")
+        self.edit_query_btn.setFixedSize(80, BTN_SIZE)
         self.edit_query_btn.clicked.connect(self._on_edit_query)
+
+        self.rename_query_btn = QPushButton("✏️")
+        self.rename_query_btn.setToolTip("Rename Query")
+        self.rename_query_btn.setFixedSize(BTN_SIZE, BTN_SIZE)
+        self.rename_query_btn.clicked.connect(self._on_rename_query)
 
         self.add_query_btn = QPushButton("➕")
         self.add_query_btn.setToolTip("Add Query")
         self.add_query_btn.setFixedSize(BTN_SIZE, BTN_SIZE)
         self.add_query_btn.clicked.connect(self._on_add_query)
-
-        self.remove_query_btn = QPushButton("🗑")
-        self.remove_query_btn.setToolTip("Remove Query")
-        self.remove_query_btn.setFixedSize(BTN_SIZE, BTN_SIZE)
-        self.remove_query_btn.clicked.connect(self._on_remove_query)
 
         self.run_query_btn = QPushButton("▶")
         self.run_query_btn.setToolTip("Run Query")
@@ -312,12 +313,18 @@ class MainWindow(QMainWindow):
         self.run_query_btn.setStyleSheet("font-weight: bold; color: #2a82da;")
         self.run_query_btn.clicked.connect(self._on_run_query)
 
+        self.remove_query_btn = QPushButton("🗑")
+        self.remove_query_btn.setToolTip("Remove Query")
+        self.remove_query_btn.setFixedSize(BTN_SIZE, BTN_SIZE)
+        self.remove_query_btn.clicked.connect(self._on_remove_query)
+
         query_row1.addWidget(query_label)
         query_row1.addWidget(self.queries_combo, 1)
         query_row1.addWidget(self.edit_query_btn)
+        query_row1.addWidget(self.rename_query_btn)
         query_row1.addWidget(self.add_query_btn)
-        query_row1.addWidget(self.remove_query_btn)
         query_row1.addWidget(self.run_query_btn)
+        query_row1.addWidget(self.remove_query_btn)
         queries_layout.addLayout(query_row1)
 
         main_layout.addWidget(self.queries_group)
@@ -444,6 +451,7 @@ class MainWindow(QMainWindow):
 
         has_queries = len(query_names) > 0
         self.edit_query_btn.setEnabled(has_queries)
+        self.rename_query_btn.setEnabled(has_queries)
         self.remove_query_btn.setEnabled(has_queries)
         self.run_query_btn.setEnabled(has_queries)
 
@@ -594,6 +602,27 @@ class MainWindow(QMainWindow):
             qinfo = self.controller.add_query(name.strip())
             if qinfo:
                 self.status_bar.showMessage(f"Query '{qinfo.name}' created.", 3000)
+
+    def _on_rename_query(self) -> None:
+        current_query = self.queries_combo.currentText().strip()
+        if not current_query:
+            return
+
+        new_name, ok = QInputDialog.getText(
+            self,
+            "Rename Query",
+            "Enter new query name (without .sql):",
+            text=current_query,
+        )
+        if ok and new_name.strip() and new_name.strip() != current_query:
+            clean_name = new_name.strip()
+            if clean_name.lower().endswith(".sql"):
+                clean_name = clean_name[:-4]
+            success = self.controller.rename_query(current_query, clean_name)
+            if success:
+                self.status_bar.showMessage(f"Query renamed to '{clean_name}'.", 3000)
+            else:
+                QMessageBox.warning(self, "Rename Failed", f"Could not rename query to '{clean_name}'.")
 
     def _on_remove_query(self) -> None:
         current = self.queries_combo.currentText()

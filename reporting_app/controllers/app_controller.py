@@ -520,6 +520,7 @@ class AppController(QObject):
         try:
             qinfo.file_path.rename(target_file)
             self.scan()
+            self.select_query(clean_new)
             return True
         except Exception as e:
             logger.error(f"Failed to rename query: {e}")

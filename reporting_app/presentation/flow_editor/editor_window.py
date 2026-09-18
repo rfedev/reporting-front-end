@@ -549,13 +549,27 @@ class ProcessFlowEditorWindow(QMainWindow):
         self._node_positions: Dict[str, Tuple[float, float]] = {}
         # Track pending query renames (original_disk_name -> current_working_name)
         self._pending_query_renames: Dict[str, str] = {}
-        # Load persisted show_full_table_names state
         self.show_full_table_names = self.flow_controller.get_show_full_table_names()
+
+        # Auto-save state and debounce timer
+        self._is_dirty: bool = False
+        self._suppress_dirty: bool = False
+        auto_save_pref = True
+        if self.app_controller and self.app_controller.repo:
+            saved_as = self.app_controller.repo.get_setting("flow_editor_auto_save", "1")
+            auto_save_pref = (saved_as != "0")
+        self.auto_save_enabled: bool = auto_save_pref
+
+        self._auto_save_timer = QTimer(self)
+        self._auto_save_timer.setSingleShot(True)
+        self._auto_save_timer.setInterval(1500)
+        self._auto_save_timer.timeout.connect(self._on_auto_save_timeout)
 
         self._init_graph()
         self._build_ui()
         self._setup_canvas_pan_and_select()
         self._load_initial_graph()
+        self._wire_auto_save_signals()
 
         # Connect file watcher / report change signal to detect disk edits to queries
         if self.app_controller:
@@ -1059,10 +1073,16 @@ class ProcessFlowEditorWindow(QMainWindow):
 
         toolbar.addSeparator()
 
-        save_btn = QPushButton("💾 Save")
-        save_btn.setToolTip("Save Process Flow (Ctrl+S)")
-        save_btn.clicked.connect(self._on_save)
-        toolbar.addWidget(save_btn)
+        self.save_btn = QPushButton("💾 Save")
+        self.save_btn.setToolTip("Save Process Flow (Ctrl+S)")
+        self.save_btn.clicked.connect(self._on_save)
+        toolbar.addWidget(self.save_btn)
+
+        self.auto_save_cb = QCheckBox("Auto-Save", self)
+        self.auto_save_cb.setChecked(self.auto_save_enabled)
+        self.auto_save_cb.setToolTip("Automatically save process flow when changes are made")
+        self.auto_save_cb.toggled.connect(self._on_auto_save_toggled)
+        toolbar.addWidget(self.auto_save_cb)
 
         toolbar.addSeparator()
 
@@ -1502,56 +1522,62 @@ class ProcessFlowEditorWindow(QMainWindow):
         def apply_view_state():
             self._fit_graph_to_canvas()
 
-        if session_data and "nodes" in session_data and session_data["nodes"]:
-            try:
-                self.graph.deserialize_session(session_data)
-                # Re-apply text, display mode, and query parameters to restored nodes
-                for node in self.graph.all_nodes():
-                    if isinstance(node, TableBoxNode) or node.type_ == "reporting.nodes.TableBoxNode":
-                        btype = node.get_property("box_type") or "Table Box"
-                        node.view.set_custom_title(btype)
-                        if btype == "Output CSV":
-                            qname = node.get_property("query_owner") or node.name().replace(" [CSV]", "").strip()
+        self._suppress_dirty = True
+        try:
+            if session_data and "nodes" in session_data and session_data["nodes"]:
+                try:
+                    self.graph.deserialize_session(session_data)
+                    # Re-apply text, display mode, and query parameters to restored nodes
+                    for node in self.graph.all_nodes():
+                        if isinstance(node, TableBoxNode) or node.type_ == "reporting.nodes.TableBoxNode":
+                            btype = node.get_property("box_type") or "Table Box"
+                            node.view.set_custom_title(btype)
+                            if btype == "Output CSV":
+                                qname = node.get_property("query_owner") or node.name().replace(" [CSV]", "").strip()
+                                qinfo = self.report.get_query(qname)
+                                if qinfo and qinfo.output_csv_tables:
+                                    node.setup_as_csv_output(qinfo.output_csv_tables)
+                            node.set_display_mode(self.show_full_table_names)
+                        elif isinstance(node, QueryNode) or getattr(node, "type_", "") == "reporting.nodes.QueryNode":
+                            qname = node.get_property("query_name") or node.name()
                             qinfo = self.report.get_query(qname)
-                            if qinfo and qinfo.output_csv_tables:
-                                node.setup_as_csv_output(qinfo.output_csv_tables)
-                        node.set_display_mode(self.show_full_table_names)
-                    elif isinstance(node, QueryNode) or getattr(node, "type_", "") == "reporting.nodes.QueryNode":
-                        qname = node.get_property("query_name") or node.name()
-                        qinfo = self.report.get_query(qname)
-                        if qinfo:
-                            node.set_parameters(qinfo.parameter_names)
-                # Re-apply custom noodle colors to all pipes in the restored scene
-                for item in self.graph.viewer().scene().items():
-                    if isinstance(item, PipeItem):
-                        item.reset()
+                            if qinfo:
+                                node.set_parameters(qinfo.parameter_names)
+                    # Re-apply custom noodle colors to all pipes in the restored scene
+                    for item in self.graph.viewer().scene().items():
+                        if isinstance(item, PipeItem):
+                            item.reset()
 
-                # Refresh parameter overlay for active queries in the flow
-                self._refresh_parameter_overlay()
+                    # Refresh parameter overlay for active queries in the flow
+                    self._refresh_parameter_overlay()
 
-                QtCore.QTimer.singleShot(100, apply_view_state)
-                return
-            except Exception as e:
-                logger.error(f"Error restoring node session: {e}")
+                    QtCore.QTimer.singleShot(100, apply_view_state)
+                    return
+                except Exception as e:
+                    logger.error(f"Error restoring node session: {e}")
 
-        # If empty session but query names exist in flow definition, create nodes for them
-        flow_query_names = self.flow_controller.get_query_names()
-        queries_to_add = [self.report.get_query(q) for q in flow_query_names if self.report.get_query(q)]
-        csv_imports = self.flow_controller.get_csv_imports()
-        if queries_to_add or csv_imports:
-            ProcessFlowGraphBuilder.rebuild_graph(
-                self.graph,
-                queries_to_add,
-                self._node_positions,
-                self.show_full_table_names,
-                self.flow_controller.get_csv_filenames(),
-                import_csv_data=csv_imports,
-            )
+            # If empty session but query names exist in flow definition, create nodes for them
+            flow_query_names = self.flow_controller.get_query_names()
+            queries_to_add = [self.report.get_query(q) for q in flow_query_names if self.report.get_query(q)]
+            csv_imports = self.flow_controller.get_csv_imports()
+            if queries_to_add or csv_imports:
+                ProcessFlowGraphBuilder.rebuild_graph(
+                    self.graph,
+                    queries_to_add,
+                    self._node_positions,
+                    self.show_full_table_names,
+                    self.flow_controller.get_csv_filenames(),
+                    import_csv_data=csv_imports,
+                )
 
-        # Refresh parameter overlay for active queries in the flow
-        self._refresh_parameter_overlay()
+            # Refresh parameter overlay for active queries in the flow
+            self._refresh_parameter_overlay()
 
-        QtCore.QTimer.singleShot(100, apply_view_state)
+            QtCore.QTimer.singleShot(100, apply_view_state)
+        finally:
+            self._suppress_dirty = False
+            self._is_dirty = False
+            self._update_dirty_ui()
 
     def _on_add_import_csv(self, pos: Optional[Tuple[float, float]] = None) -> Optional[ImportCsvNode]:
         """Add an Import Files node to the canvas."""
@@ -2321,12 +2347,113 @@ class ProcessFlowEditorWindow(QMainWindow):
             self.report = self.app_controller.active_report or self.report
             self._refresh_left_queries()
 
+        # Clear dirty flag and auto-save timer
+        if hasattr(self, "_auto_save_timer"):
+            self._auto_save_timer.stop()
+        self._is_dirty = False
+        self._update_dirty_ui()
+
         self.status_bar.showMessage("Process flow saved successfully.", 4000)
         if show_popup:
             QMessageBox.information(self, "Saved", f"Process flow '{self.flow_controller.flow_name}' saved.")
 
+    def _wire_auto_save_signals(self) -> None:
+        """Connect graph, parameter, and UI mutation signals to the auto-save change tracker."""
+        # 1. Graph node and pipe mutations
+        self.graph.nodes_deleted.connect(lambda *_: self._mark_dirty_and_schedule_save())
+        self.graph.port_connected.connect(lambda *_: self._mark_dirty_and_schedule_save())
+        self.graph.port_disconnected.connect(lambda *_: self._mark_dirty_and_schedule_save())
+
+        # 2. Viewer node movements
+        viewer = self.graph.viewer()
+        if hasattr(viewer, "moved_nodes"):
+            viewer.moved_nodes.connect(lambda *_: self._mark_dirty_and_schedule_save())
+
+        # 3. Canvas Parameter Overlay edits
+        if hasattr(self, "param_overlay"):
+            self.param_overlay.parameter_changed.connect(lambda *_: self._mark_dirty_and_schedule_save())
+            self.param_overlay.filename_date_changed.connect(lambda *_: self._mark_dirty_and_schedule_save())
+
+    def _mark_dirty_and_schedule_save(self) -> None:
+        """Mark editor state as dirty and start/restart the debounce timer if auto-save is enabled."""
+        if getattr(self, "_suppress_dirty", False):
+            return
+
+        self._is_dirty = True
+        self._update_dirty_ui()
+
+        if getattr(self, "auto_save_enabled", True):
+            self._auto_save_timer.start()
+
+    def _update_dirty_ui(self) -> None:
+        """Update window title and Save button indicator based on dirty state."""
+        base_title = f"Process Flow - {self.report.name} - {self.flow_controller.flow_name}"
+        if self._is_dirty:
+            self.setWindowTitle(f"● {base_title} *")
+            if hasattr(self, "save_btn"):
+                self.save_btn.setText("💾 Save *")
+        else:
+            self.setWindowTitle(base_title)
+            if hasattr(self, "save_btn"):
+                self.save_btn.setText("💾 Save")
+
+    def _on_auto_save_toggled(self, checked: bool) -> None:
+        """Handle user toggling the Auto-Save checkbox in the toolbar."""
+        self.auto_save_enabled = checked
+        if self.app_controller and self.app_controller.repo:
+            self.app_controller.repo.set_setting("flow_editor_auto_save", "1" if checked else "0")
+
+        if checked and self._is_dirty:
+            self._auto_save_timer.start()
+        elif not checked:
+            self._auto_save_timer.stop()
+
+        status_txt = "Auto-Save enabled." if checked else "Auto-Save disabled. Unsaved changes will be prompted on close."
+        self.status_bar.showMessage(status_txt, 3000)
+
+    def _on_auto_save_timeout(self) -> None:
+        """Called when debounce timer fires: silently save the process flow."""
+        if self.auto_save_enabled and self._is_dirty:
+            try:
+                self._on_save(show_popup=False)
+                from datetime import datetime
+                now_str = datetime.now().strftime("%H:%M:%S")
+                self.status_bar.showMessage(f"Auto-saved at {now_str}.", 3000)
+            except Exception as e:
+                logger.warning(f"Auto-save failed: {e}")
+
     def closeEvent(self, event) -> None:
-        """Remember splitter dimensions when closing process flow editor window."""
+        """Handle window close: check for unsaved changes or flush auto-save."""
+        if self._is_dirty:
+            if self.auto_save_enabled:
+                # Flush pending auto-save immediately
+                try:
+                    self._on_save(show_popup=False)
+                except Exception as e:
+                    logger.warning(f"Auto-save on close failed: {e}")
+            else:
+                # Auto-save is disabled: prompt user to save, discard, or cancel
+                msg_box = QMessageBox(self)
+                msg_box.setWindowTitle("Unsaved Changes")
+                msg_box.setText(f"Process flow '{self.flow_controller.flow_name}' has unsaved changes.")
+                msg_box.setInformativeText("Do you want to save your changes before closing?")
+                msg_box.setStandardButtons(QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel)
+                msg_box.setDefaultButton(QMessageBox.Save)
+                reply = msg_box.exec()
+
+                if reply == QMessageBox.Save:
+                    try:
+                        self._on_save(show_popup=False)
+                    except Exception as e:
+                        QMessageBox.critical(self, "Save Error", f"Failed to save process flow: {e}")
+                        event.ignore()
+                        return
+                elif reply == QMessageBox.Discard:
+                    pass
+                else:  # Cancel
+                    event.ignore()
+                    return
+
         try:
             if hasattr(self, "splitter"):
                 cur_sizes = self.splitter.sizes()
@@ -2414,6 +2541,13 @@ class ProcessFlowEditorWindow(QMainWindow):
         if not ordered_items:
             QMessageBox.information(self, "Empty Flow", "There are no queries or CSV imports to run.")
             return
+
+        # If auto-save is enabled and there are pending modifications, save before running
+        if getattr(self, "auto_save_enabled", False) and getattr(self, "_is_dirty", False):
+            try:
+                self._on_save(show_popup=False)
+            except Exception as e:
+                logger.debug(f"Auto-save prior to running flow encountered error: {e}")
 
         # Consolidate parameters from parameter overlay directly
         param_values = dict(self.flow_controller.parameter_defaults)

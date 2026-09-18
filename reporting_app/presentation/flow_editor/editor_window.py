@@ -664,6 +664,8 @@ class ProcessFlowEditorWindow(QMainWindow):
             viewer._last_size = viewer.size()
             QtWidgets.QGraphicsView.resizeEvent(viewer, event)
 
+        viewer.resizeEvent = custom_viewer_resize
+
         # Disable default context menu policy on viewer so our custom right click menu takes precedence
         viewer.setContextMenuPolicy(Qt.CustomContextMenu)
         if hasattr(viewer, "viewport") and viewer.viewport():
@@ -996,6 +998,10 @@ class ProcessFlowEditorWindow(QMainWindow):
             run_from_act = menu.addAction("Run From Query")
             run_from_act.triggered.connect(lambda: self.run_from_query(target_node))
             add_menu_item("Edit Query", "e", lambda: self._on_node_double_clicked(target_node))
+            menu.addSeparator()
+            node_name = target_node.get_property("query_name") or target_node.name()
+            open_log_act = menu.addAction("Open Log")
+            open_log_act.triggered.connect(lambda: self._on_open_logs(filter_node=node_name))
 
         else:
             # Empty space context menu
@@ -1073,16 +1079,30 @@ class ProcessFlowEditorWindow(QMainWindow):
 
         toolbar.addSeparator()
 
-        self.save_btn = QPushButton("💾 Save")
+        self.save_btn = QPushButton("💾")
+        self.save_btn.setFixedSize(32, 32)
+        self.save_btn.setStyleSheet("QPushButton { font-size: 18px; padding: 0px; margin: 0px; }")
         self.save_btn.setToolTip("Save Process Flow (Ctrl+S)")
         self.save_btn.clicked.connect(self._on_save)
         toolbar.addWidget(self.save_btn)
+
+        # Standard gap between save button and auto-save checkbox
+        gap = QWidget(self)
+        gap.setFixedWidth(8)
+        toolbar.addWidget(gap)
 
         self.auto_save_cb = QCheckBox("Auto-Save", self)
         self.auto_save_cb.setChecked(self.auto_save_enabled)
         self.auto_save_cb.setToolTip("Automatically save process flow when changes are made")
         self.auto_save_cb.toggled.connect(self._on_auto_save_toggled)
         toolbar.addWidget(self.auto_save_cb)
+
+        toolbar.addSeparator()
+
+        import_files_btn = QPushButton("📥 Import Files")
+        import_files_btn.setToolTip("Add an Import Files node to load CSV or Excel files into BigQuery tables")
+        import_files_btn.clicked.connect(self._on_add_import_csv)
+        toolbar.addWidget(import_files_btn)
 
         toolbar.addSeparator()
 
@@ -1094,21 +1114,17 @@ class ProcessFlowEditorWindow(QMainWindow):
 
         toolbar.addSeparator()
 
-        import_files_btn = QPushButton("📥 Import Files")
-        import_files_btn.setToolTip("Add an Import Files node to load CSV or Excel files into BigQuery tables")
-        import_files_btn.clicked.connect(self._on_add_import_csv)
-        toolbar.addWidget(import_files_btn)
-
-        toolbar.addSeparator()
-
         self.logs_btn = QPushButton("📜 Logs")
         self.logs_btn.setToolTip("View Execution Logs for this Process Flow")
         self.logs_btn.clicked.connect(lambda: self._on_open_logs())
         toolbar.addWidget(self.logs_btn)
 
-        toolbar.addSeparator()
+        # Spacer to push Appearance menu and toggle right button to far right
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        toolbar.addWidget(spacer)
 
-        # Appearance dropdown menu button
+        # Appearance dropdown menu button (to the left of the right panel toggle)
         self.appearance_btn = QToolButton(self)
         self.appearance_btn.setText("Appearance ☰")
         self.appearance_btn.setStyleSheet("QToolButton::menu-indicator { image: none; width: 0px; }")
@@ -1136,10 +1152,7 @@ class ProcessFlowEditorWindow(QMainWindow):
         self.appearance_btn.setMenu(appearance_menu)
         toolbar.addWidget(self.appearance_btn)
 
-        # Spacer to push toggle right button to far right
-        spacer = QWidget()
-        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        toolbar.addWidget(spacer)
+        toolbar.addSeparator()
 
         # Far right: Right panel collapse/expand arrow button
         self.toggle_right_btn = QPushButton("▶")
@@ -1548,6 +1561,11 @@ class ProcessFlowEditorWindow(QMainWindow):
                         if isinstance(item, PipeItem):
                             item.reset()
 
+                    # Deselect any nodes that might have been saved as selected
+                    self.graph.clear_selection()
+                    if self.graph.viewer().scene():
+                        self.graph.viewer().scene().clearSelection()
+
                     # Refresh parameter overlay for active queries in the flow
                     self._refresh_parameter_overlay()
 
@@ -1874,10 +1892,14 @@ class ProcessFlowEditorWindow(QMainWindow):
         if not new_report or new_report.name != self.report.name:
             return
 
-        self.report = new_report
-        self.flow_controller.report = new_report
-        self._refresh_left_queries()
-        self._sync_graph_topology()
+        self._suppress_dirty = True
+        try:
+            self.report = new_report
+            self.flow_controller.report = new_report
+            self._refresh_left_queries()
+            self._sync_query_files_and_parameters()
+        finally:
+            self._suppress_dirty = False
 
     def _on_node_double_clicked(self, node) -> None:
         """Handle double click on query node to open in OS default application, or CSV box to edit names."""
@@ -2220,6 +2242,7 @@ class ProcessFlowEditorWindow(QMainWindow):
         )
         self._node_positions.update(new_positions)
         self._fit_graph_to_canvas()
+        self._mark_dirty_and_schedule_save()
         dir_name = "Horizontal (Left-to-Right)" if direction == "horizontal" else "Vertical (Top-to-Bottom)"
         self.status_bar.showMessage(f"Auto-formatted all objects: {dir_name}", 3000)
 
@@ -2270,92 +2293,106 @@ class ProcessFlowEditorWindow(QMainWindow):
                 except Exception:
                     pass
 
+        self._mark_dirty_and_schedule_save()
         self.status_bar.showMessage(f"Aligned {len(nodes)} selected object(s) {dir_msg}.", 3000)
 
     def _on_save(self, show_popup: bool = True) -> None:
         """Save process flow graph state, parameter defaults, and table display mode."""
-        session_data = self.graph.serialize_session()
+        self._suppress_dirty = True
+        try:
+            session_data = self.graph.serialize_session()
+            # Ensure no nodes are serialized as selected so reopening does not auto-select nodes
+            if isinstance(session_data, dict) and "nodes" in session_data:
+                for ndata in session_data["nodes"].values():
+                    if isinstance(ndata, dict) and "selected" in ndata:
+                        ndata["selected"] = False
 
-        # Extract all query names present in the graph
-        active_query_names: List[str] = []
-        for node in self.graph.all_nodes():
-            if isinstance(node, QueryNode) or node.type_ == "reporting.nodes.QueryNode":
-                qname = node.get_property("query_name") or node.name()
-                if qname not in active_query_names:
-                    active_query_names.append(qname)
+            # Extract all query names present in the graph
+            active_query_names: List[str] = []
+            for node in self.graph.all_nodes():
+                if isinstance(node, QueryNode) or node.type_ == "reporting.nodes.QueryNode":
+                    qname = node.get_property("query_name") or node.name()
+                    if qname not in active_query_names:
+                        active_query_names.append(qname)
 
-        # Retain or initialize parameter defaults
-        existing_defaults = self.flow_controller.parameter_defaults
-        for param in self.flow_controller.get_unique_parameters(active_query_names):
-            if param not in existing_defaults:
-                existing_defaults[param] = ""
+            # Retain or initialize parameter defaults
+            existing_defaults = self.flow_controller.parameter_defaults
+            for param in self.flow_controller.get_unique_parameters(active_query_names):
+                if param not in existing_defaults:
+                    existing_defaults[param] = ""
 
-        # 1. Commit any pending query file renames to disk
-        if self.app_controller and self._pending_query_renames:
-            for orig_name, final_name in list(self._pending_query_renames.items()):
-                if orig_name != final_name:
-                    self.app_controller.rename_query(orig_name, final_name)
-            self._pending_query_renames.clear()
-            self.report = self.app_controller.active_report or self.report
-            self._refresh_left_queries()
+            # 1. Commit any pending query file renames to disk
+            if self.app_controller and self._pending_query_renames:
+                for orig_name, final_name in list(self._pending_query_renames.items()):
+                    if orig_name != final_name:
+                        self.app_controller.rename_query(orig_name, final_name)
+                self._pending_query_renames.clear()
+                self.report = self.app_controller.active_report or self.report
+                self._refresh_left_queries()
 
-        # Capture current zoom and pan center
-        viewer = self.graph.viewer()
-        sc = viewer.scene_center()
-        center_coords = [float(sc[0]), float(sc[1])] if isinstance(sc, (list, tuple)) else [float(sc.x()), float(sc.y())]
-        view_state = {
-            "zoom": viewer.get_zoom(),
-            "center": center_coords,
-        }
-        csv_imports = self._collect_csv_import_data()
+            # Capture current zoom and pan center
+            viewer = self.graph.viewer()
+            sc = viewer.scene_center()
+            center_coords = [float(sc[0]), float(sc[1])] if isinstance(sc, (list, tuple)) else [float(sc.x()), float(sc.y())]
+            view_state = {
+                "zoom": viewer.get_zoom(),
+                "center": center_coords,
+            }
+            csv_imports = self._collect_csv_import_data()
 
-        # Capture splitter sizes
-        cur_splitter_sizes = self.splitter.sizes()
-        if self.app_controller and self.app_controller.repo:
-            self.app_controller.repo.set_setting("flow_editor_splitter_sizes", ",".join(str(s) for s in cur_splitter_sizes))
+            # Capture splitter sizes
+            cur_splitter_sizes = self.splitter.sizes()
+            if self.app_controller and self.app_controller.repo:
+                self.app_controller.repo.set_setting("flow_editor_splitter_sizes", ",".join(str(s) for s in cur_splitter_sizes))
 
-        # Collect parameters and date options from overlay if present
-        date_options = {}
-        sel_filename_date_param = None
-        has_report_date = False
-        if hasattr(self, "param_overlay"):
-            overlay_vals = self.param_overlay.get_parameter_values()
-            existing_defaults.update(overlay_vals)
-            date_options = self.param_overlay.get_date_option_selections()
-            sel_filename_date_param = self.param_overlay.get_selected_filename_date_param()
-            has_report_date = self.param_overlay.has_report_date()
-            if not has_report_date:
-                existing_defaults.pop("Report Date", None)
-                date_options.pop("Report Date", None)
+            # Collect parameters and date options from overlay if present
+            date_options = {}
+            sel_filename_date_param = None
+            has_report_date = False
+            if hasattr(self, "param_overlay"):
+                overlay_vals = self.param_overlay.get_parameter_values()
+                existing_defaults.update(overlay_vals)
+                date_options = self.param_overlay.get_date_option_selections()
+                sel_filename_date_param = self.param_overlay.get_selected_filename_date_param()
+                has_report_date = self.param_overlay.has_report_date()
+                if not has_report_date:
+                    existing_defaults.pop("Report Date", None)
+                    date_options.pop("Report Date", None)
 
-        self.flow_controller.save_flow(
-            active_query_names=active_query_names,
-            parameter_defaults=existing_defaults,
-            graph_session=session_data,
-            show_full_table_names=self.show_full_table_names,
-            csv_filenames=self.flow_controller.get_csv_filenames(),
-            csv_imports=csv_imports,
-            view_state=view_state,
-            splitter_sizes=cur_splitter_sizes,
-            parameter_date_options=date_options,
-            selected_filename_date_param=sel_filename_date_param,
-            has_report_date=has_report_date,
-        )
+            self.flow_controller.save_flow(
+                active_query_names=active_query_names,
+                parameter_defaults=existing_defaults,
+                graph_session=session_data,
+                show_full_table_names=self.show_full_table_names,
+                csv_filenames=self.flow_controller.get_csv_filenames(),
+                csv_imports=csv_imports,
+                view_state=view_state,
+                splitter_sizes=cur_splitter_sizes,
+                parameter_date_options=date_options,
+                selected_filename_date_param=sel_filename_date_param,
+                has_report_date=has_report_date,
+            )
 
-        if self.app_controller:
-            self.app_controller.scan()
-            self.report = self.app_controller.active_report or self.report
-            self._refresh_left_queries()
+            flow_path = getattr(self.flow_controller, "flow_file_path", None)
+            if flow_path and self.app_controller and hasattr(self.app_controller, "watcher"):
+                self.app_controller.watcher.update_file_mtime(Path(flow_path))
 
-        # Clear dirty flag and auto-save timer
-        if hasattr(self, "_auto_save_timer"):
-            self._auto_save_timer.stop()
-        self._is_dirty = False
-        self._update_dirty_ui()
+            if self.app_controller:
+                self.app_controller.scan()
+                self.report = self.app_controller.active_report or self.report
+                self._refresh_left_queries()
 
-        self.status_bar.showMessage("Process flow saved successfully.", 4000)
-        if show_popup:
-            QMessageBox.information(self, "Saved", f"Process flow '{self.flow_controller.flow_name}' saved.")
+            # Clear dirty flag and auto-save timer
+            if hasattr(self, "_auto_save_timer"):
+                self._auto_save_timer.stop()
+            self._is_dirty = False
+            self._update_dirty_ui()
+
+            self.status_bar.showMessage("Process flow saved successfully.", 4000)
+            if show_popup:
+                QMessageBox.information(self, "Saved", f"Process flow '{self.flow_controller.flow_name}' saved.")
+        finally:
+            self._suppress_dirty = False
 
     def _wire_auto_save_signals(self) -> None:
         """Connect graph, parameter, and UI mutation signals to the auto-save change tracker."""
@@ -2391,11 +2428,13 @@ class ProcessFlowEditorWindow(QMainWindow):
         if self._is_dirty:
             self.setWindowTitle(f"● {base_title} *")
             if hasattr(self, "save_btn"):
-                self.save_btn.setText("💾 Save *")
+                self.save_btn.setText("💾*")
+                self.save_btn.setToolTip("Save Process Flow (Ctrl+S) - Unsaved changes")
         else:
             self.setWindowTitle(base_title)
             if hasattr(self, "save_btn"):
-                self.save_btn.setText("💾 Save")
+                self.save_btn.setText("💾")
+                self.save_btn.setToolTip("Save Process Flow (Ctrl+S)")
 
     def _on_auto_save_toggled(self, checked: bool) -> None:
         """Handle user toggling the Auto-Save checkbox in the toolbar."""

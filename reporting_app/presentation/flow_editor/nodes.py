@@ -270,16 +270,6 @@ class QueryNodeItem(NodeItem):
                 pass
         self._text_item = CustomNodeTextItem(self.name, self)
 
-        # Circular Info (i) button in top right of node header
-        self._info_btn = CircularInfoButtonItem(
-            parent=self,
-            callback=self._trigger_info_clicked,
-        )
-
-    def _trigger_info_clicked(self):
-        if self.viewer() and hasattr(self.viewer(), "node_info_clicked"):
-            self.viewer().node_info_clicked.emit(self.name)
-
     def paint(self, painter, option, widget):
         if not self.viewer():
             return
@@ -291,10 +281,6 @@ class QueryNodeItem(NodeItem):
 
     def _align_label_horizontal(self, h_offset, v_offset):
         super()._align_label_horizontal(h_offset, v_offset)
-        rect = self.boundingRect()
-        y = rect.y() + v_offset + 9
-        # Align circular (i) button in top-right corner
-        self._info_btn.setPos(rect.right() - 15, y)
 
     def _calc_size_horizontal(self):
         w, h = super()._calc_size_horizontal()
@@ -403,16 +389,6 @@ class ImportCsvItem(NodeItem):
                 pass
         self._text_item = CustomNodeTextItem(self.name, self)
 
-        # Circular Info (i) button in top right of node header
-        self._info_btn = CircularInfoButtonItem(
-            parent=self,
-            callback=self._trigger_info_clicked,
-        )
-
-    def _trigger_info_clicked(self):
-        if self.viewer() and hasattr(self.viewer(), "node_info_clicked"):
-            self.viewer().node_info_clicked.emit(self.name)
-
     def paint(self, painter, option, widget):
         if not self.viewer():
             return
@@ -420,10 +396,6 @@ class ImportCsvItem(NodeItem):
 
     def _align_label_horizontal(self, h_offset, v_offset):
         super()._align_label_horizontal(h_offset, v_offset)
-        rect = self.boundingRect()
-        y = rect.y() + v_offset + 9
-        # Align circular (i) button in top-right corner
-        self._info_btn.setPos(rect.right() - 15, y)
 
 
 class ImportCsvNode(BaseNode):

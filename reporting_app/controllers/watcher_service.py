@@ -40,6 +40,16 @@ class FileWatcherService(QObject):
     def is_enabled(self) -> bool:
         return self._enabled
 
+    def update_file_mtime(self, file_path: Path) -> None:
+        """Update cached mtime for a file to prevent self-modification trigger loops."""
+        try:
+            resolved = file_path.resolve()
+            if resolved.exists():
+                self._file_mtimes[resolved] = resolved.stat().st_mtime
+                self._last_mtime_sum = sum(self._file_mtimes.values())
+        except Exception:
+            pass
+
     def _compute_file_mtimes(self) -> Dict[Path, float]:
         mtimes: Dict[Path, float] = {}
         for target_dir in self.target_dirs:

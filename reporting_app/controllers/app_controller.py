@@ -263,7 +263,6 @@ class AppController(QObject):
                         report.process_flows = flows
                         if self.active_report and self.active_report.name == report.name:
                             self.process_flows_updated.emit([pf.name for pf in flows])
-                            self.active_report_changed.emit(self.active_report)
                         return
                 except Exception:
                     pass

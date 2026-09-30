@@ -1183,6 +1183,7 @@ class ProcessFlowEditorWindow(QMainWindow):
         viewer.installEventFilter(self)
         self.graph_widget.setAcceptDrops(True)
         self.graph_widget.installEventFilter(self)
+        self.installEventFilter(self)
         self.graph.data_dropped.connect(self._on_graph_data_dropped)
 
         # Top-left expandable parameter overlay on the canvas (parented to graph_widget so zoom/pan does not move it)
@@ -2998,12 +2999,60 @@ class ProcessFlowEditorWindow(QMainWindow):
         viewport = viewer.viewport() if hasattr(viewer, "viewport") else None
         target_widgets = {viewer, viewport, getattr(self, "graph_widget", None)} - {None}
         if watched in target_widgets:
+            # Synchronize modifier keys with the actual OS state to prevent stuck modifiers
+            if event.type() in (
+                QEvent.MouseMove,
+                QEvent.MouseButtonPress,
+                QEvent.MouseButtonRelease,
+                QEvent.Enter,
+            ):
+                mods = QtWidgets.QApplication.keyboardModifiers()
+                has_ctrl = bool(mods & Qt.ControlModifier)
+                has_shift = bool(mods & Qt.ShiftModifier)
+                has_alt = bool(mods & Qt.AltModifier)
+
+                # In standard UI conventions, Ctrl is used for multi-selecting / extending selection.
+                # In NodeGraphQt, SHIFT_state enables multi-select / extend selection, while CTRL_state
+                # is hardcoded to deselect nodes. We map Ctrl to multi-select behavior (SHIFT_state)
+                # so Ctrl+Drag and Ctrl+Click multi-selects rather than deselecting.
+                viewer.SHIFT_state = has_shift or has_ctrl
+                viewer.CTRL_state = False
+                viewer.ALT_state = has_alt
+
+            elif event.type() in (QEvent.FocusOut, QEvent.Leave, QEvent.WindowDeactivate):
+                if hasattr(viewer, "clear_key_state"):
+                    viewer.clear_key_state()
+                else:
+                    viewer.CTRL_state = False
+                    viewer.SHIFT_state = False
+                    viewer.ALT_state = False
+
+            elif event.type() == QEvent.KeyRelease:
+                key = event.key()
+                if key in (Qt.Key_Control, Qt.Key_Shift, Qt.Key_Alt):
+                    mods = QtWidgets.QApplication.keyboardModifiers()
+                    has_ctrl = bool(mods & Qt.ControlModifier)
+                    has_shift = bool(mods & Qt.ShiftModifier)
+                    has_alt = bool(mods & Qt.AltModifier)
+                    viewer.SHIFT_state = has_shift or has_ctrl
+                    viewer.CTRL_state = False
+                    viewer.ALT_state = has_alt
+
             if event.type() == QEvent.Resize:
                 if hasattr(self, "param_overlay"):
                     self.param_overlay.move(14, 14)
                     self.param_overlay.raise_()
             elif event.type() == QEvent.KeyPress:
                 key = event.key()
+                if key in (Qt.Key_Control, Qt.Key_Shift, Qt.Key_Alt):
+                    mods = QtWidgets.QApplication.keyboardModifiers()
+                    has_ctrl = bool(mods & Qt.ControlModifier) or (key == Qt.Key_Control)
+                    has_shift = bool(mods & Qt.ShiftModifier) or (key == Qt.Key_Shift)
+                    has_alt = bool(mods & Qt.AltModifier) or (key == Qt.Key_Alt)
+                    viewer.SHIFT_state = has_shift or has_ctrl
+                    viewer.CTRL_state = False
+                    viewer.ALT_state = has_alt
+
                 # Do not intercept typing if focus is on a text editor / line edit or in-scene text editing
                 focus_w = QtWidgets.QApplication.focusWidget()
                 if isinstance(focus_w, (QLineEdit, QTextEdit, QPlainTextEdit)):
@@ -3090,5 +3139,14 @@ class ProcessFlowEditorWindow(QMainWindow):
                     self._handle_query_drop(query_name, scene_pos.x(), scene_pos.y())
                     event.acceptProposedAction()
                     return True
+
+        elif watched is self:
+            if event.type() in (QEvent.WindowDeactivate, QEvent.FocusOut):
+                if hasattr(viewer, "clear_key_state"):
+                    viewer.clear_key_state()
+                else:
+                    viewer.CTRL_state = False
+                    viewer.SHIFT_state = False
+                    viewer.ALT_state = False
 
         return super().eventFilter(watched, event)

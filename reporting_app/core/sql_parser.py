@@ -1,77 +1,99 @@
-"""SQL parsing utilities for BigQuery SQL files with sqlglot and resilient fallbacks."""
-
+import logging
 from pathlib import Path
 import re
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
-try:
-    import sqlglot
-    from sqlglot import exp
-    HAS_SQLGLOT = True
-except ImportError:
-    HAS_SQLGLOT = False
-    sqlglot = None
-    exp = None
+import sqlglot
+from sqlglot import exp, TokenType
+
+# Suppress sqlglot fallback warning logs for procedural and unsupported constructs
+logging.getLogger("sqlglot").setLevel(logging.ERROR)
 
 
 # Regex for parameter extraction {parameter_name} or :parameter_name
 _PARAM_RE = re.compile(r"\{([^{}]+)\}|(?<!:):([a-zA-Z_][a-zA-Z0-9_]*)(?!:)")
 
-# Comment regexes for CSV output annotations
-_CSV_COMMENT_RE = re.compile(
-    r"^\s*(?:#|--|/\*)\s*out?put\s*:\s*([^\s;\*]+)",
-    re.IGNORECASE,
-)
-_CSV_IN_COMMENT_RE = re.compile(
-    r"^\s*(?:#|--|/\*|\*)\s*(?:out?put\s*:\s*)?([^\s;\*'\"]+\.csv)",
-    re.IGNORECASE,
-)
 
-# Table token and extraction regexes for robust extraction across all queries
-_TABLE_TOKEN = r"(?:`[a-zA-Z0-9_\-\.]+`|[a-zA-Z0-9_\-\.]+)"
+def _clean_table_address(tbl: exp.Table) -> str:
+    """Format an exp.Table AST node into a clean table name without backticks or aliases."""
+    parts = [p for p in (tbl.catalog, tbl.db, tbl.name) if p]
+    return ".".join(parts) if parts else tbl.name
 
-_INPUT_TABLE_RE = re.compile(
-    rf"\b(?:FROM|JOIN)\s+({_TABLE_TOKEN})",
-    re.IGNORECASE,
-)
 
-_OUTPUT_TABLE_RE = re.compile(
-    rf"\b(?:CREATE\s+(?:OR\s+REPLACE\s+)?(?:TEMP\s+|TEMPORARY\s+)?TABLE(?:\s+IF\s+NOT\s+EXISTS)?|INSERT(?:\s+INTO)?|MERGE(?:\s+INTO)?)\s+({_TABLE_TOKEN})",
-    re.IGNORECASE,
-)
-
-_CTE_RE = re.compile(
-    r"(?:\bWITH|,)\s*([a-zA-Z0-9_\-\.]+)\s+AS\s*\(",
-    re.IGNORECASE,
-)
+def _to_parseable_sql(sql: str) -> str:
+    """Convert template parameters like {param} to valid SQL identifiers for sqlglot parsing."""
+    return _PARAM_RE.sub("__param__", sql)
 
 
 def strip_comments(sql: str) -> str:
-    """Remove SQL comments (-- ..., /* ... */, and # ...) to avoid false positives."""
-    clean = re.sub(r"--[^\n]*|#[^\n]*", "", sql)
-    clean = re.sub(r"/\*.*?\*/", "", clean, flags=re.DOTALL)
-    return clean
+    """Remove SQL comments (-- ..., /* ... */, and # ...) using sqlglot."""
+    placeholder_map = {}
+
+    def repl(m):
+        key = f"__param_{len(placeholder_map)}__"
+        placeholder_map[key] = m.group(0)
+        return key
+
+    parseable = _PARAM_RE.sub(repl, sql)
+    try:
+        parsed = [s for s in sqlglot.parse(parseable, dialect="bigquery") if s is not None]
+        if not parsed:
+            return ""
+        out = ";\n".join(s.sql(dialect="bigquery", comments=False) for s in parsed)
+        if not out.rstrip().endswith(";"):
+            out += ";"
+        for k, v in placeholder_map.items():
+            out = out.replace(k, v)
+        return out
+    except Exception:
+        clean = re.sub(r"--[^\n]*|#[^\n]*", "", sql)
+        clean = re.sub(r"/\*.*?\*/", "", clean, flags=re.DOTALL)
+        return clean
 
 
 def clean_table_name(table_ref: str) -> str:
-    """Clean backticks and whitespace from table reference."""
-    clean = table_ref.strip().replace("`", "").strip()
-    return clean
+    """Clean backticks and whitespace from table reference using sqlglot Table parsing."""
+    cleaned = table_ref.strip()
+    if not cleaned:
+        return ""
+    try:
+        tbl = sqlglot.to_table(cleaned, dialect="bigquery")
+        return _clean_table_address(tbl)
+    except Exception:
+        return cleaned.replace("`", "").strip()
 
 
 def scan_query_parameters(sql: str) -> List[str]:
-    """Scan SQL text for parameters in curly brackets like {startDate} or :param.
+    """Scan SQL text for parameters like {startDate} or :param using sqlglot tokenization.
 
     Returns a list of unique parameter names preserving appearance order.
+    Comments are ignored automatically by the tokenizer.
     """
-    cleaned = strip_comments(sql)
+    tokens = sqlglot.tokenize(sql, dialect="bigquery")
     found: List[str] = []
     seen: Set[str] = set()
-    for match in _PARAM_RE.finditer(cleaned):
-        param = (match.group(1) or match.group(2) or "").strip()
-        if param and param not in seen:
-            seen.add(param)
-            found.append(param)
+
+    i = 0
+    n = len(tokens)
+    while i < n:
+        t = tokens[i]
+        # Unquoted {param} token sequence: '{', 'param', '}'
+        if t.text == "{" and i + 2 < n and tokens[i + 2].text == "}":
+            param = tokens[i + 1].text.strip()
+            if param and param not in seen:
+                seen.add(param)
+                found.append(param)
+            i += 3
+            continue
+
+        # Inside string literal '{param}' or colon parameter ':param'
+        for m in _PARAM_RE.finditer(t.text):
+            param = (m.group(1) or m.group(2) or "").strip()
+            if param and param not in seen:
+                seen.add(param)
+                found.append(param)
+        i += 1
+
     return found
 
 
@@ -128,94 +150,71 @@ def get_next_available_table_csv(existing_names: Iterable[str]) -> str:
 
 
 def split_sql_statements(sql: str) -> List[Tuple[int, int, str]]:
-    """Split SQL into individual statements with start/end character offsets."""
+    """Split SQL into individual statements with start/end character offsets using sqlglot tokenizer.
+
+    Maintains block depth so semicolons inside procedural blocks (IF...END IF, WHILE...END WHILE,
+    BEGIN...END) do not break statements into invalid fragments.
+    """
+    tokens = sqlglot.tokenize(sql, dialect="bigquery")
     statements: List[Tuple[int, int, str]] = []
     start = 0
-    i = 0
-    n = len(sql)
-    in_single = False
-    in_double = False
-    in_line_comment = False
-    in_block_comment = False
+    block_depth = 0
 
+    i = 0
+    n = len(tokens)
     while i < n:
-        if not in_line_comment and not in_block_comment:
-            if sql[i] == "'" and not in_double:
-                in_single = not in_single
-            elif sql[i] == '"' and not in_single:
-                in_double = not in_double
-            elif not in_single and not in_double:
-                if sql[i:i+2] == "--" or sql[i] == "#":
-                    in_line_comment = True
-                    i += 1
-                elif sql[i:i+2] == "/*":
-                    in_block_comment = True
-                    i += 1
-                elif sql[i] == ";":
-                    # If there's an inline comment on the same line after ';', include it
-                    end_idx = i + 1
-                    rest = sql[end_idx:]
-                    nl = rest.find("\n")
-                    same_line = rest[:nl] if nl != -1 else rest
-                    if re.match(r"^[ \t]*(?:--|#|/\*)", same_line):
-                        end_idx += len(same_line)
-                        i = end_idx - 1
-                    chunk = sql[start:end_idx].strip()
-                    if chunk:
-                        statements.append((start, end_idx, sql[start:end_idx]))
-                    start = end_idx
-        elif in_line_comment:
-            if sql[i] == "\n":
-                in_line_comment = False
-        elif in_block_comment:
-            if sql[i:i+2] == "*/":
-                in_block_comment = False
-                i += 1
+        t = tokens[i]
+        txt = t.text.upper()
+        next_tok = tokens[i + 1].text.upper() if i + 1 < n else ""
+        prev_tok = tokens[i - 1].text.upper() if i > 0 else ""
+
+        # Track start of procedural blocks (excluding DDL 'IF [NOT] EXISTS' and 'BEGIN TRANSACTION')
+        if (txt == "IF" and next_tok not in ("NOT", "EXISTS") and prev_tok != "END") or \
+           (txt in ("WHILE", "LOOP") and prev_tok != "END") or \
+           (txt == "BEGIN" and next_tok != "TRANSACTION"):
+            block_depth += 1
+        elif txt == "END":
+            block_depth = max(0, block_depth - 1)
+        elif t.token_type == TokenType.SEMICOLON and block_depth == 0:
+            end_idx = t.end + 1
+            rest = sql[end_idx:]
+            nl = rest.find("\n")
+            same_line = rest[:nl] if nl != -1 else rest
+            if re.match(r"^[ \t]*(?:--|#|/\*)", same_line):
+                end_idx += len(same_line)
+            chunk = sql[start:end_idx].strip()
+            if chunk:
+                statements.append((start, end_idx, sql[start:end_idx]))
+            start = end_idx
         i += 1
 
-    if start < n:
+    if start < len(sql):
         chunk = sql[start:].strip()
         if chunk:
-            statements.append((start, n, sql[start:]))
+            statements.append((start, len(sql), sql[start:]))
 
     return statements
 
 
 def find_standalone_select_statements(sql: str) -> List[dict]:
-    """Find all standalone SELECT statements in a SQL script using sqlglot (with regex fallback).
+    """Find all standalone SELECT statements in a SQL script using sqlglot AST expression matching.
 
-    For each statement:
-    - Parses with sqlglot and checks if type(statement).__name__.upper() == "SELECT".
-    - Finds the first line of the SQL statement (first non-blank line).
-    - Checks the lines within the statement for any existing comment containing .csv or output:.
+    Classifies statement as standalone SELECT if the parsed root AST node is an exp.Select or exp.Union,
+    and is not a CREATE TABLE ... AS SELECT or INSERT INTO ... SELECT.
     """
     raw_statements = split_sql_statements(sql)
     results: List[dict] = []
     select_idx = 0
 
     for start_char, end_char, raw_stmt in raw_statements:
-        clean = strip_comments(raw_stmt).strip()
-        if not clean:
-            continue
+        parseable_stmt = _to_parseable_sql(raw_stmt)
+        try:
+            parsed_stmts = [s for s in sqlglot.parse(parseable_stmt, dialect="bigquery") if s is not None and not isinstance(s, exp.Semicolon)]
+            parsed = parsed_stmts[0] if parsed_stmts else None
+        except Exception:
+            parsed = None
 
-        is_select = False
-        if HAS_SQLGLOT:
-            # Replace {param} with dummy identifier so sqlglot doesn't choke on curly brackets
-            parseable_stmt = _PARAM_RE.sub("__param__", raw_stmt)
-            try:
-                parsed = [s for s in sqlglot.parse(parseable_stmt, dialect="bigquery") if s is not None]
-                if parsed:
-                    is_select = type(parsed[0]).__name__.upper() == "SELECT"
-            except Exception:
-                pass
-
-        if not is_select:
-            # Fallback check
-            if not _OUTPUT_TABLE_RE.search(clean) and re.search(r"\bSELECT\b", clean, re.IGNORECASE):
-                if not re.search(r"\b(?:CREATE|INSERT|UPDATE|DELETE|MERGE)\b", clean, re.IGNORECASE):
-                    is_select = True
-
-        if not is_select:
+        if not parsed or not isinstance(parsed, (exp.Select, exp.Union)):
             continue
 
         stmt_lines = raw_stmt.splitlines(keepends=True)
@@ -327,7 +326,7 @@ def update_query_csv_comment(file_path: Path, select_index: int, new_filename: s
 
 
 def scan_select_output_tables(sql: str) -> List[str]:
-    """Scan SQL text for output tables referenced in SELECT statements that export to CSV."""
+    """Scan SQL text for output tables referenced in SELECT statements that export to CSV using sqlglot AST."""
     statements = find_standalone_select_statements(sql)
     if not statements:
         return []
@@ -343,33 +342,25 @@ def scan_select_output_tables(sql: str) -> List[str]:
                 csv_tables.append(fname)
         else:
             raw = stmt_info["raw_statement"]
-            primary_table = None
+            parseable = _to_parseable_sql(raw)
+            try:
+                parsed_stmts = [s for s in sqlglot.parse(parseable, dialect="bigquery") if s is not None and not isinstance(s, exp.Semicolon)]
+                parsed = parsed_stmts[0] if parsed_stmts else None
+                if parsed:
+                    ctes = {c.alias_or_name.lower() for c in getattr(parsed, "ctes", [])}
+                    from_clause = parsed.find(exp.From)
+                    tbl = from_clause.find(exp.Table) if from_clause else parsed.find(exp.Table)
+                    if tbl and tbl.name.lower() in ctes:
+                        for candidate in parsed.find_all(exp.Table):
+                            if candidate.name.lower() not in ctes:
+                                tbl = candidate
+                                break
+                    name = _clean_table_address(tbl) if tbl else "output"
+                else:
+                    name = "output"
+            except Exception:
+                name = "output"
 
-            # 1. Try sqlglot AST if available
-            if HAS_SQLGLOT:
-                parseable = _PARAM_RE.sub("__param__", raw)
-                try:
-                    parsed = [s for s in sqlglot.parse(parseable, dialect="bigquery") if s is not None]
-                    if parsed:
-                        from_clause = parsed[0].find(exp.From)
-                        if from_clause:
-                            tbl = from_clause.find(exp.Table)
-                            if tbl:
-                                primary_table = clean_table_name(tbl.sql(dialect="bigquery"))
-                except Exception:
-                    pass
-
-            # 2. Resilient fallback to regex
-            if not primary_table:
-                cleaned_stmt = strip_comments(raw).strip()
-                for match in _INPUT_TABLE_RE.finditer(cleaned_stmt):
-                    raw_name = match.group(1)
-                    name = clean_table_name(raw_name)
-                    if name.upper() not in {"SELECT", "UNNEST", "LATERAL"}:
-                        primary_table = name
-                        break
-
-            name = primary_table or "output"
             if name not in seen:
                 seen.add(name)
                 csv_tables.append(name)
@@ -378,74 +369,83 @@ def scan_select_output_tables(sql: str) -> List[str]:
 
 
 def extract_project_id_from_sql(sql: str) -> Optional[str]:
-    """Extract BigQuery project_id based on the first 3-part table address (project.dataset.table)."""
-    cleaned_sql = strip_comments(sql)
-
-    # 1. Check FROM and JOIN clauses for 3-part names
-    for match in _INPUT_TABLE_RE.finditer(cleaned_sql):
-        name = clean_table_name(match.group(1))
-        if name.upper() not in {"SELECT", "UNNEST", "LATERAL"}:
-            parts = name.split(".")
-            if len(parts) >= 3:
-                return parts[0]
-
-    # 2. Check OUTPUT table addresses
-    for match in _OUTPUT_TABLE_RE.finditer(cleaned_sql):
-        name = clean_table_name(match.group(1))
-        if name.upper() not in {"SELECT", "UNNEST"}:
-            parts = name.split(".")
-            if len(parts) >= 3:
-                return parts[0]
-
+    """Extract BigQuery project_id based on the first 3-part table address (project.dataset.table) using sqlglot."""
+    parseable = _to_parseable_sql(sql)
+    try:
+        for expr in sqlglot.parse(parseable, dialect="bigquery"):
+            if not expr:
+                continue
+            for tbl in expr.find_all(exp.Table):
+                if tbl.catalog:
+                    return tbl.catalog
+    except Exception:
+        pass
     return None
 
 
 def scan_query_tables(sql: str) -> Tuple[List[str], List[str], List[str]]:
-    """Determine input, output, and CSV output tables from BigQuery SQL.
+    """Determine input, output, and CSV output tables from BigQuery SQL using sqlglot AST.
 
-    Input tables: tables referenced in FROM and JOIN clauses (excluding CTEs).
+    Input tables: tables referenced in FROM and JOIN clauses (excluding tables created by a CTE).
     Output tables: targets of CREATE TABLE, INSERT INTO, and MERGE statements.
     Output CSV tables: standalone SELECT statements exporting to CSV.
 
     Returns:
         Tuple of (input_tables, output_tables, output_csv_tables)
     """
-    cleaned_sql = strip_comments(sql)
+    parseable = _to_parseable_sql(sql)
+    try:
+        statements = [s for s in sqlglot.parse(parseable, dialect="bigquery") if s is not None]
+    except Exception:
+        statements = []
 
-    # Detect CTE names to exclude internal CTE aliases from external inputs
     cte_names: Set[str] = set()
-    for match in _CTE_RE.finditer(cleaned_sql):
-        cte_names.add(clean_table_name(match.group(1)))
-
-    input_tables: List[str] = []
-    seen_inputs: Set[str] = set()
-
     output_tables: List[str] = []
     seen_outputs: Set[str] = set()
 
-    # 1. Extract output tables first
-    for match in _OUTPUT_TABLE_RE.finditer(cleaned_sql):
-        raw_name = match.group(1)
-        name = clean_table_name(raw_name)
-        if name.upper() in {"SELECT", "UNNEST"}:
-            continue
-        if name and name not in seen_outputs:
-            seen_outputs.add(name)
-            output_tables.append(name)
+    # 1. Discover CTEs and Output Target Tables from AST
+    for stmt in statements:
+        for cte in getattr(stmt, "ctes", []):
+            cte_names.add(cte.alias_or_name.lower())
 
-    # 2. Extract input tables from FROM and JOIN
-    for match in _INPUT_TABLE_RE.finditer(cleaned_sql):
-        raw_name = match.group(1)
-        name = clean_table_name(raw_name)
-        if name.upper() in {"SELECT", "UNNEST", "LATERAL"}:
-            continue
-        if name in cte_names:
-            continue
-        if name and name not in seen_inputs and name not in seen_outputs:
-            seen_inputs.add(name)
-            input_tables.append(name)
+        target_tbl = None
+        if isinstance(stmt, (exp.Create, exp.Insert, exp.Merge, exp.Update, exp.Delete, exp.Alter)):
+            if hasattr(stmt, "this") and stmt.this is not None:
+                target_tbl = stmt.this.find(exp.Table) or (stmt.this if isinstance(stmt.this, exp.Table) else None)
 
-    # 3. Extract CSV output tables
-    output_csv_tables = scan_select_output_tables(cleaned_sql)
+        if target_tbl:
+            name = _clean_table_address(target_tbl)
+            if name and name.upper() not in {"SELECT", "UNNEST"}:
+                if name not in seen_outputs:
+                    seen_outputs.add(name)
+                    output_tables.append(name)
+
+    # 2. Discover Input Tables from AST (excluding CTEs, target tables, and DROP statements)
+    input_tables: List[str] = []
+    seen_inputs: Set[str] = set()
+
+    for stmt in statements:
+        if isinstance(stmt, exp.Drop):
+            continue
+
+        stmt_target_tbl = None
+        if isinstance(stmt, (exp.Create, exp.Insert, exp.Merge, exp.Update, exp.Delete, exp.Alter)):
+            if hasattr(stmt, "this") and stmt.this is not None:
+                stmt_target_tbl = stmt.this.find(exp.Table) or (stmt.this if isinstance(stmt.this, exp.Table) else None)
+
+        for tbl in stmt.find_all(exp.Table):
+            if stmt_target_tbl and tbl is stmt_target_tbl:
+                continue
+            name = _clean_table_address(tbl)
+            if not name or name.upper() in {"SELECT", "UNNEST", "LATERAL"}:
+                continue
+            if tbl.name.lower() in cte_names:
+                continue
+            if name not in seen_inputs and name not in seen_outputs:
+                seen_inputs.add(name)
+                input_tables.append(name)
+
+    # 3. CSV output tables from standalone SELECT statements
+    output_csv_tables = scan_select_output_tables(sql)
 
     return input_tables, output_tables, output_csv_tables

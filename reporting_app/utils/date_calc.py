@@ -114,7 +114,9 @@ def format_filename_with_date(filename: str, filename_date: Optional[str]) -> st
         res = res.replace("MM", month_str)
         res = res.replace("DD", day_str)
         res = res.replace("Qn", quarter_str)
+        res = res.replace("QQ", quarter_str)
         res = res.replace("qn", quarter_str.lower())
+        res = res.replace("qq", quarter_str.lower())
         return res
 
     # Matches anything between %...%

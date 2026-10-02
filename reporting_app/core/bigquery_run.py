@@ -96,8 +96,9 @@ def run_bigquery_script(
 
     # Requirement 5: automatically pass and use the bigquery projectid based off
     # the first 'from' statement table address of the query being run
-    if not project_id:
-        project_id = extract_project_id_from_sql(substituted_sql)
+    # Removed due to unwanted project ids used. Take project id from workbench dataset.
+    # if not project_id:
+    #     project_id = extract_project_id_from_sql(substituted_sql)
 
     # Fallback to workbench dataset project if configured
     if not project_id:

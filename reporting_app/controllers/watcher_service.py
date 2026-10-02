@@ -1,94 +1,178 @@
-"""File watcher service for automatic scanning of the working directory."""
+"""Event-driven file watcher service using QFileSystemWatcher with self-write suppression."""
 
 import logging
+import time
 from pathlib import Path
-from typing import Dict, List, Optional
-from PySide6.QtCore import QObject, QTimer, Signal
+from typing import Dict, List, Optional, Set
+from PySide6.QtCore import QFileSystemWatcher, QObject, QTimer, Signal
 
 logger = logging.getLogger(__name__)
 
 
 class FileWatcherService(QObject):
-    """Monitors directory for changes using periodic lightweight polling."""
+    """Monitors active report's queries directory and files using QFileSystemWatcher."""
 
     directory_changed = Signal()
     file_changed = Signal(Path)
 
     def __init__(self, check_interval_ms: int = 5000, parent: Optional[QObject] = None):
         super().__init__(parent)
-        self.check_interval_ms = check_interval_ms
+        self._watcher = QFileSystemWatcher(self)
+        self._watcher.fileChanged.connect(self._on_qt_file_changed)
+        self._watcher.directoryChanged.connect(self._on_qt_directory_changed)
+
+        self._enabled: bool = True
+        self._target_report_dir: Optional[Path] = None
+        self._target_queries_dir: Optional[Path] = None
         self.target_dirs: List[Path] = []
-        self._file_mtimes: Dict[Path, float] = {}
-        self._last_mtime_sum: float = 0.0
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._check_for_changes)
-        self._enabled = True
+
+        # Suppression tracking: path -> expiration_timestamp (float)
+        self._suppressed_paths: Dict[Path, float] = {}
+
+        # Debouncer timer to coalesce rapid inotify events (250ms)
+        self._debounce_timer = QTimer(self)
+        self._debounce_timer.setSingleShot(True)
+        self._debounce_timer.setInterval(250)
+        self._debounce_timer.timeout.connect(self._on_debounce_timeout)
+
+        self._pending_files: Set[Path] = set()
+        self._pending_dir_change: bool = False
+
+    def set_target_report(self, report_dir: Optional[Path]) -> None:
+        """Scope file monitoring strictly to the active report's queries/ directory and its files."""
+        if report_dir:
+            self._target_report_dir = Path(report_dir).resolve()
+            queries_dir = self._target_report_dir / "queries"
+            if queries_dir.exists():
+                self._target_queries_dir = queries_dir.resolve()
+            else:
+                self._target_queries_dir = None
+        else:
+            self._target_report_dir = None
+            self._target_queries_dir = None
+
+        self._rebuild_watches()
 
     def set_target_directories(self, target_dirs: List[Path]) -> None:
-        self.target_dirs = target_dirs
-        self._file_mtimes = self._compute_file_mtimes()
-        self._last_mtime_sum = sum(self._file_mtimes.values())
+        """Set fallback target directories for scanning if no active report is chosen."""
+        self.target_dirs = [Path(d).resolve() for d in target_dirs if d and Path(d).exists()]
+        if not self._target_report_dir:
+            self._rebuild_watches()
 
     def set_enabled(self, enabled: bool) -> None:
+        """Enable or disable watcher reactions."""
         self._enabled = enabled
-        if enabled:
-            if not self._timer.isActive():
-                self._timer.start(self.check_interval_ms)
-        else:
-            self._timer.stop()
+        if not enabled:
+            self._pending_files.clear()
+            self._pending_dir_change = False
+            self._debounce_timer.stop()
 
     def is_enabled(self) -> bool:
         return self._enabled
 
-    def update_file_mtime(self, file_path: Path) -> None:
-        """Update cached mtime for a file to prevent self-modification trigger loops."""
+    def suppress(self, file_path: Path, duration_seconds: float = 1.0) -> None:
+        """Register a path to suppress file watcher reactions for self-writes."""
         try:
-            resolved = file_path.resolve()
-            if resolved.exists():
-                self._file_mtimes[resolved] = resolved.stat().st_mtime
-                self._last_mtime_sum = sum(self._file_mtimes.values())
-        except Exception:
-            pass
+            resolved = Path(file_path).resolve()
+            self._suppressed_paths[resolved] = time.time() + duration_seconds
+            logger.debug(f"Suppressed watcher events for {resolved} for {duration_seconds}s")
+        except Exception as e:
+            logger.debug(f"Error suppressing file path {file_path}: {e}")
 
-    def _compute_file_mtimes(self) -> Dict[Path, float]:
-        mtimes: Dict[Path, float] = {}
-        for target_dir in self.target_dirs:
-            if not target_dir or not target_dir.exists():
-                continue
-            try:
-                for path in target_dir.glob("**/*"):
-                    if any(part in {"outputs", ".git", ".venv", "__pycache__", "node_modules"} for part in path.parts):
-                        continue
-                    if path.is_file() and path.suffix in {".sql", ".json"}:
-                        try:
-                            mtimes[path.resolve()] = path.stat().st_mtime
-                        except Exception:
-                            pass
-            except Exception as e:
-                logger.debug(f"Error computing mtime for {target_dir}: {e}")
-        return mtimes
+    def update_file_mtime(self, file_path: Path) -> None:
+        """Backward-compatible hook that routes to self.suppress()."""
+        self.suppress(file_path)
 
-    def _compute_mtime_sum(self) -> float:
-        return sum(self._compute_file_mtimes().values())
+    def _rebuild_watches(self) -> None:
+        """Clear and re-add paths to the native QFileSystemWatcher."""
+        existing_files = self._watcher.files()
+        if existing_files:
+            self._watcher.removePaths(existing_files)
+        existing_dirs = self._watcher.directories()
+        if existing_dirs:
+            self._watcher.removePaths(existing_dirs)
 
-    def _check_for_changes(self) -> None:
-        if not self._enabled or not self.target_dirs:
+        if not self._enabled:
             return
-        current_mtimes = self._compute_file_mtimes()
-        if current_mtimes != self._file_mtimes:
-            added_or_removed = set(current_mtimes.keys()) != set(self._file_mtimes.keys())
-            modified_files = [
-                p for p, mt in current_mtimes.items()
-                if p in self._file_mtimes and abs(mt - self._file_mtimes[p]) > 1e-4
-            ]
-            self._file_mtimes = current_mtimes
-            self._last_mtime_sum = sum(current_mtimes.values())
 
-            for mf in modified_files:
-                logger.info(f"File modified: {mf}")
-                self.file_changed.emit(mf)
+        dirs_to_watch: Set[str] = set()
+        files_to_watch: Set[str] = set()
 
-            if added_or_removed:
-                logger.info("Files added or removed, notifying directory_changed listeners.")
-                self.directory_changed.emit()
+        if self._target_queries_dir and self._target_queries_dir.exists():
+            dirs_to_watch.add(str(self._target_queries_dir))
+            for f in self._target_queries_dir.iterdir():
+                if f.is_file() and f.suffix.lower() in {".sql", ".json"}:
+                    files_to_watch.add(str(f.resolve()))
+        elif self.target_dirs:
+            for td in self.target_dirs:
+                if td.exists():
+                    dirs_to_watch.add(str(td))
+                    qdir = td / "queries"
+                    if qdir.exists():
+                        dirs_to_watch.add(str(qdir.resolve()))
+                        for f in qdir.iterdir():
+                            if f.is_file() and f.suffix.lower() in {".sql", ".json"}:
+                                files_to_watch.add(str(f.resolve()))
 
+        if dirs_to_watch:
+            self._watcher.addPaths(list(dirs_to_watch))
+        if files_to_watch:
+            self._watcher.addPaths(list(files_to_watch))
+
+    def _on_qt_file_changed(self, path_str: str) -> None:
+        if not self._enabled:
+            return
+
+        p = Path(path_str).resolve()
+        now = time.time()
+
+        # Clean expired suppressions
+        self._suppressed_paths = {k: v for k, v in self._suppressed_paths.items() if v > now}
+
+        if p in self._suppressed_paths:
+            logger.debug(f"Ignoring suppressed self-write for {p}")
+            if p.exists() and path_str not in self._watcher.files():
+                self._watcher.addPath(path_str)
+            return
+
+        if p.exists() and path_str not in self._watcher.files():
+            self._watcher.addPath(path_str)
+
+        self._pending_files.add(p)
+        self._debounce_timer.start()
+
+    def _on_qt_directory_changed(self, path_str: str) -> None:
+        if not self._enabled:
+            return
+
+        self._pending_dir_change = True
+        self._debounce_timer.start()
+
+    def _on_debounce_timeout(self) -> None:
+        if not self._enabled:
+            return
+
+        now = time.time()
+        self._suppressed_paths = {k: v for k, v in self._suppressed_paths.items() if v > now}
+
+        if self._pending_dir_change:
+            self._pending_dir_change = False
+            self._rearm_unwatched_files()
+            self.directory_changed.emit()
+
+        changed_files = list(self._pending_files)
+        self._pending_files.clear()
+
+        for p in changed_files:
+            if p in self._suppressed_paths:
+                continue
+            self.file_changed.emit(p)
+
+    def _rearm_unwatched_files(self) -> None:
+        if self._target_queries_dir and self._target_queries_dir.exists():
+            current_files = set(self._watcher.files())
+            for f in self._target_queries_dir.iterdir():
+                if f.is_file() and f.suffix.lower() in {".sql", ".json"}:
+                    f_str = str(f.resolve())
+                    if f_str not in current_files:
+                        self._watcher.addPath(f_str)

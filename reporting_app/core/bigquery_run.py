@@ -268,12 +268,16 @@ def run_bigquery_script(
     wall_duration_sec = (t_end - t_start).total_seconds()
 
     # BigQuery Execution Telemetry
-    job_started_iso = query_job.started.isoformat() if getattr(query_job, "started", None) else None
-    job_ended_iso = query_job.ended.isoformat() if getattr(query_job, "ended", None) else None
+    started_dt = getattr(query_job, "started", None)
+    job_started_iso = started_dt.isoformat() if isinstance(started_dt, datetime) else None
+    ended_dt = getattr(query_job, "ended", None)
+    job_ended_iso = ended_dt.isoformat() if isinstance(ended_dt, datetime) else None
     bq_duration_sec = 0.0
-    if getattr(query_job, "started", None) and getattr(query_job, "ended", None):
+    if isinstance(started_dt, datetime) and isinstance(ended_dt, datetime):
         try:
-            bq_duration_sec = (query_job.ended - query_job.started).total_seconds()
+            diff = (ended_dt - started_dt).total_seconds()
+            if isinstance(diff, (int, float)):
+                bq_duration_sec = float(diff)
         except Exception:
             pass
 

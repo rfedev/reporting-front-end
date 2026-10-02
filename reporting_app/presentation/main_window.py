@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 
 from reporting_app.controllers.app_controller import AppController
 from reporting_app.controllers.flow_controller import ProcessFlowController
+from reporting_app.controllers.flow_runner import FlowRunner
 from reporting_app.core.bigquery_run import run_bigquery_script
 from reporting_app.core.models import ProcessFlowInfo, QueryInfo, QueryParameter, Report
 from reporting_app.presentation.flow_editor.editor_window import ProcessFlowEditorWindow
@@ -914,122 +915,53 @@ class MainWindow(QMainWindow):
                         filename_date = v
                         break
 
-        results_log = []
-        errors = []
-
-        failed_node_name = None
-
-        # 1. Run CSV Imports if present
+        steps = []
+        # 1. Imports
         csv_imports = flow_ctrl.get_csv_imports()
         for group in csv_imports:
             imp_items = group.get("items", []) if isinstance(group, dict) and "items" in group else [group]
-            for item in imp_items:
-                f_path = (item.get("file_path") or item.get("csv_path") or "").strip()
-                d_table = item.get("output_table", "").strip()
-                headers = item.get("has_headers", True)
-                sheet_name = item.get("sheet_name")
-                schema_mode = item.get("schema_mode", "auto")
-                manual_schema = item.get("manual_schema")
-                if not f_path or not d_table:
-                    continue
-                if filename_date:
-                    f_path = format_filename_with_date(f_path, filename_date)
+            steps.append({
+                "type": "import_csv",
+                "name": group.get("node_name", "Import Files") if isinstance(group, dict) else "Import Files",
+                "items": imp_items,
+            })
 
-                resolved_file = Path(f_path)
-                if not resolved_file.is_absolute() and active_report and active_report.folder_path:
-                    candidate = active_report.folder_path / "inputs" / resolved_file
-                    if candidate.exists() or not resolved_file.exists():
-                        resolved_file = candidate
-
-                self.status_bar.showMessage(f"Importing {resolved_file.name} -> {d_table}...")
-                QApplication.processEvents()
-                try:
-                    from reporting_app.core.bigquery_run import run_bigquery_import_file
-                    imp_res = run_bigquery_import_file(
-                        file_path=resolved_file,
-                        destination_table=d_table,
-                        has_headers=headers,
-                        sheet_name=sheet_name,
-                        schema_mode=schema_mode,
-                        manual_schema=manual_schema,
-                    )
-                    row_cnt = imp_res.get("row_count")
-                    cnt_str = f"{row_cnt:,} rows" if row_cnt is not None else "completed"
-                    results_log.append(f"📥 Imported '{f_path}' into '{d_table}' ({cnt_str})")
-                except Exception as e:
-                    failed_node_name = group.get("node_name", "Import Files") if isinstance(group, dict) else "Import Files"
-                    err_msg = f"Import failed for {d_table}: {e}"
-                    errors.append(err_msg)
-                    results_log.append(f"❌ {err_msg}")
-                    break
-            if errors:
-                break
-
-        if not errors:
-            self.status_bar.showMessage(f"Running process flow ({len(queries_order)} queries)...")
-
-        for idx, qname in enumerate(queries_order, start=1):
+        # 2. Queries
+        for qname in queries_order:
             qinfo = active_report.get_query(qname)
-            if not qinfo or not qinfo.file_path.exists():
-                failed_node_name = qname
-                err = f"Query '{qname}' SQL file not found."
-                errors.append(err)
-                results_log.append(f"[{idx}/{len(queries_order)}] ❌ {qname}: {err}")
-                break
+            steps.append({
+                "type": "query",
+                "name": qname,
+                "file_path": qinfo.file_path if qinfo else None,
+            })
 
-            self.status_bar.showMessage(f"[{idx}/{len(queries_order)}] Running {qname}...")
-            QApplication.processEvents()
+        runner = FlowRunner(parent_window=self, repo=self.controller.repo)
+        res = runner.execute_flow(
+            steps=steps,
+            report_folder=active_report.folder_path,
+            report_name=active_report.name,
+            flow_name=flow_ctrl.flow_name,
+            param_values=param_values,
+            filename_date=filename_date,
+            csv_map=csv_map,
+            outputs_dir=outputs_dir,
+        )
 
-            try:
-                custom_csv = csv_map.get(qname)
-                if custom_csv and filename_date:
-                    custom_csv = format_filename_with_date(custom_csv, filename_date)
-                res = run_bigquery_script(
-                    sql_script_path=qinfo.file_path,
-                    report_name=active_report.name,
-                    outputs_dir=outputs_dir,
-                    parameters=param_values,
-                    output_filename=custom_csv,
-                )
-                log_parts = []
-                if res.get("has_output_tables"):
-                    log_parts.append(f"Table(s): {', '.join(res.get('output_tables', []))}")
-                if res.get("is_export"):
-                    details = res.get("export_details", [])
-                    if len(details) == 1:
-                        d = details[0]
-                        log_parts.append(f"Exported '{d['filename']}' ({d['row_count']:,} rows)")
-                    elif len(details) > 1:
-                        exp_lines = [f"Exported {len(details)} tables:"]
-                        for d in details:
-                            exp_lines.append(f"* {d['filename']} ({d['row_count']:,} rows)")
-                        log_parts.append("\n".join(exp_lines))
-                    else:
-                        log_parts.append(f"Exported {res.get('row_count', 0):,} rows to {res.get('output_file')}")
-                if not log_parts:
-                    log_parts.append("Executed successfully.")
-
-                results_log.append(f"[{idx}/{len(queries_order)}] 📦 {qname}:\n" + "\n".join(log_parts) if any("\n" in p for p in log_parts) else f"[{idx}/{len(queries_order)}] 📦 {qname}: {' | '.join(log_parts)}")
-            except Exception as e:
-                failed_node_name = qname
-                err = f"Execution failed: {e}"
-                errors.append(f"{qname}: {e}")
-                results_log.append(f"[{idx}/{len(queries_order)}] ❌ {qname}: {err}")
-                break
-
-        if errors:
-            failed_node_header = f"Error in node: '{failed_node_name}'\n\n" if failed_node_name else ""
+        if res["success"]:
+            self.status_bar.showMessage(f"Process flow '{flow_ctrl.flow_name}' completed successfully.", 5000)
+            QMessageBox.information(
+                self,
+                "Process Flow Completed",
+                f"Successfully executed all {len(steps)} step(s):\n\n" + "\n".join(res["results_log"]),
+            )
+        elif res.get("cancelled"):
+            self.status_bar.showMessage(f"Process flow '{flow_ctrl.flow_name}' was cancelled.", 5000)
+        else:
             self.status_bar.showMessage(f"Process flow '{flow_ctrl.flow_name}' failed.", 5000)
             QMessageBox.critical(
                 self,
                 "Process Flow Execution Error",
-                f"{failed_node_header}Process flow stopped due to an error:\n\n" + "\n".join(results_log),
+                f"Process flow stopped due to an error:\n\n" + "\n".join(res["results_log"]),
             )
-        else:
-            self.status_bar.showMessage(f"Process flow '{flow_ctrl.flow_name}' completed.", 5000)
-            QMessageBox.information(
-                self,
-                "Process Flow Completed",
-                f"Successfully executed all {len(queries_order)} query step(s):\n\n" + "\n".join(results_log),
-            )
+
 

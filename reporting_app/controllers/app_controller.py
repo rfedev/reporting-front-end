@@ -42,7 +42,7 @@ class AppController(QObject):
         self.scanner = FileScanner(working_dirs)
 
         # File watcher
-        self.watcher = FileWatcherService(check_interval_ms=5000, parent=self)
+        self.watcher = FileWatcherService(parent=self)
         self._update_watcher_directories(working_dirs)
         self.watcher.set_enabled(self.repo.get_auto_scan())
         self.watcher.directory_changed.connect(self.scan)
@@ -182,6 +182,8 @@ class AppController(QObject):
         """Select active report by its key/name and populate flows and queries."""
         report = self.reports_by_key.get(report_key) or self.reports_by_name.get(report_key)
         self.active_report = report
+        if report and report.folder_path:
+            self.watcher.set_target_report(report.folder_path)
         self.active_report_changed.emit(report)
 
         if not report:

@@ -70,20 +70,12 @@ class FileScanner:
         if queries_dir.is_dir():
             return True
 
-        # Check for sql files in root or code/
-        has_sql = any(directory.glob("*.sql"))
-        if not has_sql:
-            code_dir = directory / "code"
-            if code_dir.is_dir():
-                has_sql = any(code_dir.glob("*.sql"))
-
-        has_json = any(directory.glob("*.json"))
         try:
             is_empty = not any(directory.iterdir())
         except Exception:
             is_empty = False
 
-        return has_sql or has_json or is_empty
+        return is_empty
 
     def scan_all_reports(self) -> List[Report]:
         """Scan all configured working directories and return all discovered reports."""
@@ -138,24 +130,11 @@ class FileScanner:
         return res
 
     def _scan_queries(self, report_dir: Path, report_name: str) -> List[QueryInfo]:
-        """Discover SQL files in ./queries/*.sql, ./code/*.sql, and root/*.sql without reading or parsing file content."""
+        """Discover SQL files strictly in ./<report>/queries/*.sql without reading or parsing file content."""
         sql_files: List[Path] = []
-
-        # Primary location: ./<report>/queries/*.sql
         queries_dir = report_dir / "queries"
         if queries_dir.exists() and queries_dir.is_dir():
             sql_files.extend(queries_dir.glob("*.sql"))
-
-        # Fallback locations
-        code_dir = report_dir / "code"
-        if code_dir.exists() and code_dir.is_dir():
-            for p in code_dir.glob("*.sql"):
-                if p not in sql_files:
-                    sql_files.append(p)
-
-        for p in report_dir.glob("*.sql"):
-            if p not in sql_files:
-                sql_files.append(p)
 
         queries: List[QueryInfo] = []
         for file_path in sorted(sql_files, key=lambda x: x.name):
@@ -183,20 +162,12 @@ class FileScanner:
 
         return queries
 
-
     def _scan_process_flows(self, report_dir: Path, report_name: str) -> List[ProcessFlowInfo]:
-        """Scan JSON files representing process flows in ./queries/*.json and root/*.json."""
+        """Scan JSON files representing process flows strictly in ./<report>/queries/*.json."""
         json_files: List[Path] = []
-
-        # Primary location: ./<report>/queries/*.json
         queries_dir = report_dir / "queries"
         if queries_dir.exists() and queries_dir.is_dir():
             json_files.extend(queries_dir.glob("*.json"))
-
-        # Fallback in report root
-        for p in report_dir.glob("*.json"):
-            if p not in json_files:
-                json_files.append(p)
 
         flows: List[ProcessFlowInfo] = []
         for file_path in sorted(json_files, key=lambda x: x.name):

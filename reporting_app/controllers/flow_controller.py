@@ -34,13 +34,7 @@ class ProcessFlowController(QObject):
         if flow_info:
             self.file_path = flow_info.file_path
         else:
-            # Check queries/ directory first
-            queries_path = report.folder_path / "queries" / f"{self.flow_name}.json"
-            root_path = report.folder_path / f"{self.flow_name}.json"
-            if root_path.exists() and not queries_path.exists():
-                self.file_path = root_path
-            else:
-                self.file_path = queries_path
+            self.file_path = report.folder_path / "queries" / f"{self.flow_name}.json"
 
         self.flow_data: Dict[str, Any] = {}
         self.parameter_defaults: Dict[str, str] = {}
@@ -154,12 +148,16 @@ class ProcessFlowController(QObject):
         exec_nodes: Dict[str, Dict[str, Any]] = {}
         for nid, ndata in nodes_dict.items():
             ntype = ndata.get("type_")
+            pos = ndata.get("pos", [0.0, 0.0])
+            pos_x = float(pos[0]) if len(pos) > 0 else 0.0
+            pos_y = float(pos[1]) if len(pos) > 1 else 0.0
+
             if ntype == "reporting.nodes.QueryNode":
                 qname = ndata.get("custom", {}).get("query_name") or ndata.get("name")
-                exec_nodes[nid] = {"type": "query", "id": nid, "name": qname}
+                exec_nodes[nid] = {"type": "query", "id": nid, "name": qname, "pos": (pos_x, pos_y)}
             elif ntype == "reporting.nodes.ImportCsvNode":
                 iname = ndata.get("name")
-                exec_nodes[nid] = {"type": "import_csv", "id": nid, "name": iname}
+                exec_nodes[nid] = {"type": "import_csv", "id": nid, "name": iname, "pos": (pos_x, pos_y)}
 
         if not exec_nodes:
             return [{"type": "query", "id": q, "name": q} for q in self.get_query_names()]
@@ -179,24 +177,37 @@ class ProcessFlowController(QObject):
                         adj_list[out_id].append(in_id)
                         in_degree[in_id] += 1
 
-        # Kahn's algorithm for topological sort
-        queue = deque([nid for nid, deg in in_degree.items() if deg == 0])
+        # Kahn's algorithm with deterministic tie-breaking (canvas X then Y, then name)
+        def sort_key(node_id: str):
+            info = exec_nodes[node_id]
+            px, py = info.get("pos", (0.0, 0.0))
+            return (px, py, str(info.get("name", "")))
+
+        ready = [nid for nid, deg in in_degree.items() if deg == 0]
+        ready.sort(key=sort_key)
+        queue = deque(ready)
         ordered_ids: List[str] = []
 
         while queue:
             curr = queue.popleft()
             ordered_ids.append(curr)
+            newly_ready = []
             for neighbor in adj_list[curr]:
                 in_degree[neighbor] -= 1
                 if in_degree[neighbor] == 0:
-                    queue.append(neighbor)
+                    newly_ready.append(neighbor)
+            newly_ready.sort(key=sort_key)
+            queue.extend(newly_ready)
 
-        # Include any remaining nodes (in case of cycles or disconnected components)
-        for nid in exec_nodes:
-            if nid not in ordered_ids:
-                ordered_ids.append(nid)
+        # Include any remaining nodes (cycles or disconnected components), sorted by canvas pos
+        remaining = [nid for nid in exec_nodes if nid not in ordered_ids]
+        remaining.sort(key=sort_key)
+        ordered_ids.extend(remaining)
 
-        return [exec_nodes[nid] for nid in ordered_ids]
+        return [
+            {"type": exec_nodes[nid]["type"], "id": exec_nodes[nid]["id"], "name": exec_nodes[nid]["name"]}
+            for nid in ordered_ids
+        ]
 
     def get_execution_order(self, graph_session: Optional[Dict[str, Any]] = None) -> List[str]:
         """Determine topological execution order of queries in the process flow."""

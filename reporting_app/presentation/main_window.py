@@ -680,9 +680,10 @@ class MainWindow(QMainWindow):
             flow_info=flow_info,
             flow_name=flow_name,
             app_controller=self.controller,
-            parent=self,
+            parent=None,
         )
         self.editor_windows.append(editor)
+        editor.destroyed.connect(lambda *_: self.editor_windows.remove(editor) if editor in self.editor_windows else None)
         editor.show()
 
 
@@ -711,9 +712,10 @@ class MainWindow(QMainWindow):
             flow_info=flow_info,
             flow_name=flow_name,
             app_controller=self.controller,
-            parent=self,
+            parent=None,
         )
         self.editor_windows.append(editor)
+        editor.destroyed.connect(lambda *_: self.editor_windows.remove(editor) if editor in self.editor_windows else None)
         editor.show()
 
     def _on_edit_query(self) -> None:
@@ -963,5 +965,26 @@ class MainWindow(QMainWindow):
                 "Process Flow Execution Error",
                 f"Process flow stopped due to an error:\n\n" + "\n".join(res["results_log"]),
             )
+
+    def closeEvent(self, event) -> None:
+        """Ensure all child process flow editor windows and background watchers close cleanly on exit."""
+        for editor in list(self.editor_windows):
+            try:
+                if not editor.close():
+                    event.ignore()
+                    return
+            except Exception as e:
+                logger.debug(f"Error closing editor window on shutdown: {e}")
+
+        if self.controller and hasattr(self.controller, "watcher"):
+            try:
+                self.controller.watcher.stop()
+            except Exception:
+                pass
+
+        QApplication.processEvents()
+        event.accept()
+        super().closeEvent(event)
+
 
 

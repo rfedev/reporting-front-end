@@ -41,16 +41,119 @@ BQ_MODES = [
 ]
 
 
+def _detect_series_type(s: pd.Series) -> str:
+    """Infer BigQuery data type from a pandas Series."""
+    non_null = s.dropna()
+    if non_null.empty:
+        return "STRING"
+
+    # 1. Datetime / Date checks
+    if pd.api.types.is_datetime64_any_dtype(non_null):
+        try:
+            if (
+                (non_null.dt.hour == 0).all()
+                and (non_null.dt.minute == 0).all()
+                and (non_null.dt.second == 0).all()
+                and (non_null.dt.microsecond == 0).all()
+            ):
+                return "DATE"
+        except Exception:
+            pass
+        return "TIMESTAMP"
+
+    # 2. Boolean checks
+    if pd.api.types.is_bool_dtype(non_null):
+        return "BOOLEAN"
+    str_vals = non_null.astype(str).str.strip().str.lower()
+    if str_vals.isin(["true", "false"]).all():
+        return "BOOLEAN"
+
+    # 3. Numeric checks
+    num = pd.to_numeric(non_null, errors="coerce")
+    if num.notna().all():
+        try:
+            if (num % 1 == 0).all():
+                return "INTEGER"
+        except Exception:
+            pass
+        return "FLOAT"
+
+    # 4. String date checks
+    if str_vals.str.contains(r"[-/]").any():
+        try:
+            dt_parsed = pd.to_datetime(non_null, errors="coerce")
+            if dt_parsed.notna().all():
+                if (
+                    (dt_parsed.dt.hour == 0).all()
+                    and (dt_parsed.dt.minute == 0).all()
+                    and (dt_parsed.dt.second == 0).all()
+                    and (dt_parsed.dt.microsecond == 0).all()
+                ):
+                    return "DATE"
+                return "TIMESTAMP"
+        except Exception:
+            pass
+
+    return "STRING"
+
+
+def inspect_file_schema(
+    file_path: str,
+    sheet_name: Optional[str] = None,
+    has_headers: bool = True,
+) -> List[Dict[str, Any]]:
+    """Extract column headers and auto-detect BigQuery data types from a CSV or XLSX file."""
+    p = Path(file_path)
+    if not p.exists():
+        return []
+
+    ext = p.suffix.lower()
+    df = None
+    try:
+        if ext in (".xlsx", ".xls"):
+            sheet = sheet_name or 0
+            df = pd.read_excel(p, sheet_name=sheet, header=0 if has_headers else None, nrows=5000, engine="openpyxl")
+        elif ext == ".csv":
+            df = pd.read_csv(p, header=0 if has_headers else None, nrows=5000, encoding="utf-8-sig", low_memory=False)
+    except Exception:
+        return []
+
+    if df is None or (df.empty and len(df.columns) == 0):
+        return []
+
+    if has_headers:
+        col_names = [str(c).strip() for c in df.columns]
+    else:
+        col_names = [f"col_{i+1}" for i in range(len(df.columns))]
+
+    fields = []
+    for idx, col in enumerate(df.columns):
+        col_name = col_names[idx] if idx < len(col_names) else f"col_{idx+1}"
+        s = df[col]
+        detected_type = _detect_series_type(s)
+        fields.append({
+            "name": col_name,
+            "type": detected_type,
+            "mode": "NULLABLE",
+            "description": "",
+        })
+
+    return fields
+
+
 def inspect_file_columns(
     file_path: str,
     sheet_name: Optional[str] = None,
     has_headers: bool = True,
 ) -> List[str]:
     """Extract column headers from a CSV or XLSX file."""
+    schema = inspect_file_schema(file_path, sheet_name=sheet_name, has_headers=has_headers)
+    if schema:
+        return [f["name"] for f in schema]
+
     p = Path(file_path)
     if not p.exists():
         return []
-
     ext = p.suffix.lower()
     try:
         if ext == ".csv":
@@ -97,7 +200,7 @@ class SchemaEditorDialog(QDialog):
 
         self._build_ui()
         if not self._schema_fields and self._file_path:
-            self._load_from_file_headers()
+            self._auto_detect_all_fields()
         else:
             self._populate_table()
 
@@ -123,38 +226,31 @@ class SchemaEditorDialog(QDialog):
         self.table.setSelectionMode(QTableWidget.SingleSelection)
         layout.addWidget(self.table, 1)
 
-        # Table buttons row
+        # Action buttons row: Auto Detect and Reload from File on left, Import and Export on right
         btn_row = QHBoxLayout()
-        add_btn = QPushButton("➕ Add Field")
-        add_btn.clicked.connect(self._on_add_field)
-        btn_row.addWidget(add_btn)
 
-        del_btn = QPushButton("🗑 Remove Field")
-        del_btn.clicked.connect(self._on_remove_field)
-        btn_row.addWidget(del_btn)
+        self.auto_detect_btn = QPushButton("Auto Detect")
+        self.auto_detect_btn.setToolTip("Auto detect all field types from source file")
+        self.auto_detect_btn.clicked.connect(self._on_auto_detect)
+        btn_row.addWidget(self.auto_detect_btn)
 
-        up_btn = QPushButton("⬆ Move Up")
-        up_btn.clicked.connect(self._on_move_up)
-        btn_row.addWidget(up_btn)
+        self.reload_btn = QPushButton("Reload from File")
+        self.reload_btn.setToolTip("Reload columns from source file and auto detect types for new fields")
+        self.reload_btn.clicked.connect(self._on_reload_from_file)
+        btn_row.addWidget(self.reload_btn)
 
-        down_btn = QPushButton("⬇ Move Down")
-        down_btn.clicked.connect(self._on_move_down)
-        btn_row.addWidget(down_btn)
+        has_file = bool(self._file_path and Path(self._file_path).exists())
+        self.auto_detect_btn.setEnabled(has_file)
+        self.reload_btn.setEnabled(has_file)
 
         btn_row.addStretch()
 
-        if self._file_path:
-            detect_btn = QPushButton("🔄 Reload from File")
-            detect_btn.setToolTip("Extract column headers from source file and reset table")
-            detect_btn.clicked.connect(self._load_from_file_headers)
-            btn_row.addWidget(detect_btn)
-
-        import_json_btn = QPushButton("📂 Import JSON...")
+        import_json_btn = QPushButton("Import JSON...")
         import_json_btn.setToolTip("Load schema from BigQuery JSON file")
         import_json_btn.clicked.connect(self._on_import_json)
         btn_row.addWidget(import_json_btn)
 
-        export_json_btn = QPushButton("💾 Export JSON...")
+        export_json_btn = QPushButton("Export JSON...")
         export_json_btn.setToolTip("Export current schema to BigQuery JSON file")
         export_json_btn.clicked.connect(self._on_export_json)
         btn_row.addWidget(export_json_btn)
@@ -167,18 +263,51 @@ class SchemaEditorDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
-    def _load_from_file_headers(self) -> None:
-        cols = inspect_file_columns(self._file_path, self._sheet_name, self._has_headers)
-        if not cols:
+    def _auto_detect_all_fields(self) -> None:
+        detected = inspect_file_schema(self._file_path, self._sheet_name, self._has_headers)
+        if not detected:
             if not self._schema_fields:
-                # Add default empty row
                 self._schema_fields = [{"name": "column_1", "type": "STRING", "mode": "NULLABLE", "description": ""}]
         else:
-            self._schema_fields = [
-                {"name": c, "type": "STRING", "mode": "NULLABLE", "description": ""}
-                for c in cols
-            ]
+            current_data = {r["name"].lower(): r for r in self._collect_schema()}
+            for f in detected:
+                existing = current_data.get(f["name"].lower())
+                if existing and existing.get("description"):
+                    f["description"] = existing["description"]
+            self._schema_fields = detected
         self._populate_table()
+
+    def _on_auto_detect(self) -> None:
+        self._auto_detect_all_fields()
+
+    def _on_reload_from_file(self) -> None:
+        detected = inspect_file_schema(self._file_path, self._sheet_name, self._has_headers)
+        if not detected:
+            QMessageBox.warning(self, "Reload from File", "No columns found in the source file.")
+            return
+
+        current_schema = self._collect_schema()
+        current_map = {f["name"].lower(): f for f in current_schema}
+
+        new_schema = []
+        for f in detected:
+            name_lower = f["name"].lower()
+            if name_lower in current_map:
+                existing = current_map[name_lower]
+                new_schema.append({
+                    "name": f["name"],
+                    "type": existing.get("type", "STRING"),
+                    "mode": existing.get("mode", "NULLABLE"),
+                    "description": existing.get("description", ""),
+                })
+            else:
+                # New field added from the reload: auto detect field type!
+                new_schema.append(f)
+
+        self._schema_fields = new_schema
+        self._populate_table()
+
+    _load_from_file_headers = _on_reload_from_file
 
     def _populate_table(self) -> None:
         self.table.setRowCount(0)
@@ -231,49 +360,6 @@ class SchemaEditorDialog(QDialog):
         desc = desc_item.text().strip() if desc_item else ""
 
         return {"name": name, "type": type_val, "mode": mode_val, "description": desc}
-
-    def _on_add_field(self) -> None:
-        idx = self.table.rowCount() + 1
-        new_row = {"name": f"column_{idx}", "type": "STRING", "mode": "NULLABLE", "description": ""}
-        row = self._insert_row(new_row)
-        self.table.selectRow(row)
-
-    def _on_remove_field(self) -> None:
-        selected = self.table.selectionModel().selectedRows()
-        if not selected:
-            return
-        row = selected[0].row()
-        self.table.removeRow(row)
-
-    def _on_move_up(self) -> None:
-        selected = self.table.selectionModel().selectedRows()
-        if not selected:
-            return
-        row = selected[0].row()
-        if row <= 0:
-            return
-        data_curr = self._get_row_data(row)
-        data_prev = self._get_row_data(row - 1)
-        self.table.removeRow(row)
-        self.table.removeRow(row - 1)
-        self._insert_row(data_curr, row - 1)
-        self._insert_row(data_prev, row)
-        self.table.selectRow(row - 1)
-
-    def _on_move_down(self) -> None:
-        selected = self.table.selectionModel().selectedRows()
-        if not selected:
-            return
-        row = selected[0].row()
-        if row >= self.table.rowCount() - 1:
-            return
-        data_curr = self._get_row_data(row)
-        data_next = self._get_row_data(row + 1)
-        self.table.removeRow(row + 1)
-        self.table.removeRow(row)
-        self._insert_row(data_next, row)
-        self._insert_row(data_curr, row + 1)
-        self.table.selectRow(row + 1)
 
     def _on_import_json(self) -> None:
         chosen, _ = QFileDialog.getOpenFileName(

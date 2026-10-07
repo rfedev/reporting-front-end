@@ -93,6 +93,7 @@ class ProcessFlowEditorWindow(QMainWindow):
 
         self.setWindowTitle(f"Process Flow - {report.name} - {self.flow_controller.flow_name}")
         self.resize(1200, 750)
+        self.setAttribute(Qt.WA_DeleteOnClose, True)
 
         self._node_counter = 0
         self._node_positions: Dict[str, Tuple[float, float]] = {}
@@ -2010,6 +2011,30 @@ class ProcessFlowEditorWindow(QMainWindow):
                     self.app_controller.repo.set_setting("flow_editor_splitter_sizes", ",".join(str(s) for s in cur_sizes))
         except Exception as e:
             logger.debug(f"Error saving splitter sizes on close: {e}")
+
+        # Stop debounce auto-save timer
+        if hasattr(self, "_auto_save_timer") and self._auto_save_timer.isActive():
+            self._auto_save_timer.stop()
+
+        # Disconnect controller active_report_changed signal
+        if self.app_controller:
+            try:
+                self.app_controller.active_report_changed.disconnect(self._on_report_updated_from_controller)
+            except Exception:
+                pass
+
+        # Cancel any active live connection on viewer and close graph
+        try:
+            viewer = self.graph.viewer()
+            if hasattr(viewer, "end_live_connection"):
+                viewer.end_live_connection()
+            if hasattr(self, "graph"):
+                self.graph.close()
+        except Exception:
+            pass
+
+        self.hide()
+        event.accept()
         super().closeEvent(event)
 
     def _get_selected_query_nodes(self) -> List[BaseNode]:

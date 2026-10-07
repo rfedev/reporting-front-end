@@ -458,6 +458,60 @@ def run_bigquery_import_file(
         else:
             df.columns = [str(c).strip() for c in df.columns]
 
+        if bq_schema:
+            # Reorder and align columns to match bq_schema
+            existing_cols = {str(c).strip().lower(): c for c in df.columns}
+            aligned_df = pd.DataFrame(index=df.index)
+            for f in bq_schema:
+                col_name = f.name.strip()
+                match_col = col_name if col_name in df.columns else existing_cols.get(col_name.lower())
+                if match_col is not None:
+                    aligned_df[col_name] = df[match_col]
+                else:
+                    aligned_df[col_name] = None
+            df = aligned_df
+
+            # Cast each column to the required BigQuery type for pyarrow / bigquery
+            for field in bq_schema:
+                col = field.name
+                ftype = field.field_type.upper()
+                if ftype == "DATE":
+                    df[col] = pd.to_datetime(df[col], errors="coerce").dt.date
+                elif ftype in ("DATETIME", "TIMESTAMP"):
+                    df[col] = pd.to_datetime(df[col], errors="coerce")
+                elif ftype in ("INTEGER", "INT64"):
+                    df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
+                elif ftype in ("FLOAT", "FLOAT64", "NUMERIC", "BIGNUMERIC"):
+                    df[col] = pd.to_numeric(df[col], errors="coerce").astype("Float64")
+                elif ftype in ("BOOLEAN", "BOOL"):
+                    df[col] = df[col].map({
+                        True: True, False: False,
+                        "True": True, "False": False,
+                        "true": True, "false": False,
+                        1: True, 0: False,
+                        "1": True, "0": False,
+                        "TRUE": True, "FALSE": False
+                    }).astype("boolean")
+                elif ftype in ("STRING", "BYTES"):
+                    s = df[col].copy()
+                    mask = s.isna()
+                    s = s.astype(str)
+                    s[mask] = None
+                    df[col] = s.astype("string")
+        else:
+            # Auto-detect mode: Ensure Excel dates are treated as DATE instead of TIMESTAMP
+            for col in df.columns:
+                if pd.api.types.is_datetime64_any_dtype(df[col]):
+                    non_null = df[col].dropna()
+                    if (
+                        not non_null.empty
+                        and (non_null.dt.hour == 0).all()
+                        and (non_null.dt.minute == 0).all()
+                        and (non_null.dt.second == 0).all()
+                        and (non_null.dt.microsecond == 0).all()
+                    ):
+                        df[col] = df[col].dt.date
+
         job_config = bigquery.LoadJobConfig(
             schema=bq_schema if bq_schema else None,
             autodetect=False if bq_schema else True,

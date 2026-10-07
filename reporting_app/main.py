@@ -43,6 +43,13 @@ def apply_dark_theme(app: QApplication) -> None:
 
 
 def main() -> int:
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.user32.DisableProcessWindowsGhosting()
+        except Exception as e:
+            logger.debug(f"DisableProcessWindowsGhosting failed: {e}")
+
     app = QApplication(sys.argv)
     app.setApplicationName("Reporting Front End")
     apply_dark_theme(app)
@@ -53,6 +60,22 @@ def main() -> int:
     controller = AppController(db_manager=db_manager)
     window = MainWindow(controller=controller)
     window.show()
+
+    def on_about_to_quit():
+        if hasattr(controller, "watcher"):
+            try:
+                controller.watcher.stop()
+            except Exception:
+                pass
+        for editor in list(window.editor_windows):
+            try:
+                if editor.isVisible():
+                    editor.close()
+            except Exception:
+                pass
+        QApplication.processEvents()
+
+    app.aboutToQuit.connect(on_about_to_quit)
 
     return app.exec()
 

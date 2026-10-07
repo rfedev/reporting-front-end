@@ -67,6 +67,19 @@ class FileWatcherService(QObject):
             self._pending_dir_change = False
             self._debounce_timer.stop()
 
+    def stop(self) -> None:
+        """Stop file watcher, remove all watched paths, and stop timers."""
+        self.set_enabled(False)
+        try:
+            files = self._watcher.files()
+            if files:
+                self._watcher.removePaths(files)
+            dirs = self._watcher.directories()
+            if dirs:
+                self._watcher.removePaths(dirs)
+        except Exception as e:
+            logger.debug(f"Error stopping watcher paths: {e}")
+
     def is_enabled(self) -> bool:
         return self._enabled
 

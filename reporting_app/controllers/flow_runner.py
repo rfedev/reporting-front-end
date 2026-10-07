@@ -67,7 +67,7 @@ class FlowWorker(QThread):
         total_steps = len(self.steps)
         failed_node_name: Optional[str] = None
 
-        self.log_message.emit(f"🚀 Starting execution of '{self.flow_name}' ({total_steps} step(s))...")
+        self.log_message.emit(f"Starting execution of '{self.flow_name}' ({total_steps} step(s))...")
 
         for idx, step in enumerate(self.steps, start=1):
             if self._is_cancelled:
@@ -112,7 +112,7 @@ class FlowWorker(QThread):
                         if cand.exists() or not resolved_file.exists():
                             resolved_file = cand
 
-                    self.log_message.emit(f"[{idx}/{total_steps}] 📥 Importing {resolved_file.name} -> {d_table}...")
+                    self.log_message.emit(f"[{idx}/{total_steps}] Importing {resolved_file.name} -> {d_table}...")
 
                     try:
                         imp_res = run_bigquery_import_file(
@@ -125,7 +125,7 @@ class FlowWorker(QThread):
                         )
                         row_cnt = imp_res.get("row_count")
                         cnt_str = f"{row_cnt:,} rows" if row_cnt is not None else "completed"
-                        log_line = f"[{idx}/{total_steps}] 📥 Imported '{f_path}' into '{d_table}' ({cnt_str})"
+                        log_line = f"[{idx}/{total_steps}] Imported '{f_path}' into '{d_table}' ({cnt_str})"
                         results_log.append(log_line)
                         self.log_message.emit(log_line)
                         imp_records.append({

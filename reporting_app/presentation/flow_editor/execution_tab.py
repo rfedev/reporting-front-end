@@ -232,6 +232,9 @@ class FlowExecutionTab(QWidget):
         self._current_running_node_name: Optional[str] = None
         self._current_step_start_mono: float = 0.0
         self._current_run_context_title: str = "Process Flow"
+        self._canvas_press_pos: Optional[Any] = None
+        self._canvas_press_button: Optional[Any] = None
+        self._canvas_press_modifiers: Any = Qt.NoModifier
 
         self._exec_anim_timer = QTimer(self)
         self._exec_anim_timer.setInterval(50)
@@ -931,8 +934,41 @@ class FlowExecutionTab(QWidget):
             self.reposition_in_parent()
             self.raise_()
         elif event.type() == QEvent.MouseButtonPress and watched is not self and watched is not self.parentWidget():
-            if self.isVisible() and not self.is_running():
-                self.set_selected(False)
+            if isinstance(event, QMouseEvent):
+                self._canvas_press_pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+                self._canvas_press_button = event.button()
+                self._canvas_press_modifiers = event.modifiers()
+        elif event.type() == QEvent.MouseButtonRelease and watched is not self and watched is not self.parentWidget():
+            if isinstance(event, QMouseEvent):
+                press_pos = self._canvas_press_pos
+                press_btn = self._canvas_press_button
+                press_mods = self._canvas_press_modifiers
+
+                self._canvas_press_pos = None
+                self._canvas_press_button = None
+                self._canvas_press_modifiers = Qt.NoModifier
+
+                # Panning is done with MiddleButton, Alt+drag, or moving/dragging the mouse.
+                # Never deselect on panning or dragging.
+                curr_pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+                is_middle_pan = (press_btn == Qt.MiddleButton or event.button() == Qt.MiddleButton)
+                is_alt_pan = bool((press_mods & Qt.AltModifier) or (event.modifiers() & Qt.AltModifier))
+                is_drag_or_pan = False
+                if press_pos is not None:
+                    delta = (curr_pos - press_pos).manhattanLength()
+                    if delta >= 5:
+                        is_drag_or_pan = True
+
+                if (
+                    press_btn == Qt.LeftButton
+                    and event.button() == Qt.LeftButton
+                    and not is_middle_pan
+                    and not is_alt_pan
+                    and not is_drag_or_pan
+                ):
+                    if not self.is_running() and self._selected:
+                        self.set_selected(False)
+
         return super().eventFilter(watched, event)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:

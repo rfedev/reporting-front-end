@@ -12,6 +12,11 @@ from pathlib import Path
 import socket
 import threading
 from typing import Any, Dict, List, Optional
+import warnings
+
+# Suppress noisy Google Cloud SDK ADC warnings and missing default project logs
+warnings.filterwarnings("ignore", category=UserWarning, module="google.auth._default")
+logging.getLogger("google.auth._default").setLevel(logging.ERROR)
 
 logger = logging.getLogger(__name__)
 
@@ -20,14 +25,16 @@ def get_authenticated_user_account() -> str:
     """Return the Google Cloud account email or fall back to system user."""
     # 1. Try google.auth.default() credentials
     try:
-        import google.auth
-        credentials, _ = google.auth.default()
-        email = getattr(credentials, "service_account_email", None) or getattr(credentials, "_service_account_email", None)
-        if email:
-            return str(email)
-        account = getattr(credentials, "account", None) or getattr(credentials, "_account", None)
-        if account:
-            return str(account)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=UserWarning, module="google.auth._default")
+            import google.auth
+            credentials, _ = google.auth.default()
+            email = getattr(credentials, "service_account_email", None) or getattr(credentials, "_service_account_email", None)
+            if email:
+                return str(email)
+            account = getattr(credentials, "account", None) or getattr(credentials, "_account", None)
+            if account:
+                return str(account)
     except Exception:
         pass
 
@@ -162,6 +169,9 @@ def record_audit_run(
     dataset_id = parts[1].strip()
     table_id = f"{project_id}.{dataset_id}.audit"
 
+    if project_id and not os.environ.get("GOOGLE_CLOUD_PROJECT"):
+        os.environ["GOOGLE_CLOUD_PROJECT"] = project_id
+
     try:
         from google.cloud import bigquery
 
@@ -212,6 +222,22 @@ def record_audit_run(
         if not rows_to_insert:
             return True
 
+        # 1. Attempt batch load job (supported on Free Tier, Sandbox, and Paid tiers without streaming restrictions)
+        try:
+            job_config = bigquery.LoadJobConfig(
+                schema=get_audit_table_schema(),
+                write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
+                create_disposition=bigquery.CreateDisposition.CREATE_IF_NEEDED,
+            )
+            load_job = client.load_table_from_json(rows_to_insert, table_id, job_config=job_config)
+            if hasattr(load_job, "result"):
+                load_job.result(timeout=60)
+            logger.info(f"Successfully recorded {len(rows_to_insert)} audit row(s) to BigQuery table '{table_id}'.")
+            return True
+        except Exception as load_err:
+            logger.debug(f"Batch load job for audit logging failed ({load_err}), falling back to streaming insert...")
+
+        # 2. Fallback to streaming insert (tabledata.insertAll)
         errors = client.insert_rows_json(table_id, rows_to_insert)
         if errors:
             logger.warning(f"BigQuery audit insert reported errors for {table_id}: {errors}")

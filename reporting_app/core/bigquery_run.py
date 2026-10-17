@@ -11,9 +11,15 @@ Features:
 import csv
 from datetime import datetime, timezone
 import logging
+import os
 from pathlib import Path
 import re
 from typing import Any, Dict, List, Optional, Tuple
+import warnings
+
+# Suppress noisy Google Cloud SDK ADC warnings and missing default project logs
+warnings.filterwarnings("ignore", category=UserWarning, module="google.auth._default")
+logging.getLogger("google.auth._default").setLevel(logging.ERROR)
 
 from google.cloud import bigquery
 import pandas as pd
@@ -136,6 +142,9 @@ def run_bigquery_script(
         f if f.lower().endswith(".csv") else f"{f}.csv"
         for f in target_csv_filenames
     ]
+
+    if project_id and not os.environ.get("GOOGLE_CLOUD_PROJECT"):
+        os.environ["GOOGLE_CLOUD_PROJECT"] = project_id
 
     # Initialize BigQuery client using ADC with detected or explicit project_id
     if client is None:
@@ -434,6 +443,9 @@ def run_bigquery_import_file(
                     project_id = wb.split(".")[0].strip()
             except Exception:
                 pass
+
+    if project_id and not os.environ.get("GOOGLE_CLOUD_PROJECT"):
+        os.environ["GOOGLE_CLOUD_PROJECT"] = project_id
 
     if client is None:
         client = bigquery.Client(project=project_id) if project_id else bigquery.Client()

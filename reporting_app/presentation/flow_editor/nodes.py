@@ -255,6 +255,156 @@ class TableBoxItem(NodeItem):
         self.draw_node()
 
 
+class NodeExecutionOverlayItem(QtWidgets.QGraphicsItem):
+    """Non-interactive overlay graphics item that renders execution halos and elapsed time on a node."""
+
+    def __init__(self, parent_node_item: NodeItem):
+        super().__init__(parent_node_item)
+        self._node_item = parent_node_item
+        self.exec_status: str = "IDLE"  # IDLE, PENDING, RUNNING, SUCCESS, FAILED, SKIPPED
+        self.exec_elapsed_sec: float = 0.0
+        self.exec_halo_visible: bool = False
+        self.exec_dash_offset: float = 0.0
+        self.setAcceptedMouseButtons(QtCore.Qt.NoButton)
+        self.setAcceptHoverEvents(False)
+        self.setZValue(20.0)
+
+    def set_state(
+        self,
+        status: Optional[str] = None,
+        elapsed_sec: Optional[float] = None,
+        visible: Optional[bool] = None,
+    ) -> None:
+        self.prepareGeometryChange()
+        if status is not None:
+            self.exec_status = status
+        if elapsed_sec is not None:
+            self.exec_elapsed_sec = max(0.0, float(elapsed_sec))
+        if visible is not None:
+            self.exec_halo_visible = bool(visible)
+        self.update()
+
+    def advance_phase(self, delta_offset: float = 1.2, elapsed_sec: Optional[float] = None) -> None:
+        self.exec_dash_offset = (self.exec_dash_offset + delta_offset) % 1000.0
+        if elapsed_sec is not None:
+            self.exec_elapsed_sec = max(0.0, float(elapsed_sec))
+        self.update()
+
+    def boundingRect(self) -> QtCore.QRectF:
+        w = getattr(self._node_item, "_width", 160.0)
+        h = getattr(self._node_item, "_height", 70.0)
+        return QtCore.QRectF(-12.0, -26.0, w + 24.0, h + 38.0)
+
+    @staticmethod
+    def format_mm_ss(seconds: float) -> str:
+        total_sec = max(0, int(seconds))
+        mins, secs = divmod(total_sec, 60)
+        return f"{mins:02d}:{secs:02d}"
+
+    def paint(self, painter: QtGui.QPainter, option, widget=None) -> None:
+        if not self.exec_halo_visible or self.exec_status == "IDLE":
+            return
+        if not self._node_item or not self._node_item.viewer():
+            return
+
+        painter.save()
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+
+        w = getattr(self._node_item, "_width", 160.0)
+        h = getattr(self._node_item, "_height", 70.0)
+        halo_rect = QtCore.QRectF(-1.5, -1.5, w + 3.0, h + 3.0)
+        radius = 5.5
+
+        status = self.exec_status.upper()
+
+        if status == "RUNNING":
+            # Soft ambient grey-blue glow
+            glow_pen = QtGui.QPen(QtGui.QColor(175, 190, 210, 50), 6.0)
+            glow_pen.setJoinStyle(QtCore.Qt.RoundJoin)
+            painter.setPen(glow_pen)
+            painter.setBrush(QtCore.Qt.NoBrush)
+            painter.drawRoundedRect(halo_rect, radius, radius)
+
+            # Clockwise rotating grey dashed line
+            dash_pen = QtGui.QPen(QtGui.QColor(200, 208, 220, 245), 2.5)
+            dash_pen.setCapStyle(QtCore.Qt.FlatCap)
+            dash_pen.setJoinStyle(QtCore.Qt.RoundJoin)
+            dash_pen.setDashPattern([5.0, 4.0])
+            dash_pen.setDashOffset(-self.exec_dash_offset)
+            painter.setPen(dash_pen)
+            painter.drawRoundedRect(halo_rect, radius, radius)
+
+            badge_bg = QtGui.QColor(35, 42, 52, 235)
+            badge_border = QtGui.QColor(180, 190, 205, 220)
+            badge_text_color = QtGui.QColor(235, 240, 248)
+        elif status == "SUCCESS":
+            # Solid green halo
+            glow_pen = QtGui.QPen(QtGui.QColor(46, 204, 113, 75), 6.5)
+            glow_pen.setJoinStyle(QtCore.Qt.RoundJoin)
+            painter.setPen(glow_pen)
+            painter.setBrush(QtCore.Qt.NoBrush)
+            painter.drawRoundedRect(halo_rect, radius, radius)
+
+            solid_pen = QtGui.QPen(QtGui.QColor(46, 204, 113, 255), 2.5)
+            solid_pen.setJoinStyle(QtCore.Qt.RoundJoin)
+            painter.setPen(solid_pen)
+            painter.drawRoundedRect(halo_rect, radius, radius)
+
+            badge_bg = QtGui.QColor(22, 62, 40, 235)
+            badge_border = QtGui.QColor(46, 204, 113, 230)
+            badge_text_color = QtGui.QColor(215, 255, 230)
+        elif status == "FAILED":
+            # Solid red halo
+            glow_pen = QtGui.QPen(QtGui.QColor(231, 76, 60, 85), 6.5)
+            glow_pen.setJoinStyle(QtCore.Qt.RoundJoin)
+            painter.setPen(glow_pen)
+            painter.setBrush(QtCore.Qt.NoBrush)
+            painter.drawRoundedRect(halo_rect, radius, radius)
+
+            solid_pen = QtGui.QPen(QtGui.QColor(231, 76, 60, 255), 2.5)
+            solid_pen.setJoinStyle(QtCore.Qt.RoundJoin)
+            painter.setPen(solid_pen)
+            painter.drawRoundedRect(halo_rect, radius, radius)
+
+            badge_bg = QtGui.QColor(75, 24, 24, 235)
+            badge_border = QtGui.QColor(231, 76, 60, 230)
+            badge_text_color = QtGui.QColor(255, 220, 220)
+        else:  # SKIPPED or PENDING
+            glow_pen = QtGui.QPen(QtGui.QColor(135, 145, 160, 50), 5.0)
+            glow_pen.setJoinStyle(QtCore.Qt.RoundJoin)
+            painter.setPen(glow_pen)
+            painter.setBrush(QtCore.Qt.NoBrush)
+            painter.drawRoundedRect(halo_rect, radius, radius)
+
+            solid_pen = QtGui.QPen(QtGui.QColor(135, 145, 160, 215), 2.0)
+            solid_pen.setJoinStyle(QtCore.Qt.RoundJoin)
+            painter.setPen(solid_pen)
+            painter.drawRoundedRect(halo_rect, radius, radius)
+
+            badge_bg = QtGui.QColor(42, 46, 54, 225)
+            badge_border = QtGui.QColor(135, 145, 160, 190)
+            badge_text_color = QtGui.QColor(195, 202, 212)
+
+        # Draw elapsed time badge at top-right above/on node corner
+        time_str = self.format_mm_ss(self.exec_elapsed_sec)
+        font = QtGui.QFont("monospace", 8, QtGui.QFont.Bold)
+        painter.setFont(font)
+        fm = QtGui.QFontMetrics(font)
+        tw = fm.horizontalAdvance(time_str)
+        badge_w = tw + 14.0
+        badge_h = 18.0
+        badge_rect = QtCore.QRectF(w - badge_w - 2.0, -badge_h - 4.0, badge_w, badge_h)
+
+        painter.setBrush(QtGui.QBrush(badge_bg))
+        painter.setPen(QtGui.QPen(badge_border, 1.2))
+        painter.drawRoundedRect(badge_rect, 4.0, 4.0)
+
+        painter.setPen(badge_text_color)
+        painter.drawText(badge_rect, QtCore.Qt.AlignCenter, time_str)
+
+        painter.restore()
+
+
 class QueryNodeItem(NodeItem):
     """Custom graphics item for QueryNode displaying parameters list within the node."""
 
@@ -269,6 +419,19 @@ class QueryNodeItem(NodeItem):
             except Exception:
                 pass
         self._text_item = CustomNodeTextItem(self.name, self)
+        self._exec_overlay = NodeExecutionOverlayItem(self)
+
+    def set_execution_state(
+        self,
+        status: Optional[str] = None,
+        elapsed_sec: Optional[float] = None,
+        visible: Optional[bool] = None,
+    ) -> None:
+        self._exec_overlay.set_state(status=status, elapsed_sec=elapsed_sec, visible=visible)
+        self.update()
+
+    def advance_execution_animation(self, delta_offset: float = 1.2, elapsed_sec: Optional[float] = None) -> None:
+        self._exec_overlay.advance_phase(delta_offset=delta_offset, elapsed_sec=elapsed_sec)
 
     def paint(self, painter, option, widget):
         if not self.viewer():
@@ -388,6 +551,19 @@ class ImportCsvItem(NodeItem):
             except Exception:
                 pass
         self._text_item = CustomNodeTextItem(self.name, self)
+        self._exec_overlay = NodeExecutionOverlayItem(self)
+
+    def set_execution_state(
+        self,
+        status: Optional[str] = None,
+        elapsed_sec: Optional[float] = None,
+        visible: Optional[bool] = None,
+    ) -> None:
+        self._exec_overlay.set_state(status=status, elapsed_sec=elapsed_sec, visible=visible)
+        self.update()
+
+    def advance_execution_animation(self, delta_offset: float = 1.2, elapsed_sec: Optional[float] = None) -> None:
+        self._exec_overlay.advance_phase(delta_offset=delta_offset, elapsed_sec=elapsed_sec)
 
     def paint(self, painter, option, widget):
         if not self.viewer():

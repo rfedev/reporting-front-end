@@ -62,6 +62,7 @@ def run_bigquery_script(
     stream_to_csv: bool = False,
     client: Optional[Any] = None,
     output_filename: Optional[str] = None,
+    on_job_created: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Execute a single query script and conditionally export results to CSV.
 
@@ -74,6 +75,7 @@ def run_bigquery_script(
         stream_to_csv: Stream large result sets directly to CSV.
         client: Optional pre-configured bigquery.Client.
         output_filename: Optional custom CSV filename (e.g. 'custom_name.csv').
+        on_job_created: Optional callback invoked with the created BigQuery QueryJob.
 
     Returns:
         Dictionary with execution details: query_name, is_export, output_file, row_count, status.
@@ -144,6 +146,11 @@ def run_bigquery_script(
         f"Export to CSV: {should_export}, Create Tables: {has_output_tables})"
     )
     query_job = client.query(substituted_sql, project=project_id)
+    if callable(on_job_created):
+        try:
+            on_job_created(query_job)
+        except Exception as e:
+            logger.debug(f"on_job_created callback error: {e}")
     results = query_job.result()
 
     total_row_count = 0
@@ -520,6 +527,12 @@ def run_bigquery_import_file(
 
         logger.info(f"Loading Excel sheet '{sheet}' from {file_p} into BigQuery table {clean_dest}")
         job = client.load_table_from_dataframe(df, clean_dest, job_config=job_config, project=project_id)
+        on_job_created = kwargs.get("on_job_created")
+        if callable(on_job_created):
+            try:
+                on_job_created(job)
+            except Exception as e:
+                logger.debug(f"on_job_created callback error: {e}")
         job.result()
     else:
         # CSV file import
@@ -534,6 +547,12 @@ def run_bigquery_import_file(
         logger.info(f"Loading CSV {file_p} into BigQuery table {clean_dest} (Headers: {has_headers}, Schema: {schema_mode})")
         with open(file_p, "rb") as source_file:
             job = client.load_table_from_file(source_file, clean_dest, job_config=job_config, project=project_id)
+            on_job_created = kwargs.get("on_job_created")
+            if callable(on_job_created):
+                try:
+                    on_job_created(job)
+                except Exception as e:
+                    logger.debug(f"on_job_created callback error: {e}")
             job.result()
 
     row_count = None

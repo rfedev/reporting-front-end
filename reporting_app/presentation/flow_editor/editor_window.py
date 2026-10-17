@@ -62,8 +62,7 @@ from reporting_app.presentation.flow_editor.import_dialog import (
     ImportFilesDialog,
     SelectOutputTablesDialog,
 )
-from reporting_app.controllers.flow_runner import FlowRunner
-
+from reporting_app.presentation.flow_editor.execution_tab import FlowExecutionTab
 
 
 class ProcessFlowEditorWindow(QMainWindow):
@@ -744,6 +743,11 @@ class ProcessFlowEditorWindow(QMainWindow):
         self.param_overlay.show()
         self.param_overlay.raise_()
 
+        # Lower-right collapsible execution status & progress tab
+        self.execution_tab = FlowExecutionTab(self.graph_widget, editor_window=self)
+        self.execution_tab.hide()
+        self.execution_tab.run_state_changed.connect(self._update_run_button_state)
+
         self.splitter.addWidget(self.graph_widget)
 
         # Right Panel (Currently unused / placeholder)
@@ -1223,6 +1227,9 @@ class ProcessFlowEditorWindow(QMainWindow):
 
         # Refresh parameter overlay for active queries in the flow
         self._refresh_parameter_overlay()
+
+        if hasattr(self, "execution_tab"):
+            self.execution_tab.sync_canvas_nodes()
 
     def add_query_to_canvas(self, query_name: str, pos: Optional[tuple] = None) -> Optional[QueryNode]:
         """Add a query to the canvas and recalculate the process flow graph topology."""
@@ -2012,9 +2019,11 @@ class ProcessFlowEditorWindow(QMainWindow):
         except Exception as e:
             logger.debug(f"Error saving splitter sizes on close: {e}")
 
-        # Stop debounce auto-save timer
+        # Stop debounce auto-save timer and shut down execution tab
         if hasattr(self, "_auto_save_timer") and self._auto_save_timer.isActive():
             self._auto_save_timer.stop()
+        if hasattr(self, "execution_tab"):
+            self.execution_tab.shutdown()
 
         # Disconnect controller active_report_changed signal
         if self.app_controller:
@@ -2049,6 +2058,11 @@ class ProcessFlowEditorWindow(QMainWindow):
         """Update Run Flow button label based on whether query/import nodes are selected."""
         if not hasattr(self, "run_flow_btn"):
             return
+        if hasattr(self, "execution_tab") and self.execution_tab.is_running():
+            self.run_flow_btn.setEnabled(False)
+            self.run_flow_btn.setText("⏳ Running...")
+            return
+        self.run_flow_btn.setEnabled(True)
         selected_nodes = self._get_selected_query_nodes()
         if selected_nodes:
             self.run_flow_btn.setText("▶ Run Selected")
@@ -2059,6 +2073,8 @@ class ProcessFlowEditorWindow(QMainWindow):
 
     def _on_run_flow_button_clicked(self) -> None:
         """Handler for toolbar Run button: runs selected if any are selected, else runs full flow."""
+        if hasattr(self, "execution_tab") and self.execution_tab.is_running():
+            return
         selected_nodes = self._get_selected_query_nodes()
         if selected_nodes:
             self.run_selected_queries()
@@ -2069,7 +2085,7 @@ class ProcessFlowEditorWindow(QMainWindow):
         """Run only the currently selected query and import CSV nodes in topological dependency order."""
         selected_nodes = self._get_selected_query_nodes()
         if not selected_nodes:
-            QMessageBox.information(self, "No Selection", "Please select at least one query or CSV import node to run.")
+            self.status_bar.showMessage("Please select at least one query or import node to run.", 4000)
             return
 
         session_data = self.graph.serialize_session()
@@ -2098,7 +2114,7 @@ class ProcessFlowEditorWindow(QMainWindow):
                 break
 
         if start_idx == -1:
-            QMessageBox.warning(self, "Error", f"Could not determine order for '{start_node.name()}'.")
+            self.status_bar.showMessage(f"Could not determine execution order for '{start_node.name()}'.", 4000)
             return
 
         downstream_order = node_order[start_idx:]
@@ -2111,9 +2127,13 @@ class ProcessFlowEditorWindow(QMainWindow):
         self._execute_ordered_nodes(node_order, context_title=f"Process flow '{self.flow_controller.flow_name}'")
 
     def _execute_ordered_nodes(self, ordered_items: List[Dict[str, Any]], context_title: str = "Process Flow") -> None:
-        """Execute the specified ordered list of nodes (both CSV imports and queries) off the main thread."""
+        """Execute the specified ordered list of nodes via FlowExecutionTab."""
+        if hasattr(self, "execution_tab") and self.execution_tab.is_running():
+            self.status_bar.showMessage("A process flow is already running.", 3000)
+            return
+
         if not ordered_items:
-            QMessageBox.information(self, "Empty Flow", "There are no queries or CSV imports to run.")
+            self.status_bar.showMessage("There are no queries or file imports to run.", 4000)
             return
 
         # If auto-save is enabled and there are pending modifications, save before running
@@ -2155,6 +2175,7 @@ class ProcessFlowEditorWindow(QMainWindow):
                 imp_items = inode.get_imports() if (inode and hasattr(inode, "get_imports")) else []
                 steps.append({
                     "type": "import_csv",
+                    "id": nid,
                     "name": nname or "Import Files",
                     "items": imp_items,
                 })
@@ -2162,37 +2183,23 @@ class ProcessFlowEditorWindow(QMainWindow):
                 qinfo = self.report.get_query(nname)
                 steps.append({
                     "type": "query",
+                    "id": nid,
                     "name": nname,
                     "file_path": qinfo.file_path if qinfo else None,
                 })
 
-        runner = FlowRunner(parent_window=self, repo=self.app_controller.repo if self.app_controller else None)
-        res = runner.execute_flow(
-            steps=steps,
-            report_folder=self.report.folder_path,
-            report_name=self.report.name,
-            flow_name=self.flow_controller.flow_name,
-            param_values=param_values,
-            filename_date=filename_date,
-            csv_map=csv_map,
-            outputs_dir=outputs_dir,
-        )
-
-        if res["success"]:
-            self.status_bar.showMessage(f"{context_title} completed successfully.", 5000)
-            QMessageBox.information(
-                self,
-                f"{context_title} Completed",
-                f"{context_title} completed successfully!\n\n" + "\n".join(res["results_log"]),
-            )
-        elif res.get("cancelled"):
-            self.status_bar.showMessage(f"{context_title} was cancelled.", 5000)
-        else:
-            self.status_bar.showMessage(f"{context_title} failed.", 5000)
-            QMessageBox.critical(
-                self,
-                f"{context_title} Execution Error",
-                f"Execution failed with errors:\n\n" + "\n".join(res["results_log"]) + "\n\nNote: If authentication failed, please run 'gcloud auth application-default login' in terminal.",
+        if hasattr(self, "execution_tab"):
+            self.execution_tab.execute_steps(
+                steps=steps,
+                report_folder=self.report.folder_path,
+                report_name=self.report.name,
+                flow_name=self.flow_controller.flow_name,
+                param_values=param_values,
+                filename_date=filename_date,
+                csv_map=csv_map,
+                outputs_dir=outputs_dir,
+                context_title=context_title,
+                repo=self.app_controller.repo if self.app_controller else None,
             )
 
     def _on_open_logs(self, filter_node: Optional[str] = None) -> None:

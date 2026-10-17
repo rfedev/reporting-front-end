@@ -1490,6 +1490,48 @@ class ProcessFlowEditorWindow(QMainWindow):
                 row_counter += 1
 
         dlg_layout.addWidget(form_widget)
+
+        # Secondary LAN Destination Group Box
+        lan_group = QGroupBox("Secondary LAN Destination (Optional)")
+        lan_group.setStyleSheet("QGroupBox { font-weight: bold; margin-top: 6px; }")
+        lan_layout = QVBoxLayout(lan_group)
+        lan_layout.setContentsMargins(10, 10, 10, 10)
+        lan_layout.setSpacing(8)
+
+        cur_lan = self.flow_controller.get_lan_output_folder()
+        lan_checkbox = QCheckBox("Also copy generated output files to LAN folder")
+        lan_checkbox.setChecked(bool(cur_lan))
+
+        lan_path_row = QHBoxLayout()
+        lan_edit = QLineEdit(cur_lan)
+        lan_edit.setPlaceholderText(r"e.g. \\server\share\reports or /mnt/lan/reports")
+        lan_edit.setEnabled(bool(cur_lan))
+        lan_browse_btn = QPushButton("Browse...")
+        lan_browse_btn.setEnabled(bool(cur_lan))
+
+        def _on_lan_toggled(checked: bool):
+            lan_edit.setEnabled(checked)
+            lan_browse_btn.setEnabled(checked)
+
+        def _on_browse_lan():
+            chosen = QFileDialog.getExistingDirectory(
+                dialog,
+                "Select Secondary LAN Output Folder",
+                lan_edit.text().strip() or str(Path.home()),
+            )
+            if chosen:
+                lan_edit.setText(chosen)
+
+        lan_checkbox.toggled.connect(_on_lan_toggled)
+        lan_browse_btn.clicked.connect(_on_browse_lan)
+
+        lan_path_row.addWidget(lan_edit, stretch=1)
+        lan_path_row.addWidget(lan_browse_btn)
+
+        lan_layout.addWidget(lan_checkbox)
+        lan_layout.addLayout(lan_path_row)
+        dlg_layout.addWidget(lan_group)
+
         dlg_layout.addStretch()
 
         btn_row = QHBoxLayout()
@@ -1505,6 +1547,12 @@ class ProcessFlowEditorWindow(QMainWindow):
         cancel_btn.clicked.connect(dialog.reject)
 
         if dialog.exec() == QDialog.Accepted:
+            # Update secondary LAN output folder for process flow
+            new_lan = lan_edit.text().strip() if lan_checkbox.isChecked() else ""
+            if new_lan != self.flow_controller.get_lan_output_folder():
+                self.flow_controller.set_lan_output_folder(new_lan)
+                self._mark_dirty_and_schedule_save()
+
             node_files_map: Dict[Any, List[str]] = {
                 cnode: list(cnode.raw_tables or [f"{cnode.name()}.csv"])
                 for cnode in active_csv_nodes
@@ -1893,6 +1941,7 @@ class ProcessFlowEditorWindow(QMainWindow):
                 parameter_date_options=date_options,
                 selected_filename_date_param=sel_filename_date_param,
                 has_report_date=has_report_date,
+                lan_output_folder=self.flow_controller.get_lan_output_folder(),
             )
 
             if self.app_controller:
@@ -2200,6 +2249,7 @@ class ProcessFlowEditorWindow(QMainWindow):
                 outputs_dir=outputs_dir,
                 context_title=context_title,
                 repo=self.app_controller.repo if self.app_controller else None,
+                lan_output_folder=self.flow_controller.get_lan_output_folder(),
             )
 
     def _on_open_logs(self, filter_node: Optional[str] = None) -> None:

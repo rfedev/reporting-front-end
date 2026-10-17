@@ -95,6 +95,14 @@ class ProcessFlowController(QObject):
         """Set CSV import group configurations for this flow."""
         self.flow_data["csv_imports"] = imports
 
+    def get_lan_output_folder(self) -> str:
+        """Return optional secondary LAN destination folder for output tables."""
+        return self.flow_data.get("lan_output_folder", "") or ""
+
+    def set_lan_output_folder(self, folder_path: str) -> None:
+        """Set optional secondary LAN destination folder for output tables."""
+        self.flow_data["lan_output_folder"] = folder_path.strip()
+
     def get_graph_session(self) -> Dict[str, Any]:
         """Return the serialized NodeGraph session dictionary."""
         return self.flow_data.get("graph_session", {})
@@ -227,6 +235,7 @@ class ProcessFlowController(QObject):
         parameter_date_options: Optional[Dict[str, str]] = None,
         selected_filename_date_param: Optional[str] = None,
         has_report_date: Optional[bool] = None,
+        lan_output_folder: Optional[str] = None,
     ) -> None:
         """Save process flow to JSON and update database parameter defaults."""
         self.parameter_defaults.update(parameter_defaults)
@@ -248,6 +257,8 @@ class ProcessFlowController(QObject):
             self.flow_data["selected_filename_date_param"] = selected_filename_date_param
         if has_report_date is not None:
             self.flow_data["has_report_date"] = has_report_date
+        if lan_output_folder is not None:
+            self.flow_data["lan_output_folder"] = lan_output_folder.strip()
 
         FlowStorage.save(
             file_path=self.file_path,
@@ -264,6 +275,7 @@ class ProcessFlowController(QObject):
             parameter_date_options=self.flow_data.get("parameter_date_options", {}),
             selected_filename_date_param=self.flow_data.get("selected_filename_date_param"),
             has_report_date=self.flow_data.get("has_report_date"),
+            lan_output_folder=self.flow_data.get("lan_output_folder"),
         )
 
         # Update persistence layer defaults if repository is provided

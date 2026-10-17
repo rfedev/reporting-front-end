@@ -7,6 +7,8 @@ import threading
 from typing import Any, Dict, List, Optional
 import uuid
 
+import queue
+
 from PySide6.QtCore import QObject, QThread, Signal
 from PySide6.QtWidgets import QWidget
 
@@ -16,6 +18,120 @@ from reporting_app.persistence.repository import Repository
 from reporting_app.utils.date_calc import format_filename_with_date
 
 logger = logging.getLogger(__name__)
+
+
+class LanTransferWorker(threading.Thread):
+    """Background worker thread that transfers exported files across a LAN folder."""
+
+    def __init__(
+        self,
+        lan_folder: Path,
+        on_started: Optional[Any] = None,
+        on_progress: Optional[Any] = None,
+        on_completed: Optional[Any] = None,
+        on_finished: Optional[Any] = None,
+        chunk_size: int = 1024 * 512,
+    ):
+        super().__init__(daemon=True, name="LanTransferWorker")
+        self.lan_folder = Path(lan_folder)
+        self.on_started = on_started
+        self.on_progress = on_progress
+        self.on_completed = on_completed
+        self.on_finished = on_finished
+        self.chunk_size = chunk_size
+
+        self._queue: queue.Queue = queue.Queue()
+        self._total_enqueued = 0
+        self._processed_count = 0
+        self._copied_count = 0
+        self._errors: List[str] = []
+        self._stop_requested = False
+
+    def enqueue(self, file_path: Path) -> None:
+        """Enqueue an exported CSV file for copying to the LAN folder."""
+        self._total_enqueued += 1
+        self._queue.put(file_path)
+
+    def finish_and_wait(self, timeout: float = 300.0) -> None:
+        """Signal queue completion and block until all queued LAN transfers finish."""
+        self._queue.put(None)
+        self.join(timeout=timeout)
+
+    def cancel(self) -> None:
+        """Request immediate cancellation of pending LAN transfers."""
+        self._stop_requested = True
+        self._queue.put(None)
+
+    def run(self) -> None:
+        try:
+            self.lan_folder.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            err_msg = f"Cannot access LAN folder '{self.lan_folder}': {e}"
+            logger.warning(err_msg)
+            self._errors.append(err_msg)
+            if self.on_finished:
+                self.on_finished(False, 0, self._total_enqueued, err_msg)
+            return
+
+        while not self._stop_requested:
+            item = self._queue.get()
+            if item is None:
+                break
+
+            self._processed_count += 1
+            file_idx = self._processed_count
+            total_files = max(self._total_enqueued, file_idx)
+            src_file = Path(item)
+            dst_file = self.lan_folder / src_file.name
+
+            if self.on_started:
+                self.on_started(file_idx, total_files, src_file.name)
+
+            copy_success = False
+            copy_error = ""
+            try:
+                if not src_file.exists():
+                    raise FileNotFoundError(f"Source file {src_file} does not exist.")
+
+                total_bytes = src_file.stat().st_size
+                copied_bytes = 0
+
+                # Always overwrite dst_file
+                with open(src_file, "rb") as fsrc, open(dst_file, "wb") as fdst:
+                    if total_bytes == 0:
+                        if self.on_progress:
+                            self.on_progress(file_idx, total_files, src_file.name, 100.0)
+                    else:
+                        while not self._stop_requested:
+                            chunk = fsrc.read(self.chunk_size)
+                            if not chunk:
+                                break
+                            fdst.write(chunk)
+                            copied_bytes += len(chunk)
+                            if self.on_progress:
+                                pct = min(100.0, (copied_bytes / total_bytes) * 100.0)
+                                self.on_progress(file_idx, total_files, src_file.name, pct)
+
+                if not self._stop_requested:
+                    copy_success = True
+                    self._copied_count += 1
+            except Exception as e:
+                copy_error = str(e)
+                self._errors.append(f"{src_file.name}: {copy_error}")
+                logger.warning(f"Error copying '{src_file.name}' to LAN folder: {e}")
+
+            if self.on_completed:
+                self.on_completed(file_idx, total_files, src_file.name, copy_success, copy_error)
+
+            self._queue.task_done()
+
+        all_ok = (len(self._errors) == 0) and (self._copied_count == self._total_enqueued)
+        if all_ok:
+            summary = f"Successfully copied {self._copied_count}/{self._total_enqueued} file(s) to LAN."
+        else:
+            summary = f"Copied {self._copied_count}/{self._total_enqueued} file(s) with errors: {'; '.join(self._errors)}"
+        if self.on_finished:
+            self.on_finished(all_ok, self._copied_count, self._total_enqueued, summary)
 
 
 class FlowWorker(QThread):
@@ -28,6 +144,12 @@ class FlowWorker(QThread):
     log_message = Signal(str)  # human-readable log line
     flow_finished = Signal(bool, str, list, list)  # success, summary_message, results_log, errors
 
+    # Background LAN transfer signals
+    lan_transfer_started = Signal(int, int, str)  # file_idx, total_files, filename
+    lan_transfer_progress = Signal(int, int, str, float)  # file_idx, total_files, filename, pct
+    lan_transfer_completed = Signal(int, int, str, bool, str)  # file_idx, total_files, filename, success, error_msg
+    lan_transfer_finished = Signal(bool, int, int, str)  # all_success, total_copied, total_files, summary
+
     def __init__(
         self,
         steps: List[Dict[str, Any]],
@@ -39,6 +161,7 @@ class FlowWorker(QThread):
         csv_map: Optional[Dict[str, str]] = None,
         outputs_dir: Optional[Path] = None,
         repo: Optional[Repository] = None,
+        lan_output_folder: Optional[str] = None,
         parent: Optional[QObject] = None,
     ):
         super().__init__(parent)
@@ -51,9 +174,11 @@ class FlowWorker(QThread):
         self.csv_map = dict(csv_map or {})
         self.outputs_dir = Path(outputs_dir) if outputs_dir else (self.report_folder / "outputs")
         self.repo = repo
+        self.lan_output_folder = Path(lan_output_folder.strip()) if (lan_output_folder and lan_output_folder.strip()) else None
         self._is_cancelled: bool = False
         self._active_bq_job: Optional[Any] = None
         self._job_lock = threading.Lock()
+        self._lan_worker: Optional[LanTransferWorker] = None
 
     def _on_job_created(self, job: Any) -> None:
         """Store reference to the active BigQuery job so it can be cancelled server-side."""
@@ -74,6 +199,8 @@ class FlowWorker(QThread):
         """Signal the worker to abort execution and request server-side BigQuery job cancellation."""
         self._is_cancelled = True
         logger.info("Cancellation requested for flow worker.")
+        if self._lan_worker:
+            self._lan_worker.cancel()
         with self._job_lock:
             job = self._active_bq_job
 
@@ -126,6 +253,16 @@ class FlowWorker(QThread):
         step_records: List[Dict[str, Any]] = []
         total_steps = len(self.steps)
         failed_node_name: Optional[str] = None
+
+        if self.lan_output_folder:
+            self._lan_worker = LanTransferWorker(
+                lan_folder=self.lan_output_folder,
+                on_started=self.lan_transfer_started.emit,
+                on_progress=self.lan_transfer_progress.emit,
+                on_completed=self.lan_transfer_completed.emit,
+                on_finished=self.lan_transfer_finished.emit,
+            )
+            self._lan_worker.start()
 
         self.flow_started.emit(self.steps)
         self.log_message.emit(f"Starting execution of '{self.flow_name}' ({total_steps} step(s))...")
@@ -373,6 +510,17 @@ class FlowWorker(QThread):
 
                     if res.get("is_export"):
                         details = res.get("export_details", [])
+                        if self._lan_worker:
+                            if details:
+                                for d in details:
+                                    p = d.get("path")
+                                    if p and Path(p).exists():
+                                        self._lan_worker.enqueue(Path(p))
+                            elif res.get("output_file"):
+                                out_cand = self.outputs_dir / res.get("output_file")
+                                if out_cand.exists():
+                                    self._lan_worker.enqueue(out_cand)
+
                         if len(details) == 1:
                             d = details[0]
                             line = f"[{idx}/{total_steps}] ✅ {qname}: Exported '{d['filename']}' ({d['row_count']:,} rows)"
@@ -510,6 +658,23 @@ class FlowWorker(QThread):
         except Exception as e:
             logger.debug(f"Failed to initiate BigQuery audit logging: {e}")
 
+        # Finalize background LAN transfer(s) if configured
+        if self._lan_worker:
+            if self._is_cancelled:
+                self._lan_worker.cancel()
+            else:
+                self.log_message.emit("Waiting for background LAN transfer(s) to complete...")
+                self._lan_worker.finish_and_wait()
+                if self._lan_worker._errors:
+                    for lerr in self._lan_worker._errors:
+                        line = f"⚠️ LAN transfer warning: {lerr}"
+                        results_log.append(line)
+                        self.log_message.emit(line)
+                elif self._lan_worker._copied_count > 0:
+                    line = f"📁 Copied {self._lan_worker._copied_count} export file(s) to LAN: {self.lan_output_folder}"
+                    results_log.append(line)
+                    self.log_message.emit(line)
+
         self.flow_finished.emit(success, summary, results_log, errors)
 
 
@@ -531,6 +696,7 @@ class FlowRunner(QObject):
         filename_date: str = "",
         csv_map: Optional[Dict[str, str]] = None,
         outputs_dir: Optional[Path] = None,
+        lan_output_folder: Optional[str] = None,
     ) -> FlowWorker:
         """Create and return a configured FlowWorker for non-blocking execution."""
         return FlowWorker(
@@ -542,6 +708,7 @@ class FlowRunner(QObject):
             filename_date=filename_date,
             csv_map=csv_map,
             outputs_dir=outputs_dir,
+            lan_output_folder=lan_output_folder,
             repo=self.repo,
             parent=self,
         )

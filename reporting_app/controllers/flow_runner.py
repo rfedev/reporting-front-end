@@ -10,6 +10,7 @@ import uuid
 from PySide6.QtCore import QObject, QThread, Signal
 from PySide6.QtWidgets import QWidget
 
+from reporting_app.core.audit_logger import record_audit_run_async
 from reporting_app.core.bigquery_run import run_bigquery_import_file, run_bigquery_script
 from reporting_app.persistence.repository import Repository
 from reporting_app.utils.date_calc import format_filename_with_date
@@ -89,21 +90,40 @@ class FlowWorker(QThread):
     def is_cancelled(self) -> bool:
         return self._is_cancelled
 
-    def _emit_skipped_from(self, start_idx_one_based: int, total_steps: int) -> None:
+    def _emit_skipped_from(
+        self,
+        start_idx_one_based: int,
+        total_steps: int,
+        step_records: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
         """Emit SKIPPED status for all remaining unexecuted steps from start_idx_one_based onwards."""
         for rem_idx in range(start_idx_one_based, total_steps + 1):
             rem_step = self.steps[rem_idx - 1]
             rem_name = rem_step.get("name", f"Step {rem_idx}")
+            rem_type = rem_step.get("type", "query")
             self.step_completed.emit(rem_idx, total_steps, rem_name, "SKIPPED", 0.0, "")
+            if step_records is not None:
+                step_records.append({
+                    "node_name": rem_name,
+                    "node_type": rem_type,
+                    "step_number": rem_idx,
+                    "node_status": "SKIPPED",
+                    "node_start_time": None,
+                    "node_end_time": None,
+                    "node_duration_seconds": 0.0,
+                    "error_message": "",
+                })
 
     def run(self) -> None:
         """Execute all steps sequentially in the background thread."""
         self.outputs_dir.mkdir(parents=True, exist_ok=True)
         run_id = str(uuid.uuid4())
-        flow_start_time = datetime.now(timezone.utc).isoformat()
+        t_flow_start = datetime.now(timezone.utc)
+        flow_start_time = t_flow_start.isoformat()
 
         results_log: List[str] = []
         errors: List[str] = []
+        step_records: List[Dict[str, Any]] = []
         total_steps = len(self.steps)
         failed_node_name: Optional[str] = None
 
@@ -116,7 +136,7 @@ class FlowWorker(QThread):
                 self.log_message.emit(msg)
                 results_log.append(msg)
                 errors.append("Execution cancelled by user.")
-                self._emit_skipped_from(idx, total_steps)
+                self._emit_skipped_from(idx, total_steps, step_records)
                 break
 
             stype = step.get("type")
@@ -228,9 +248,30 @@ class FlowWorker(QThread):
                     if not step_err_msg and self._is_cancelled:
                         step_err_msg = "Execution cancelled by user."
                         errors.append(step_err_msg)
+                    step_records.append({
+                        "node_name": sname,
+                        "node_type": "import_csv",
+                        "step_number": idx,
+                        "node_status": "FAILED",
+                        "node_start_time": step_start_time,
+                        "node_end_time": t1.isoformat(),
+                        "node_duration_seconds": step_dur,
+                        "error_message": step_err_msg,
+                    })
                     self.step_completed.emit(idx, total_steps, sname, "FAILED", step_dur, step_err_msg)
-                    self._emit_skipped_from(idx + 1, total_steps)
+                    self._emit_skipped_from(idx + 1, total_steps, step_records)
                     break
+
+                step_records.append({
+                    "node_name": sname,
+                    "node_type": "import_csv",
+                    "step_number": idx,
+                    "node_status": "SUCCESS",
+                    "node_start_time": step_start_time,
+                    "node_end_time": t1.isoformat(),
+                    "node_duration_seconds": step_dur,
+                    "error_message": "",
+                })
 
                 if self.repo and imp_records:
                     total_rows = sum(r.get("row_count") or 0 for r in imp_records)
@@ -262,6 +303,16 @@ class FlowWorker(QThread):
                     self.log_message.emit(f"[{idx}/{total_steps}] ❌ {qname}: {err}")
                     t1 = datetime.now(timezone.utc)
                     step_dur = (t1 - t0).total_seconds()
+                    step_records.append({
+                        "node_name": qname,
+                        "node_type": "query",
+                        "step_number": idx,
+                        "node_status": "FAILED",
+                        "node_start_time": step_start_time,
+                        "node_end_time": t1.isoformat(),
+                        "node_duration_seconds": step_dur,
+                        "error_message": err,
+                    })
                     if self.repo:
                         self.repo.record_execution_log({
                             "run_id": run_id,
@@ -277,7 +328,7 @@ class FlowWorker(QThread):
                             "error_message": err,
                         })
                     self.step_completed.emit(idx, total_steps, qname, "FAILED", step_dur, err)
-                    self._emit_skipped_from(idx + 1, total_steps)
+                    self._emit_skipped_from(idx + 1, total_steps, step_records)
                     break
 
                 self.log_message.emit(f"[{idx}/{total_steps}] ⚙️ Running query {qname}...")
@@ -306,8 +357,18 @@ class FlowWorker(QThread):
                         errors.append(err_msg)
                         results_log.append(f"[{idx}/{total_steps}] ⚠️ {err_msg}")
                         self.log_message.emit(f"[{idx}/{total_steps}] ⚠️ {err_msg}")
+                        step_records.append({
+                            "node_name": qname,
+                            "node_type": "query",
+                            "step_number": idx,
+                            "node_status": "FAILED",
+                            "node_start_time": step_start_time,
+                            "node_end_time": t1.isoformat(),
+                            "node_duration_seconds": eff_dur,
+                            "error_message": err_msg,
+                        })
                         self.step_completed.emit(idx, total_steps, qname, "FAILED", eff_dur, err_msg)
-                        self._emit_skipped_from(idx + 1, total_steps)
+                        self._emit_skipped_from(idx + 1, total_steps, step_records)
                         break
 
                     if res.get("is_export"):
@@ -334,6 +395,17 @@ class FlowWorker(QThread):
                         line = f"[{idx}/{total_steps}] ✅ {qname}: Executed table creation/update in BigQuery{tbl_rows_str}"
                         results_log.append(line)
                         self.log_message.emit(line)
+
+                    step_records.append({
+                        "node_name": qname,
+                        "node_type": "query",
+                        "step_number": idx,
+                        "node_status": "SUCCESS",
+                        "node_start_time": step_start_time,
+                        "node_end_time": t1.isoformat(),
+                        "node_duration_seconds": eff_dur,
+                        "error_message": "",
+                    })
 
                     if self.repo:
                         self.repo.record_execution_log({
@@ -372,6 +444,16 @@ class FlowWorker(QThread):
                     line = f"[{idx}/{total_steps}] ❌ {qname}: Failed ({err_msg})"
                     results_log.append(line)
                     self.log_message.emit(line)
+                    step_records.append({
+                        "node_name": qname,
+                        "node_type": "query",
+                        "step_number": idx,
+                        "node_status": "FAILED",
+                        "node_start_time": step_start_time,
+                        "node_end_time": t1.isoformat(),
+                        "node_duration_seconds": step_dur,
+                        "error_message": err_msg,
+                    })
                     if self.repo:
                         self.repo.record_execution_log({
                             "run_id": run_id,
@@ -387,7 +469,7 @@ class FlowWorker(QThread):
                             "error_message": err_msg,
                         })
                     self.step_completed.emit(idx, total_steps, qname, "FAILED", step_dur, err_msg)
-                    self._emit_skipped_from(idx + 1, total_steps)
+                    self._emit_skipped_from(idx + 1, total_steps, step_records)
                     break
 
         success = not bool(errors) and not self._is_cancelled
@@ -398,6 +480,35 @@ class FlowWorker(QThread):
         else:
             failed_header = f"Error in step '{failed_node_name}':\n\n" if failed_node_name else ""
             summary = f"{failed_header}" + "\n".join(errors)
+
+        # Record audit run to Google Cloud BigQuery (<workbench_dataset>.audit)
+        try:
+            wb_dataset = ""
+            if self.repo:
+                wb_dataset = self.repo.get_workbench_dataset()
+            if not wb_dataset:
+                from reporting_app.persistence.database import DatabaseManager
+                from reporting_app.persistence.repository import Repository
+                wb_dataset = Repository(DatabaseManager()).get_workbench_dataset()
+
+            if wb_dataset:
+                flow_end_time = datetime.now(timezone.utc).isoformat()
+                flow_dur = (datetime.now(timezone.utc) - t_flow_start).total_seconds()
+                flow_status = "SUCCESS" if success else ("CANCELLED" if self._is_cancelled else "FAILED")
+                flow_audit_data = {
+                    "run_id": run_id,
+                    "report_name": self.report_name,
+                    "flow_name": self.flow_name,
+                    "flow_status": flow_status,
+                    "flow_start_time": flow_start_time,
+                    "flow_end_time": flow_end_time,
+                    "flow_duration_seconds": flow_dur,
+                    "parameters": self.param_values,
+                    "error_message": "; ".join(errors) if errors else "",
+                }
+                record_audit_run_async(wb_dataset, flow_audit_data, step_records)
+        except Exception as e:
+            logger.debug(f"Failed to initiate BigQuery audit logging: {e}")
 
         self.flow_finished.emit(success, summary, results_log, errors)
 

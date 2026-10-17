@@ -316,27 +316,27 @@ class FlowExecutionTab(QWidget):
         exp_layout.addWidget(self.error_footer_btn)
 
         self.lan_progress_widget = QFrame(self.expanded_container)
-        self.lan_progress_widget.setFixedHeight(26)
+        self.lan_progress_widget.setFixedHeight(28)
         self.lan_progress_widget.setStyleSheet(
-            "QFrame { background-color: rgba(30, 41, 59, 0.5); border-radius: 4px; border: 1px solid #334155; }"
+            "QFrame { background: transparent; border: none; }"
         )
         self.lan_progress_widget.setVisible(False)
         lan_layout = QHBoxLayout(self.lan_progress_widget)
-        lan_layout.setContentsMargins(6, 2, 8, 2)
-        lan_layout.setSpacing(6)
+        lan_layout.setContentsMargins(8, 2, 8, 2)
+        lan_layout.setSpacing(8)
 
         self.lan_icon = StatusIconWidget("PENDING", self.lan_progress_widget)
         lan_layout.addWidget(self.lan_icon)
 
         self.lan_label = QLabel("LAN Transfer", self.lan_progress_widget)
         self.lan_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self.lan_label.setStyleSheet("color: #cbd5e1; font-size: 11px; background: transparent;")
+        self.lan_label.setStyleSheet("color: #d1d5db; font-size: 11px; background: transparent;")
         lan_layout.addWidget(self.lan_label, stretch=1)
 
         self.lan_pct_label = QLabel("", self.lan_progress_widget)
         self.lan_pct_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.lan_pct_label.setStyleSheet(
-            "color: #60a5fa; font-family: monospace; font-size: 11px; font-weight: bold; background: transparent;"
+            "color: #9ca3af; font-family: monospace; font-size: 11px; font-weight: bold; background: transparent;"
         )
         lan_layout.addWidget(self.lan_pct_label)
 
@@ -533,10 +533,11 @@ class FlowExecutionTab(QWidget):
         if lan_output_folder and str(lan_output_folder).strip():
             lan_dest_name = Path(str(lan_output_folder).strip()).name or str(lan_output_folder).strip()
             self.lan_progress_widget.setVisible(True)
+            self.lan_progress_widget.setStyleSheet("QFrame { background: transparent; border: none; }")
             self.lan_icon.set_status("PENDING")
             self.lan_label.setText(f"LAN: Queued ({lan_dest_name})")
             self.lan_label.setToolTip(f"Destination: {lan_output_folder}")
-            self.lan_pct_label.setText("Queued")
+            self.lan_pct_label.setText("")
             self._sync_geometry()
 
         runner = FlowRunner(parent_window=self.editor_window or self, repo=repo)
@@ -679,6 +680,7 @@ class FlowExecutionTab(QWidget):
 
     def _on_lan_transfer_started(self, file_idx: int, total_files: int, filename: str) -> None:
         self.lan_progress_widget.setVisible(True)
+        self.lan_progress_widget.setStyleSheet("QFrame { background-color: rgba(59, 130, 246, 0.14); border-radius: 4px; border: none; }")
         self.lan_icon.set_status("RUNNING")
         self.lan_label.setText(f"LAN: Copying {filename} ({file_idx}/{total_files})")
         self.lan_pct_label.setText("0%")
@@ -695,20 +697,21 @@ class FlowExecutionTab(QWidget):
     ) -> None:
         if not success:
             self.lan_label.setText(f"LAN: Failed {filename}")
-            self.lan_pct_label.setText("Error")
             self.lan_label.setToolTip(error_msg)
+            self.lan_pct_label.setText("")
         else:
             self.lan_label.setText(f"LAN: Transferred {filename} ({file_idx}/{total_files})")
-            self.lan_pct_label.setText("100%")
+            self.lan_pct_label.setText("")
 
     def _on_lan_transfer_finished(
         self, all_success: bool, total_copied: int, total_files: int, summary: str
     ) -> None:
         if total_files > 0:
             self.lan_progress_widget.setVisible(True)
+            self.lan_progress_widget.setStyleSheet("QFrame { background: transparent; border: none; }")
             self.lan_icon.set_status("SUCCESS" if all_success else "FAILED")
             self.lan_label.setText(f"LAN: {total_copied}/{total_files} file(s) copied")
-            self.lan_pct_label.setText("Done" if all_success else "Warn")
+            self.lan_pct_label.setText("")
             self.lan_label.setToolTip(summary)
             self._sync_geometry()
 
@@ -766,6 +769,7 @@ class FlowExecutionTab(QWidget):
 
         if hasattr(self, "lan_progress_widget"):
             self.lan_progress_widget.setVisible(False)
+            self.lan_progress_widget.setStyleSheet("QFrame { background: transparent; border: none; }")
             self.lan_icon.set_status("PENDING")
             self.lan_label.setText("LAN Transfer")
             self.lan_label.setToolTip("")

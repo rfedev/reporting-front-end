@@ -700,16 +700,13 @@ class ProcessFlowGraphBuilder:
 
             current_base_lane += max_lane_used + 1
 
-        # 5. Arrange individual, unconnected nodes in a clean line
-        # In horizontal mode: a horizontal line (increasing ranks along X on the same lane, or if there are connected components, in a clean row)
-        # In vertical mode: a vertical line (increasing ranks along Y on the same lane)
+        # 5. Arrange individual, unconnected nodes at the first level (rank 0):
+        #    - In horizontal mode: stacked vertically along Y at rank 0
+        #    - In vertical mode: placed horizontally along X at rank 0
         if unconnected_ops:
-            max_connected_rank = max(ranks.values(), default=-1)
-            start_rank = max_connected_rank + 1 if max_connected_rank >= 0 else 0
-            target_lane = 0 if current_base_lane == 0 else current_base_lane
             for idx_u, u in enumerate(unconnected_ops):
-                ranks[u] = start_rank + idx_u
-                op_lane[u] = target_lane
+                ranks[u] = 0
+                op_lane[u] = current_base_lane + idx_u
 
         # 6. Classify each operation's input and output table boxes into 4 directional slots
         #    (left, right, above, below) relative to its execution node:

@@ -517,8 +517,7 @@ class NodeExecutionOverlayItem(QtWidgets.QGraphicsItem):
             return
 
         has_exec_halo = bool(self.exec_halo_visible and self.exec_status != "IDLE")
-        is_zoomed_out = bool(self._node_item.is_zoomed_out_mode(painter))
-        if not has_exec_halo and not is_zoomed_out:
+        if not has_exec_halo:
             return
 
         painter.save()
@@ -527,12 +526,97 @@ class NodeExecutionOverlayItem(QtWidgets.QGraphicsItem):
 
         w = getattr(self._node_item, "_width", 160.0)
         h = getattr(self._node_item, "_height", 70.0)
+        self._paint_execution_halo(painter, w, h)
+        painter.restore()
 
-        if has_exec_halo:
-            self._paint_execution_halo(painter, w, h)
 
-        if is_zoomed_out:
-            self._paint_zoomed_out_pill(painter, w, h)
+class FloatingPillItem(QtWidgets.QGraphicsItem):
+    """Top-level scene graphics item displaying execution node names at high Z-order above all nodes and pipes."""
+
+    def __init__(self, node_item: "ExecutableNodeItem"):
+        super().__init__()
+        self._node_item = node_item
+        self.setAcceptedMouseButtons(QtCore.Qt.NoButton)
+        self.setAcceptHoverEvents(False)
+        self.setCacheMode(QtWidgets.QGraphicsItem.NoCache)
+        self.setZValue(1000.0)
+
+    def shape(self) -> QtGui.QPainterPath:
+        return QtGui.QPainterPath()
+
+    def boundingRect(self) -> QtCore.QRectF:
+        node = self._node_item
+        w = getattr(node, "_width", 160.0)
+        # Ample bounding rect above the node to ensure redraws don't leave artifacts
+        return QtCore.QRectF(-200.0, -100.0, w + 400.0, 100.0)
+
+    def paint(self, painter: QtGui.QPainter, option, widget=None) -> None:
+        node = self._node_item
+        if not node or not node.viewer():
+            return
+        if not node.is_zoomed_out_mode(painter):
+            return
+
+        painter.save()
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        painter.setRenderHint(QtGui.QPainter.TextAntialiasing, True)
+
+        lod = get_node_lod(node, painter)
+        inv_scale = 1.0 / max(lod, 0.001)
+
+        w = getattr(node, "_width", 160.0)
+        # Center horizontally at w / 2.0, anchored at top edge of the node y = 0.0
+        painter.translate(w / 2.0, 0.0)
+        painter.scale(inv_scale, inv_scale)
+
+        font = QtGui.QFont("sans-serif")
+        font.setPointSizeF(8.0)
+        font.setBold(True)
+        painter.setFont(font)
+        fm = QtGui.QFontMetricsF(font)
+
+        node_name = (getattr(node, "name", "") or "").strip() or "Node"
+        display_name = fm.elidedText(node_name, QtCore.Qt.ElideRight, 260.0)
+
+        text_w = fm.horizontalAdvance(display_name)
+        text_h = fm.height()
+
+        pad_x = 8.5
+        pad_y = 3.5
+        pill_w = text_w + pad_x * 2.0
+        pill_h = text_h + pad_y * 2.0
+        radius = 5.0
+
+        # Position above the top of the node card
+        overlay = getattr(node, "_exec_overlay", None)
+        has_halo = bool(overlay and overlay.exec_halo_visible and overlay.exec_status != "IDLE")
+        gap_y = 12.0 if has_halo else 6.0
+        y_top = -gap_y - pill_h
+        pill_rect = QtCore.QRectF(-pill_w / 2.0, y_top, pill_w, pill_h)
+
+        # Subtle drop shadow
+        painter.setPen(QtCore.Qt.NoPen)
+        painter.setBrush(QtGui.QColor(0, 0, 0, 110))
+        painter.drawRoundedRect(pill_rect.translated(0.0, 1.5), radius, radius)
+
+        # Pill background and border
+        base_color = getattr(node, "color", (45, 80, 130, 255))
+        r, g, b = int(base_color[0]), int(base_color[1]), int(base_color[2])
+        pill_bg = QtGui.QColor(22, 26, 34, 240)
+
+        if getattr(node, "selected", False):
+            border_pen = QtGui.QPen(QtGui.QColor(254, 207, 42, 240), 1.3)
+        else:
+            border_color = QtGui.QColor(min(r + 65, 255), min(g + 65, 255), min(b + 65, 255), 210)
+            border_pen = QtGui.QPen(border_color, 1.1)
+
+        painter.setBrush(QtGui.QBrush(pill_bg))
+        painter.setPen(border_pen)
+        painter.drawRoundedRect(pill_rect, radius, radius)
+
+        # Centered text
+        painter.setPen(QtGui.QColor(242, 245, 250))
+        painter.drawText(pill_rect, QtCore.Qt.AlignCenter, display_name)
 
         painter.restore()
 
@@ -543,6 +627,7 @@ class ExecutableNodeItem(NodeItem):
     def __init__(self, name="Node", parent=None):
         super().__init__(name, parent)
         self.setCacheMode(QtWidgets.QGraphicsItem.NoCache)
+        self.setFlag(QtWidgets.QGraphicsItem.ItemSendsScenePositionChanges, True)
         if hasattr(self, "_text_item") and self._text_item:
             try:
                 if self.scene():
@@ -551,7 +636,30 @@ class ExecutableNodeItem(NodeItem):
                 pass
         self._text_item = CustomNodeTextItem(self.name, self)
         self._exec_overlay = NodeExecutionOverlayItem(self)
+        self._pill_item = FloatingPillItem(self)
         self._active_painter: Optional[QtGui.QPainter] = None
+
+    def itemChange(self, change, value):
+        res = super().itemChange(change, value)
+        pill = getattr(self, "_pill_item", None)
+        if pill is not None:
+            if change == QtWidgets.QGraphicsItem.ItemSceneChange:
+                # Node is leaving its current scene
+                curr_scene = self.scene()
+                if curr_scene and pill.scene() == curr_scene:
+                    curr_scene.removeItem(pill)
+            elif change == QtWidgets.QGraphicsItem.ItemSceneHasChanged:
+                # Node was added to a new scene
+                new_scene = self.scene()
+                if new_scene and pill.scene() != new_scene:
+                    new_scene.addItem(pill)
+                    pill.setPos(self.scenePos())
+            elif change in (QtWidgets.QGraphicsItem.ItemPositionHasChanged, QtWidgets.QGraphicsItem.ItemScenePositionHasChanged):
+                pill.setPos(self.scenePos())
+            elif change == QtWidgets.QGraphicsItem.ItemSelectedChange:
+                pill.setZValue(1001.0 if value else 1000.0)
+                pill.update()
+        return res
 
     def is_zoomed_out_mode(self, painter: Optional[QtGui.QPainter] = None) -> bool:
         """Return True when canvas zoom level drops below the threshold for showing the floating pill."""
@@ -560,14 +668,26 @@ class ExecutableNodeItem(NodeItem):
         return (EXEC_NODE_BASE_FONT_PT * lod) < EXEC_NODE_MIN_FONT_PT
 
     def auto_switch_mode(self) -> None:
-        """Keep normal node information visible at all zoom levels; does not hide contents."""
-        pass
+        """Keep normal node information visible at all zoom levels; sync floating pill state."""
+        pill = getattr(self, "_pill_item", None)
+        if pill and self.scene():
+            if pill.scene() != self.scene():
+                self.scene().addItem(pill)
+            pill.setPos(self.scenePos())
+            is_zoomed = self.is_zoomed_out_mode()
+            pill.setVisible(is_zoomed)
+            if is_zoomed:
+                pill.update()
 
     def draw_node(self) -> None:
         super().draw_node()
         if hasattr(self, "_exec_overlay") and self._exec_overlay:
             self._exec_overlay.prepareGeometryChange()
             self._exec_overlay.update()
+        if hasattr(self, "_pill_item") and self._pill_item:
+            self._pill_item.prepareGeometryChange()
+            self._pill_item.setPos(self.scenePos())
+            self._pill_item.update()
 
     def set_execution_state(
         self,
@@ -576,6 +696,8 @@ class ExecutableNodeItem(NodeItem):
         visible: Optional[bool] = None,
     ) -> None:
         self._exec_overlay.set_state(status=status, elapsed_sec=elapsed_sec, visible=visible)
+        if hasattr(self, "_pill_item") and self._pill_item:
+            self._pill_item.update()
         self.update()
 
     def advance_execution_animation(self, delta_offset: float = 1.2, elapsed_sec: Optional[float] = None) -> None:
@@ -587,6 +709,15 @@ class ExecutableNodeItem(NodeItem):
         self._active_painter = painter
         try:
             super().paint(painter, option, widget)
+            pill = getattr(self, "_pill_item", None)
+            if pill:
+                if self.scene() and pill.scene() != self.scene():
+                    self.scene().addItem(pill)
+                pill.setPos(self.scenePos())
+                is_zoomed = self.is_zoomed_out_mode(painter)
+                pill.setVisible(is_zoomed)
+                if is_zoomed:
+                    pill.update()
         finally:
             self._active_painter = None
 

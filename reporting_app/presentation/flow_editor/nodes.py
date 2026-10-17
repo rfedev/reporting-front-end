@@ -257,8 +257,8 @@ class TableBoxItem(NodeItem):
 
 # Execution node title font lower-limit constants
 EXEC_NODE_BASE_FONT_PT = 9.0
-EXEC_NODE_MIN_FONT_PT = 7.0
-EXEC_NODE_ZOOM_THRESHOLD = EXEC_NODE_MIN_FONT_PT / EXEC_NODE_BASE_FONT_PT  # ~0.7778 (~75-78% zoom)
+EXEC_NODE_MIN_FONT_PT = 4.7
+EXEC_NODE_ZOOM_THRESHOLD = EXEC_NODE_MIN_FONT_PT / EXEC_NODE_BASE_FONT_PT  # ~0.522 (~52% zoom)
 
 
 def get_node_lod(node_item: NodeItem, painter: Optional[QtGui.QPainter] = None) -> float:
@@ -314,7 +314,7 @@ def wrap_node_name_lines(
 
 
 class NodeExecutionOverlayItem(QtWidgets.QGraphicsItem):
-    """Non-interactive overlay graphics item that renders execution halos, elapsed time, and zoomed-out name pills on an execution node."""
+    """Non-interactive overlay graphics item that renders execution halos, elapsed time, and floating name pills on an execution node."""
 
     def __init__(self, parent_node_item: NodeItem):
         super().__init__(parent_node_item)
@@ -356,24 +356,13 @@ class NodeExecutionOverlayItem(QtWidgets.QGraphicsItem):
     def boundingRect(self) -> QtCore.QRectF:
         w = getattr(self._node_item, "_width", 160.0)
         h = getattr(self._node_item, "_height", 70.0)
-        return QtCore.QRectF(-120.0, -36.0, w + 240.0, h + 72.0)
+        return QtCore.QRectF(-120.0, -90.0, w + 240.0, h + 120.0)
 
     @staticmethod
     def format_mm_ss(seconds: float) -> str:
         total_sec = max(0, int(seconds))
         mins, secs = divmod(total_sec, 60)
         return f"{mins:02d}:{secs:02d}"
-
-    def _paint_zoomed_out_interior(self, painter: QtGui.QPainter, w: float, h: float) -> None:
-        """Smooth over the empty node header bar and dim the interior card surface when zoomed out."""
-        painter.save()
-        inner_rect = QtCore.QRectF(1.8, 1.8, max(0.0, w - 3.6), max(0.0, h - 3.6))
-        base_color = getattr(self._node_item, "color", (45, 80, 130, 255))
-        r, g, b = int(base_color[0] * 0.85), int(base_color[1] * 0.85), int(base_color[2] * 0.85)
-        painter.setPen(QtCore.Qt.NoPen)
-        painter.setBrush(QtGui.QColor(r, g, b, 240))
-        painter.drawRoundedRect(inner_rect, 3.5, 3.5)
-        painter.restore()
 
     def _paint_execution_halo(self, painter: QtGui.QPainter, w: float, h: float) -> None:
         """Render the outer status halo and top-right elapsed time badge."""
@@ -464,47 +453,48 @@ class NodeExecutionOverlayItem(QtWidgets.QGraphicsItem):
         painter.restore()
 
     def _paint_zoomed_out_pill(self, painter: QtGui.QPainter, w: float, h: float) -> None:
-        """Render a centered overlay pill badge over the node body with a clamped minimum readable font size."""
+        """Render a floating name pill badge directly above the node card with a fixed readable screen font size."""
         painter.save()
         lod = get_node_lod(self._node_item, painter)
-        eff_lod = max(lod, 0.32)
-        inv_scale = 1.0 / eff_lod
+        inv_scale = 1.0 / max(lod, 0.001)
 
-        painter.translate(w / 2.0, h / 2.0)
+        # Center horizontally at w / 2.0, anchored at top edge of the node y = 0.0
+        painter.translate(w / 2.0, 0.0)
         painter.scale(inv_scale, inv_scale)
 
         font = QtGui.QFont("sans-serif")
-        font.setPointSizeF(7.5)
+        font.setPointSizeF(8.0)
         font.setBold(True)
         painter.setFont(font)
         fm = QtGui.QFontMetricsF(font)
 
         node_name = (getattr(self._node_item, "name", "") or "").strip() or "Node"
-        scaled_node_w = w * eff_lod
-        max_line_w = max(scaled_node_w - 12.0, 86.0)
-        lines = wrap_node_name_lines(node_name, fm, max_line_w, max_lines=2)
+        display_name = fm.elidedText(node_name, QtCore.Qt.ElideRight, 260.0)
 
-        text_w = max(fm.horizontalAdvance(line) for line in lines)
-        line_h = fm.height()
-        line_gap = 1.0
-        total_text_h = len(lines) * line_h + (len(lines) - 1) * line_gap
+        text_w = fm.horizontalAdvance(display_name)
+        text_h = fm.height()
 
         pad_x = 8.5
-        pad_y = 4.5
+        pad_y = 3.5
         pill_w = text_w + pad_x * 2.0
-        pill_h = total_text_h + pad_y * 2.0
-        pill_rect = QtCore.QRectF(-pill_w / 2.0, -pill_h / 2.0, pill_w, pill_h)
-        radius = 5.5
+        pill_h = text_h + pad_y * 2.0
+        radius = 5.0
+
+        # Position above the top of the node card
+        has_halo = bool(self.exec_halo_visible and self.exec_status != "IDLE")
+        gap_y = 12.0 if has_halo else 6.0
+        y_top = -gap_y - pill_h
+        pill_rect = QtCore.QRectF(-pill_w / 2.0, y_top, pill_w, pill_h)
 
         # Subtle drop shadow
         painter.setPen(QtCore.Qt.NoPen)
-        painter.setBrush(QtGui.QColor(0, 0, 0, 105))
+        painter.setBrush(QtGui.QColor(0, 0, 0, 110))
         painter.drawRoundedRect(pill_rect.translated(0.0, 1.5), radius, radius)
 
-        # Pill fill and border
+        # Pill background and border
         base_color = getattr(self._node_item, "color", (45, 80, 130, 255))
         r, g, b = int(base_color[0]), int(base_color[1]), int(base_color[2])
-        pill_bg = QtGui.QColor(max(16, int(r * 0.36)), max(18, int(g * 0.36)), max(24, int(b * 0.36)), 238)
+        pill_bg = QtGui.QColor(22, 26, 34, 240)
 
         if getattr(self._node_item, "selected", False):
             border_pen = QtGui.QPen(QtGui.QColor(254, 207, 42, 240), 1.3)
@@ -516,13 +506,9 @@ class NodeExecutionOverlayItem(QtWidgets.QGraphicsItem):
         painter.setPen(border_pen)
         painter.drawRoundedRect(pill_rect, radius, radius)
 
-        # Centered text lines
+        # Centered text
         painter.setPen(QtGui.QColor(242, 245, 250))
-        y = -total_text_h / 2.0
-        for line in lines:
-            line_rect = QtCore.QRectF(-pill_w / 2.0, y, pill_w, line_h)
-            painter.drawText(line_rect, QtCore.Qt.AlignCenter, line)
-            y += line_h + line_gap
+        painter.drawText(pill_rect, QtCore.Qt.AlignCenter, display_name)
 
         painter.restore()
 
@@ -531,7 +517,7 @@ class NodeExecutionOverlayItem(QtWidgets.QGraphicsItem):
             return
 
         has_exec_halo = bool(self.exec_halo_visible and self.exec_status != "IDLE")
-        is_zoomed_out = bool(getattr(self._node_item, "_proxy_mode", False))
+        is_zoomed_out = bool(self._node_item.is_zoomed_out_mode(painter))
         if not has_exec_halo and not is_zoomed_out:
             return
 
@@ -541,9 +527,6 @@ class NodeExecutionOverlayItem(QtWidgets.QGraphicsItem):
 
         w = getattr(self._node_item, "_width", 160.0)
         h = getattr(self._node_item, "_height", 70.0)
-
-        if is_zoomed_out:
-            self._paint_zoomed_out_interior(painter, w, h)
 
         if has_exec_halo:
             self._paint_execution_halo(painter, w, h)
@@ -555,7 +538,7 @@ class NodeExecutionOverlayItem(QtWidgets.QGraphicsItem):
 
 
 class ExecutableNodeItem(NodeItem):
-    """Base graphics item for execution nodes (QueryNode and ImportCsvNode) supporting execution overlays and zoomed-out name pills."""
+    """Base graphics item for execution nodes (QueryNode and ImportCsvNode) supporting execution overlays and floating name pills."""
 
     def __init__(self, name="Node", parent=None):
         super().__init__(name, parent)
@@ -568,31 +551,20 @@ class ExecutableNodeItem(NodeItem):
                 pass
         self._text_item = CustomNodeTextItem(self.name, self)
         self._exec_overlay = NodeExecutionOverlayItem(self)
+        self._active_painter: Optional[QtGui.QPainter] = None
 
     def is_zoomed_out_mode(self, painter: Optional[QtGui.QPainter] = None) -> bool:
-        """Return True when effective node title font size drops below the lower limit (7pt)."""
-        lod = get_node_lod(self, painter)
+        """Return True when canvas zoom level drops below the threshold for showing the floating pill."""
+        active_painter = painter or getattr(self, "_active_painter", None)
+        lod = get_node_lod(self, active_painter)
         return (EXEC_NODE_BASE_FONT_PT * lod) < EXEC_NODE_MIN_FONT_PT
 
-    def auto_switch_mode(self, painter: Optional[QtGui.QPainter] = None) -> None:
-        """Switch between standard detailed view and zoomed-out centered pill mode based on font size lower limit."""
-        if not self.viewer():
-            return
-        active_painter = painter or getattr(self, "_active_painter", None)
-        should_proxy = self.is_zoomed_out_mode(active_painter)
-        if should_proxy != self._proxy_mode:
-            self.set_proxy_mode(should_proxy)
-            if hasattr(self, "_exec_overlay") and self._exec_overlay:
-                self._exec_overlay.update()
+    def auto_switch_mode(self) -> None:
+        """Keep normal node information visible at all zoom levels; does not hide contents."""
+        pass
 
     def draw_node(self) -> None:
-        """Calculate full node layout and restore zoomed-out visibility state if currently zoomed out."""
-        was_proxy = self._proxy_mode
-        if was_proxy:
-            self.set_proxy_mode(False)
         super().draw_node()
-        if was_proxy:
-            self.set_proxy_mode(True)
         if hasattr(self, "_exec_overlay") and self._exec_overlay:
             self._exec_overlay.prepareGeometryChange()
             self._exec_overlay.update()
@@ -644,7 +616,7 @@ class QueryNodeItem(ExecutableNodeItem):
 
     def _paint_horizontal(self, painter, option, widget):
         super()._paint_horizontal(painter, option, widget)
-        if self._proxy_mode or not self.parameter_list:
+        if not self.parameter_list:
             return
 
         painter.save()

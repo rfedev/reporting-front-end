@@ -15,7 +15,7 @@ from PySide6.QtWidgets import QWidget
 from reporting_app.core.audit_logger import record_audit_run_async
 from reporting_app.core.bigquery_run import run_bigquery_import_file, run_bigquery_script
 from reporting_app.persistence.repository import Repository
-from reporting_app.utils.date_calc import format_filename_with_date
+from reporting_app.utils.date_calc import calculate_import_file_date, format_filename_with_date
 
 logger = logging.getLogger(__name__)
 
@@ -302,12 +302,14 @@ class FlowWorker(QThread):
                     sheet_name = imp.get("sheet_name")
                     schema_mode = imp.get("schema_mode", "auto")
                     manual_schema = imp.get("manual_schema")
+                    date_option = imp.get("date_option", "Flow Date")
 
                     if not f_path or not d_table:
                         continue
 
-                    if self.filename_date:
-                        f_path = format_filename_with_date(f_path, self.filename_date)
+                    effective_date = calculate_import_file_date(date_option, flow_date=self.filename_date)
+                    if effective_date:
+                        f_path = format_filename_with_date(f_path, effective_date)
 
                     resolved_file = Path(f_path)
                     if not resolved_file.is_absolute():

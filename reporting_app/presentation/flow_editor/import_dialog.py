@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from reporting_app.presentation.flow_editor.schema_dialog import SchemaEditorDialog
+from reporting_app.utils.date_calc import IMPORT_DATE_OPTIONS, calculate_import_file_date
 
 
 class SelectOutputTablesDialog(QDialog):
@@ -79,7 +80,7 @@ class ImportFilesDialog(QDialog):
     ):
         super().__init__(parent)
         self.setWindowTitle("Import Files Configuration")
-        self.resize(750, 520)
+        self.resize(840, 520)
         self.workbench_dataset = workbench_dataset.strip()
         self.report_folder = Path(report_folder) if report_folder else None
         self.inputs_dir = (self.report_folder / "inputs") if self.report_folder else None
@@ -193,6 +194,7 @@ class ImportFilesDialog(QDialog):
                     sheet_name=item.get("sheet_name"),
                     schema_mode=item.get("schema_mode", "auto"),
                     manual_schema=item.get("manual_schema"),
+                    date_option=item.get("date_option", "Flow Date"),
                 )
         else:
             self._add_row()
@@ -205,6 +207,7 @@ class ImportFilesDialog(QDialog):
         sheet_name: Optional[str] = None,
         schema_mode: str = "auto",
         manual_schema: Optional[List[dict]] = None,
+        date_option: str = "Flow Date",
         **kwargs,
     ):
         if not file_path and "csv_path" in kwargs:
@@ -217,6 +220,8 @@ class ImportFilesDialog(QDialog):
             manual_schema = []
         if schema_mode not in ("auto", "manual"):
             schema_mode = "auto"
+        if not date_option or not isinstance(date_option, str):
+            date_option = "Flow Date"
 
         sec_num = len(self.rows) + 1
         section_box = QGroupBox(f"File Import #{sec_num}", self.container)
@@ -227,7 +232,7 @@ class ImportFilesDialog(QDialog):
         row_layout = QVBoxLayout(section_box)
         row_layout.setSpacing(8)
 
-        # Row 1: File path (editable combo) + square Browse button + Headers checkbox + square Delete button
+        # Row 1: File path (editable combo) + square Browse button + Headers checkbox + Date dropdown + square Delete button
         r1 = QHBoxLayout()
         lbl_file = QLabel("File:")
         lbl_file.setFixedWidth(85)
@@ -263,6 +268,34 @@ class ImportFilesDialog(QDialog):
         headers_cb = QCheckBox("Headers")
         headers_cb.setChecked(has_headers)
         r1.addWidget(headers_cb)
+
+        date_combo = QComboBox(self.container)
+        date_combo.setFixedWidth(185)
+        for i, opt in enumerate(IMPORT_DATE_OPTIONS):
+            date_combo.addItem(opt)
+            if opt == "Flow Date":
+                date_combo.setItemData(i, "Use the date set in the process flow", Qt.ToolTipRole)
+            elif opt == "None":
+                date_combo.setItemData(i, "Do not translate %date% patterns for this file", Qt.ToolTipRole)
+            else:
+                resolved = calculate_import_file_date(opt)
+                date_combo.setItemData(i, f"{opt} ({resolved})", Qt.ToolTipRole)
+
+        opt_idx = date_combo.findText(date_option)
+        date_combo.setCurrentIndex(opt_idx if opt_idx >= 0 else 0)
+
+        def update_date_combo_tooltip(selected_text: str):
+            if selected_text == "Flow Date":
+                date_combo.setToolTip("Date for %...% translation: Process Flow Date")
+            elif selected_text == "None":
+                date_combo.setToolTip("Date for %...% translation: Disabled (None)")
+            else:
+                resolved = calculate_import_file_date(selected_text)
+                date_combo.setToolTip(f"Date for %...% translation: {selected_text} -> {resolved}")
+
+        update_date_combo_tooltip(date_combo.currentText())
+        date_combo.currentTextChanged.connect(update_date_combo_tooltip)
+        r1.addWidget(date_combo)
 
         del_btn = QPushButton("🗑")
         del_btn.setToolTip("Remove this file import section")
@@ -321,6 +354,7 @@ class ImportFilesDialog(QDialog):
             "path_combo": path_combo,
             "path_edit": path_combo,
             "headers_cb": headers_cb,
+            "date_combo": date_combo,
             "table_edit": table_edit,
             "sheet_combo": sheet_combo,
             "schema_mode_combo": schema_combo,
@@ -463,6 +497,7 @@ class ImportFilesDialog(QDialog):
             f_path = r["path_combo"].currentText().strip()
             table = r["table_edit"].text().strip()
             headers = r["headers_cb"].isChecked()
+            date_opt = r["date_combo"].currentText().strip() if r.get("date_combo") else "Flow Date"
             sh = r["sheet_combo"].currentText().strip() if r.get("sheet_combo") else ""
             if not r["sheet_combo"].isEnabled() or sh.startswith("(") or not sh:
                 sh = None
@@ -477,6 +512,7 @@ class ImportFilesDialog(QDialog):
                     "sheet_name": sh,
                     "schema_mode": schema_mode,
                     "manual_schema": manual_schema if schema_mode == "manual" else None,
+                    "date_option": date_opt or "Flow Date",
                 })
         return results
 

@@ -235,6 +235,7 @@ class FlowExecutionTab(QWidget):
         self._canvas_press_pos: Optional[Any] = None
         self._canvas_press_button: Optional[Any] = None
         self._canvas_press_modifiers: Any = Qt.NoModifier
+        self._current_lan_output_folder: str = ""
 
         self._exec_anim_timer = QTimer(self)
         self._exec_anim_timer.setInterval(50)
@@ -339,6 +340,37 @@ class FlowExecutionTab(QWidget):
             "color: #9ca3af; font-family: monospace; font-size: 11px; font-weight: bold; background: transparent;"
         )
         lan_layout.addWidget(self.lan_pct_label)
+
+        self.lan_open_btn = QPushButton("📁", self.lan_progress_widget)
+        self.lan_open_btn.setCursor(Qt.PointingHandCursor)
+        self.lan_open_btn.setToolTip("Open LAN destination folder in file manager")
+        self.lan_open_btn.setFixedSize(22, 20)
+        self.lan_open_btn.setStyleSheet(
+            "QPushButton {"
+            "  background-color: transparent;"
+            "  color: #8b949e;"
+            "  border: 1px solid #30363d;"
+            "  border-radius: 3px;"
+            "  font-size: 11px;"
+            "  padding: 0px;"
+            "}"
+            "QPushButton:hover {"
+            "  background-color: #262b33;"
+            "  color: #c9d1d9;"
+            "  border-color: #484f58;"
+            "}"
+            "QPushButton:pressed {"
+            "  background-color: #1b1f24;"
+            "  color: #8b949e;"
+            "}"
+            "QPushButton:disabled {"
+            "  color: #4b5563;"
+            "  border-color: transparent;"
+            "  background-color: transparent;"
+            "}"
+        )
+        self.lan_open_btn.clicked.connect(self._on_open_lan_folder)
+        lan_layout.addWidget(self.lan_open_btn)
 
         exp_layout.addWidget(self.lan_progress_widget)
 
@@ -529,6 +561,7 @@ class FlowExecutionTab(QWidget):
                 node.view.set_execution_state(status="PENDING", elapsed_sec=0.0, visible=True)
 
         self.start_new_run(steps)
+        self._current_lan_output_folder = str(lan_output_folder).strip() if lan_output_folder else ""
 
         if lan_output_folder and str(lan_output_folder).strip():
             lan_dest_name = Path(str(lan_output_folder).strip()).name or str(lan_output_folder).strip()
@@ -538,6 +571,8 @@ class FlowExecutionTab(QWidget):
             self.lan_label.setText(f"LAN: Queued ({lan_dest_name})")
             self.lan_label.setToolTip(f"Destination: {lan_output_folder}")
             self.lan_pct_label.setText("")
+            if hasattr(self, "lan_open_btn"):
+                self.lan_open_btn.setEnabled(True)
             self._sync_geometry()
 
         runner = FlowRunner(parent_window=self.editor_window or self, repo=repo)
@@ -680,10 +715,12 @@ class FlowExecutionTab(QWidget):
 
     def _on_lan_transfer_started(self, file_idx: int, total_files: int, filename: str) -> None:
         self.lan_progress_widget.setVisible(True)
-        self.lan_progress_widget.setStyleSheet("QFrame { background-color: rgba(59, 130, 246, 0.14); border-radius: 4px; border: none; }")
+        self.lan_progress_widget.setStyleSheet("QFrame { background: transparent; border: none; }")
         self.lan_icon.set_status("RUNNING")
         self.lan_label.setText(f"LAN: Copying {filename} ({file_idx}/{total_files})")
         self.lan_pct_label.setText("0%")
+        if hasattr(self, "lan_open_btn"):
+            self.lan_open_btn.setEnabled(True)
         self._sync_geometry()
 
     def _on_lan_transfer_progress(self, file_idx: int, total_files: int, filename: str, pct: float) -> None:
@@ -713,7 +750,56 @@ class FlowExecutionTab(QWidget):
             self.lan_label.setText(f"LAN: {total_copied}/{total_files} file(s) copied")
             self.lan_pct_label.setText("")
             self.lan_label.setToolTip(summary)
+            if hasattr(self, "lan_open_btn"):
+                self.lan_open_btn.setEnabled(True)
             self._sync_geometry()
+
+    def get_lan_folder_path(self) -> Optional[Path]:
+        """Return the resolved LAN output directory path if configured."""
+        folder_str = self._current_lan_output_folder
+        if not folder_str and self.editor_window and hasattr(self.editor_window, "flow_controller"):
+            try:
+                folder_str = self.editor_window.flow_controller.get_lan_output_folder()
+            except Exception:
+                pass
+        if folder_str and str(folder_str).strip():
+            return Path(str(folder_str).strip())
+        return None
+
+    def _on_open_lan_folder(self) -> None:
+        """Open the configured LAN destination folder in the system file manager."""
+        self.set_selected(True)
+        folder_path = self.get_lan_folder_path()
+        if not folder_path:
+            self._show_status("No LAN destination folder configured.", 3000)
+            return
+
+        try:
+            folder_path.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+
+        folder_url = QUrl.fromLocalFile(str(folder_path.resolve()))
+        opened = QDesktopServices.openUrl(folder_url)
+        if not opened:
+            import os
+            import platform
+            import subprocess
+
+            sys_name = platform.system()
+            path_str = str(folder_path.resolve())
+            try:
+                if sys_name == "Windows":
+                    os.startfile(path_str)
+                elif sys_name == "Darwin":
+                    subprocess.Popen(["open", path_str])
+                else:
+                    subprocess.Popen(["xdg-open", path_str])
+            except Exception as e:
+                self._show_status(f"Could not open LAN folder: {e}", 3000)
 
     # ------------------------------------------------------------------
     # Tab UI State API
@@ -766,6 +852,7 @@ class FlowExecutionTab(QWidget):
         self._failed_node_name = ""
         self._run_status = "RUNNING"
         self._selected = True
+        self._current_lan_output_folder = ""
 
         if hasattr(self, "lan_progress_widget"):
             self.lan_progress_widget.setVisible(False)

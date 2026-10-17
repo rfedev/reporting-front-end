@@ -3,7 +3,7 @@
 from collections import defaultdict, deque
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 from PySide6.QtCore import QObject, Signal
 
 from reporting_app.core.models import ProcessFlowInfo, QueryInfo, Report
@@ -47,10 +47,12 @@ class ProcessFlowController(QObject):
             self.parameter_defaults = self.flow_data.get("parameter_defaults", {})
         else:
             self.flow_data = {
+                "version": FlowStorage.FLOW_SCHEMA_VERSION,
                 "flow_name": self.flow_name,
                 "report_name": self.report.name,
                 "query_names": [],
                 "parameter_defaults": {},
+                "node_positions": {},
                 "show_full_table_names": False,
                 "csv_filenames": {},
                 "graph_session": {},
@@ -107,6 +109,16 @@ class ProcessFlowController(QObject):
         """Return the serialized NodeGraph session dictionary."""
         return self.flow_data.get("graph_session", {})
 
+    def get_node_positions(self) -> Dict[str, Tuple[float, float]]:
+        """Return persisted node positions mapping node name -> (x, y)."""
+        raw = self.flow_data.get("node_positions", {})
+        result: Dict[str, Tuple[float, float]] = {}
+        if isinstance(raw, dict):
+            for k, v in raw.items():
+                if isinstance(v, (list, tuple)) and len(v) >= 2:
+                    result[str(k)] = (float(v[0]), float(v[1]))
+        return result
+
     def get_view_state(self) -> Dict[str, Any]:
         """Return persisted canvas view state (zoom, scene_center)."""
         return self.flow_data.get("view_state", {})
@@ -123,6 +135,15 @@ class ProcessFlowController(QObject):
             ]
         if "csv_filenames" in self.flow_data and old_name in self.flow_data["csv_filenames"]:
             self.flow_data["csv_filenames"][new_name] = self.flow_data["csv_filenames"].pop(old_name)
+        if "node_positions" in self.flow_data and isinstance(self.flow_data["node_positions"], dict):
+            pos_map = self.flow_data["node_positions"]
+            if old_name in pos_map:
+                pos_map[new_name] = pos_map.pop(old_name)
+            for suffix in ("[Out]", "[CSV]", "[In]", "[Convergence]"):
+                old_k = f"{old_name} {suffix}"
+                new_k = f"{new_name} {suffix}"
+                if old_k in pos_map:
+                    pos_map[new_k] = pos_map.pop(old_k)
 
     def get_query_names(self) -> List[str]:
         """Return list of query names used in this flow."""
@@ -260,6 +281,12 @@ class ProcessFlowController(QObject):
         if lan_output_folder is not None:
             self.flow_data["lan_output_folder"] = lan_output_folder.strip()
 
+        extracted_pos = FlowStorage._extract_node_positions(
+            graph_session,
+            existing_positions=self.flow_data.get("node_positions"),
+        )
+        self.flow_data["node_positions"] = extracted_pos
+
         FlowStorage.save(
             file_path=self.file_path,
             flow_name=self.flow_name,
@@ -276,6 +303,7 @@ class ProcessFlowController(QObject):
             selected_filename_date_param=self.flow_data.get("selected_filename_date_param"),
             has_report_date=self.flow_data.get("has_report_date"),
             lan_output_folder=self.flow_data.get("lan_output_folder"),
+            node_positions=extracted_pos,
         )
 
         # Update persistence layer defaults if repository is provided

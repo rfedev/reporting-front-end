@@ -95,7 +95,7 @@ class ProcessFlowEditorWindow(QMainWindow):
         self.setAttribute(Qt.WA_DeleteOnClose, True)
 
         self._node_counter = 0
-        self._node_positions: Dict[str, Tuple[float, float]] = {}
+        self._node_positions: Dict[str, Tuple[float, float]] = self.flow_controller.get_node_positions()
         # Track pending query renames (original_disk_name -> current_working_name)
         self._pending_query_renames: Dict[str, str] = {}
         self.show_full_table_names = self.flow_controller.get_show_full_table_names()
@@ -1927,7 +1927,10 @@ class ProcessFlowEditorWindow(QMainWindow):
 
             flow_path = getattr(self.flow_controller, "file_path", None)
             if flow_path and self.app_controller and hasattr(self.app_controller, "watcher"):
+                from reporting_app.persistence.flow_storage import FlowStorage
+
                 self.app_controller.watcher.suppress(Path(flow_path))
+                self.app_controller.watcher.suppress(FlowStorage.get_meta_path(Path(flow_path)))
 
             self.flow_controller.save_flow(
                 active_query_names=active_query_names,

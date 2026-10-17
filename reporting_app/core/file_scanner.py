@@ -164,24 +164,34 @@ class FileScanner:
 
     def _scan_process_flows(self, report_dir: Path, report_name: str) -> List[ProcessFlowInfo]:
         """Scan JSON files representing process flows strictly in ./<report>/queries/*.json."""
+        from reporting_app.persistence.flow_storage import FlowStorage
+
         json_files: List[Path] = []
         queries_dir = report_dir / "queries"
         if queries_dir.exists() and queries_dir.is_dir():
-            json_files.extend(queries_dir.glob("*.json"))
+            for fp in queries_dir.glob("*.json"):
+                if not FlowStorage.is_meta_file(fp):
+                    json_files.append(fp)
 
         flows: List[ProcessFlowInfo] = []
         for file_path in sorted(json_files, key=lambda x: x.name):
             try:
                 mtime = file_path.stat().st_mtime
+                meta_path = FlowStorage.get_meta_path(file_path)
+                meta_mtime = meta_path.stat().st_mtime if meta_path.exists() else 0.0
+                combined_mtime = max(mtime, meta_mtime)
                 cache_key = str(file_path.resolve())
 
                 cached = self._flow_cache.get(cache_key)
-                if cached and cached.mtime == mtime:
+                if cached and cached.mtime == combined_mtime:
                     flows.append(cached)
                     continue
 
-                raw_text = file_path.read_text(encoding="utf-8", errors="replace").strip()
-                data = json.loads(raw_text) if raw_text else {}
+                data = FlowStorage.load(file_path)
+                # Refresh mtimes in case FlowStorage.load migrated the file on disk
+                mtime = file_path.stat().st_mtime
+                meta_mtime = meta_path.stat().st_mtime if meta_path.exists() else 0.0
+                combined_mtime = max(mtime, meta_mtime)
 
                 query_names = data.get("query_names", [])
                 parameter_defaults = data.get("parameter_defaults", {})
@@ -202,7 +212,7 @@ class FileScanner:
                     query_names=query_names,
                     parameter_defaults=parameter_defaults,
                     raw_data=data,
-                    mtime=mtime,
+                    mtime=combined_mtime,
                 )
                 self._flow_cache[cache_key] = flow_info
                 flows.append(flow_info)

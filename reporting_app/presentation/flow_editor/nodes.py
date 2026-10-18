@@ -1447,6 +1447,15 @@ class GroupBoxItem(BackdropNodeItem):
             self._color_btn.setPos(max(self._width - 52.0, 36.0), self.HEADER_HEIGHT / 2.0)
         self.update()
 
+    def _combined_rect(self, nodes):
+        """Calculate the true combined scene rectangle of the given nodes without status glow overlays."""
+        rect = QtCore.QRectF()
+        for n in nodes:
+            if hasattr(n, "boundingRect") and hasattr(n, "mapToScene"):
+                node_rect = n.mapToScene(n.boundingRect()).boundingRect()
+                rect = rect.united(node_rect)
+        return rect
+
     def calc_backdrop_size(self, nodes=None):
         """Calculate group box position and dimensions to cleanly wrap the given nodes below the header bar."""
         nodes = nodes or self.get_nodes(True)
@@ -1488,7 +1497,7 @@ class GroupBoxItem(BackdropNodeItem):
                     if group_rect.intersects(item_rect):
                         nodes.append(item)
                 else:
-                    if group_rect.contains(item_rect.center()):
+                    if group_rect.adjusted(-2.0, -2.0, 2.0, 2.0).contains(item_rect):
                         nodes.append(item)
         return nodes
 
@@ -1621,6 +1630,28 @@ class GroupBoxNode(BackdropNode):
         super(BackdropNode, self).__init__(GroupBoxItem)
         self.set_color(*DEFAULT_GROUP_COLOR)
         self.create_property("backdrop_text", "", widget_type=NodePropWidgetEnum.QTEXT_EDIT.value, tab="Backdrop")
+        self.create_property("member_node_names", [], widget_type=NodePropWidgetEnum.HIDDEN.value, tab="Backdrop")
+
+    def wrap_nodes(self, nodes):
+        """Set the backdrop size to fit around specified nodes and record their names."""
+        if not nodes:
+            return
+        names = []
+        for n in nodes:
+            name_fn = getattr(n, "name", None)
+            if callable(name_fn):
+                names.append(name_fn())
+            elif isinstance(name_fn, str):
+                names.append(name_fn)
+            elif hasattr(n, "node") and hasattr(n.node, "name"):
+                node_name_fn = getattr(n.node, "name", None)
+                if callable(node_name_fn):
+                    names.append(node_name_fn())
+                elif isinstance(node_name_fn, str):
+                    names.append(node_name_fn)
+        if names:
+            self.set_property("member_node_names", names)
+        super().wrap_nodes(nodes)
 
     def nodes(self) -> List[BaseNode]:
         """Return all BaseNode instances currently located inside this group box."""

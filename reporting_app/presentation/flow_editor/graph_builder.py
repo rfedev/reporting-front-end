@@ -11,7 +11,7 @@
 
 from collections import defaultdict
 import logging
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from NodeGraphQt import BaseNode, NodeGraph
 from reporting_app.core.models import QueryInfo
@@ -480,244 +480,7 @@ class ProcessFlowGraphBuilder:
 
         all_edges: Set[Tuple[str, str]] = blue_edges | data_edges
 
-        # 3. Partition operations into weakly connected components
-        visited: Set[str] = set()
-        connected_components: List[List[str]] = []
-        unconnected_ops: List[str] = []
-
-        for op_name in valid_ops:
-            if op_name in visited:
-                continue
-            if not upstreams[op_name] and not downstreams[op_name]:
-                visited.add(op_name)
-                unconnected_ops.append(op_name)
-                continue
-
-            # BFS over undirected adjacency
-            comp: List[str] = []
-            queue = [op_name]
-            visited.add(op_name)
-            while queue:
-                curr = queue.pop(0)
-                comp.append(curr)
-                neighbors = list(upstreams[curr]) + list(downstreams[curr])
-                for nb in neighbors:
-                    if nb not in visited:
-                        visited.add(nb)
-                        queue.append(nb)
-            # Sort component members deterministically by original order in valid_ops
-            comp.sort(key=lambda x: valid_ops.index(x))
-            connected_components.append(comp)
-
-        # 4. Compute ranks and crossing-minimized lanes for each connected component
-        ranks: Dict[str, int] = {}
-        op_lane: Dict[str, int] = {}
-        current_base_lane = 0
-
-        for comp in connected_components:
-            comp_set = set(comp)
-            comp_ranks: Dict[str, int] = {u: 0 for u in comp}
-
-            # Longest-path topological rank assignment (with cycle guard)
-            for _ in range(len(comp) + 1):
-                changed = False
-                for u in comp:
-                    ups = [p for p in upstreams[u] if p in comp_set]
-                    if ups:
-                        target_r = max(comp_ranks[p] for p in ups) + 1
-                        if comp_ranks[u] < target_r and target_r <= len(comp):
-                            comp_ranks[u] = target_r
-                            changed = True
-                if not changed:
-                    break
-
-            # Pull source nodes (no upstreams) closer to their immediate downstream targets
-            # so they don't span unnecessarily long distances across ranks
-            for u in comp:
-                if not upstreams[u] and downstreams[u]:
-                    min_down_r = min(comp_ranks[d] for d in downstreams[u] if d in comp_set)
-                    if min_down_r > 1:
-                        comp_ranks[u] = min_down_r - 1
-
-            # Normalize ranks in this component to start at 0
-            min_r = min(comp_ranks.values(), default=0)
-            for u in comp:
-                comp_ranks[u] -= min_r
-                ranks[u] = comp_ranks[u]
-
-            rank_groups: Dict[int, List[str]] = defaultdict(list)
-            for u in comp:
-                rank_groups[comp_ranks[u]].append(u)
-            sorted_r = sorted(rank_groups.keys())
-
-            # Initial ordering within each rank
-            order_in_rank: Dict[int, List[str]] = {
-                r: list(rank_groups[r]) for r in sorted_r
-            }
-
-            def edge_weight(u: str, v: str) -> float:
-                # Prioritize blue execution pipes heavily over data pipes to prevent blue crossings
-                w = 0.0
-                if (u, v) in blue_edges:
-                    w += 10.0
-                if (u, v) in data_edges:
-                    w += 2.0
-                return w
-
-            # Barycenter sweeps (forward + backward)
-            for _sweep in range(6):
-                # Forward sweep
-                for r_idx in range(1, len(sorted_r)):
-                    r = sorted_r[r_idx]
-                    nodes_r = order_in_rank[r]
-                    if len(nodes_r) <= 1:
-                        continue
-                    bary: Dict[str, float] = {}
-                    for idx_u, u in enumerate(nodes_r):
-                        ups = [p for p in upstreams[u] if p in comp_set and comp_ranks[p] < r]
-                        if ups:
-                            num = 0.0
-                            den = 0.0
-                            for p in ups:
-                                p_r = comp_ranks[p]
-                                p_pos = order_in_rank[p_r].index(p)
-                                ew = edge_weight(p, u)
-                                num += p_pos * ew
-                                den += ew
-                            bary[u] = num / den if den > 0 else float(idx_u)
-                        else:
-                            bary[u] = float(idx_u)
-                    nodes_r.sort(key=lambda u: (bary[u], valid_ops.index(u)))
-
-                # Backward sweep
-                for r_idx in range(len(sorted_r) - 2, -1, -1):
-                    r = sorted_r[r_idx]
-                    nodes_r = order_in_rank[r]
-                    if len(nodes_r) <= 1:
-                        continue
-                    bary: Dict[str, float] = {}
-                    for idx_u, u in enumerate(nodes_r):
-                        downs = [d for d in downstreams[u] if d in comp_set and comp_ranks[d] > r]
-                        if downs:
-                            num = 0.0
-                            den = 0.0
-                            for d in downs:
-                                d_r = comp_ranks[d]
-                                d_pos = order_in_rank[d_r].index(d)
-                                ew = edge_weight(u, d)
-                                num += d_pos * ew
-                                den += ew
-                            bary[u] = num / den if den > 0 else float(idx_u)
-                        else:
-                            bary[u] = float(idx_u)
-                    nodes_r.sort(key=lambda u: (bary[u], valid_ops.index(u)))
-
-            # Exact permutation refinement for ranks with <= 6 nodes to guarantee minimum crossings
-            comp_edges = [(u, v) for (u, v) in all_edges if u in comp_set and v in comp_set and comp_ranks[u] != comp_ranks[v]]
-
-            def count_crossings(ordering_map: Dict[int, List[str]]) -> float:
-                pos_of: Dict[str, int] = {}
-                for r_val, n_list in ordering_map.items():
-                    for i_pos, n_name in enumerate(n_list):
-                        pos_of[n_name] = i_pos
-                cost = 0.0
-                n_edges = len(comp_edges)
-                for i in range(n_edges):
-                    u1, v1 = comp_edges[i]
-                    r_u1, r_v1 = comp_ranks[u1], comp_ranks[v1]
-                    if r_u1 > r_v1:
-                        u1, v1, r_u1, r_v1 = v1, u1, r_v1, r_u1
-                    for j in range(i + 1, n_edges):
-                        u2, v2 = comp_edges[j]
-                        r_u2, r_v2 = comp_ranks[u2], comp_ranks[v2]
-                        if r_u2 > r_v2:
-                            u2, v2, r_u2, r_v2 = v2, u2, r_v2, r_u2
-                        # Check if intervals overlap in rank
-                        if max(r_u1, r_u2) < min(r_v1, r_v2) or (r_u1 == r_u2 and r_v1 == r_v2):
-                            diff_u = pos_of[u1] - pos_of[u2]
-                            diff_v = pos_of[v1] - pos_of[v2]
-                            if diff_u * diff_v < 0:
-                                is_b1 = (u1, v1) in blue_edges or (v1, u1) in blue_edges
-                                is_b2 = (u2, v2) in blue_edges or (v2, u2) in blue_edges
-                                if is_b1 and is_b2:
-                                    cost += 100.0
-                                elif is_b1 or is_b2:
-                                    cost += 25.0
-                                else:
-                                    cost += 5.0
-                        # Also penalize long-span edge passing directly through a node at an intermediate rank on the same lane
-                        if r_v1 - r_u1 > 1 and pos_of[u1] == pos_of[v1]:
-                            for mid_r in range(r_u1 + 1, r_v1):
-                                if mid_r in ordering_map and pos_of[u1] < len(ordering_map[mid_r]):
-                                    cost += 50.0
-                return cost
-
-            for _pass in range(2):
-                for r in sorted_r:
-                    nodes_r = order_in_rank[r]
-                    if 1 < len(nodes_r) <= 6:
-                        best_perm = list(nodes_r)
-                        best_cost = count_crossings(order_in_rank)
-                        if best_cost > 0:
-                            for perm in itertools.permutations(nodes_r):
-                                order_in_rank[r] = list(perm)
-                                c_val = count_crossings(order_in_rank)
-                                if c_val < best_cost:
-                                    best_cost = c_val
-                                    best_perm = list(perm)
-                                    if best_cost == 0:
-                                        break
-                            order_in_rank[r] = best_perm
-
-            # Assign lanes within component while aligning linear continuations on the same lane
-            comp_lanes: Dict[str, int] = {}
-            max_lane_used = 0
-            for r_idx, r in enumerate(sorted_r):
-                nodes_r = order_in_rank[r]
-                used_in_r: Set[int] = set()
-                for idx_u, u in enumerate(nodes_r):
-                    desired_lane = idx_u
-                    if r_idx > 0:
-                        ups_in_prev = [
-                            p for p in upstreams[u]
-                            if p in comp_lanes and comp_ranks[p] < r
-                        ]
-                        if ups_in_prev:
-                            # Align with primary upstream (preferring blue execution parent)
-                            blue_ups = [p for p in ups_in_prev if (p, u) in blue_edges]
-                            ref_ups = blue_ups if blue_ups else ups_in_prev
-                            min_up_lane = min(comp_lanes[p] for p in ref_ups)
-                            if min_up_lane >= desired_lane and min_up_lane not in used_in_r:
-                                desired_lane = min_up_lane
-                    while desired_lane in used_in_r:
-                        desired_lane += 1
-                    # Keep monotonic order with previous node in rank
-                    if idx_u > 0:
-                        prev_node_lane = comp_lanes[nodes_r[idx_u - 1]]
-                        if desired_lane <= prev_node_lane:
-                            desired_lane = prev_node_lane + 1
-                            while desired_lane in used_in_r:
-                                desired_lane += 1
-                    used_in_r.add(desired_lane)
-                    comp_lanes[u] = desired_lane
-                    if desired_lane > max_lane_used:
-                        max_lane_used = desired_lane
-
-            # If a single downstream node converges from rank 0, align it with lane 0
-            for u in comp:
-                op_lane[u] = current_base_lane + comp_lanes[u]
-
-            current_base_lane += max_lane_used + 1
-
-        # 5. Arrange individual, unconnected nodes at the first level (rank 0):
-        #    - In horizontal mode: stacked vertically along Y at rank 0
-        #    - In vertical mode: placed horizontally along X at rank 0
-        if unconnected_ops:
-            for idx_u, u in enumerate(unconnected_ops):
-                ranks[u] = 0
-                op_lane[u] = current_base_lane + idx_u
-
-        # 6. Classify each operation's input and output table boxes into 4 directional slots
+        # 3. Classify each operation's input and output table boxes into 4 directional slots
         #    (left, right, above, below) relative to its execution node:
         #    - Starting tables (no upstream execution node): Left in Horizontal, Above in Vertical
         #    - Ending tables (no downstream execution node): Right in Horizontal, Below in Vertical
@@ -825,129 +588,595 @@ class ProcessFlowGraphBuilder:
                 layout_dir=direction,
             )
 
-        rank_groups_final: Dict[int, List[str]] = defaultdict(list)
-        for op_name in valid_ops:
-            rank_groups_final[ranks[op_name]].append(op_name)
-        sorted_ranks = sorted(rank_groups_final.keys())
-        all_lanes = sorted(list(set(op_lane.values())))
+        def _compute_entity_centers(
+            entity_ids: List[str],
+            entity_extents: Dict[str, Tuple[float, float, float, float]],
+            sub_upstreams: Dict[str, Set[str]],
+            sub_downstreams: Dict[str, Set[str]],
+            sub_blue_edges: Set[Tuple[str, str]],
+            sub_data_edges: Set[Tuple[str, str]],
+        ) -> Tuple[Dict[str, float], Dict[str, float]]:
+            """Compute (center_x_map, center_y_map) for a list of entities with given extents and dependencies."""
+            if not entity_ids:
+                return {}, {}
+
+            sub_all_edges: Set[Tuple[str, str]] = sub_blue_edges | sub_data_edges
+            visited_ent: Set[str] = set()
+            connected_components: List[List[str]] = []
+            unconnected_ents: List[str] = []
+
+            for eid in entity_ids:
+                if eid in visited_ent:
+                    continue
+                if not sub_upstreams.get(eid) and not sub_downstreams.get(eid):
+                    visited_ent.add(eid)
+                    unconnected_ents.append(eid)
+                    continue
+
+                comp: List[str] = []
+                queue = [eid]
+                visited_ent.add(eid)
+                while queue:
+                    curr = queue.pop(0)
+                    comp.append(curr)
+                    neighbors = list(sub_upstreams.get(curr, set())) + list(sub_downstreams.get(curr, set()))
+                    for nb in neighbors:
+                        if nb not in visited_ent:
+                            visited_ent.add(nb)
+                            queue.append(nb)
+                comp.sort(key=lambda x: entity_ids.index(x))
+                connected_components.append(comp)
+
+            ranks: Dict[str, int] = {}
+            ent_lane: Dict[str, int] = {}
+            current_base_lane = 0
+
+            for comp in connected_components:
+                comp_set = set(comp)
+                comp_ranks: Dict[str, int] = {u: 0 for u in comp}
+
+                # Longest-path topological rank assignment (with cycle guard)
+                for _ in range(len(comp) + 1):
+                    changed = False
+                    for u in comp:
+                        ups = [p for p in sub_upstreams[u] if p in comp_set]
+                        if ups:
+                            target_r = max(comp_ranks[p] for p in ups) + 1
+                            if comp_ranks[u] < target_r and target_r <= len(comp):
+                                comp_ranks[u] = target_r
+                                changed = True
+                    if not changed:
+                        break
+
+                # Pull source nodes (no upstreams) closer to their immediate downstream targets
+                for u in comp:
+                    if not sub_upstreams[u] and sub_downstreams[u]:
+                        min_down_r = min(comp_ranks[d] for d in sub_downstreams[u] if d in comp_set)
+                        if min_down_r > 1:
+                            comp_ranks[u] = min_down_r - 1
+
+                # Normalize ranks in this component to start at 0
+                min_r = min(comp_ranks.values(), default=0)
+                for u in comp:
+                    comp_ranks[u] -= min_r
+                    ranks[u] = comp_ranks[u]
+
+                rank_groups: Dict[int, List[str]] = defaultdict(list)
+                for u in comp:
+                    rank_groups[comp_ranks[u]].append(u)
+                sorted_r = sorted(rank_groups.keys())
+
+                order_in_rank: Dict[int, List[str]] = {
+                    r: list(rank_groups[r]) for r in sorted_r
+                }
+
+                def edge_weight(u: str, v: str) -> float:
+                    w = 0.0
+                    if (u, v) in sub_blue_edges:
+                        w += 10.0
+                    if (u, v) in sub_data_edges:
+                        w += 2.0
+                    return w
+
+                # Barycenter sweeps (forward + backward)
+                for _sweep in range(6):
+                    for r_idx in range(1, len(sorted_r)):
+                        r = sorted_r[r_idx]
+                        nodes_r = order_in_rank[r]
+                        if len(nodes_r) <= 1:
+                            continue
+                        bary: Dict[str, float] = {}
+                        for idx_u, u in enumerate(nodes_r):
+                            ups = [p for p in sub_upstreams[u] if p in comp_set and comp_ranks[p] < r]
+                            if ups:
+                                num = 0.0
+                                den = 0.0
+                                for p in ups:
+                                    p_r = comp_ranks[p]
+                                    p_pos = order_in_rank[p_r].index(p)
+                                    ew = edge_weight(p, u)
+                                    num += p_pos * ew
+                                    den += ew
+                                bary[u] = num / den if den > 0 else float(idx_u)
+                            else:
+                                bary[u] = float(idx_u)
+                        nodes_r.sort(key=lambda u: (bary[u], entity_ids.index(u)))
+
+                    for r_idx in range(len(sorted_r) - 2, -1, -1):
+                        r = sorted_r[r_idx]
+                        nodes_r = order_in_rank[r]
+                        if len(nodes_r) <= 1:
+                            continue
+                        bary: Dict[str, float] = {}
+                        for idx_u, u in enumerate(nodes_r):
+                            downs = [d for d in sub_downstreams[u] if d in comp_set and comp_ranks[d] > r]
+                            if downs:
+                                num = 0.0
+                                den = 0.0
+                                for d in downs:
+                                    d_r = comp_ranks[d]
+                                    d_pos = order_in_rank[d_r].index(d)
+                                    ew = edge_weight(u, d)
+                                    num += d_pos * ew
+                                    den += ew
+                                bary[u] = num / den if den > 0 else float(idx_u)
+                            else:
+                                bary[u] = float(idx_u)
+                        nodes_r.sort(key=lambda u: (bary[u], entity_ids.index(u)))
+
+                # Exact permutation refinement for ranks with <= 6 nodes
+                comp_edges = [
+                    (u, v) for (u, v) in sub_all_edges
+                    if u in comp_set and v in comp_set and comp_ranks[u] != comp_ranks[v]
+                ]
+
+                def count_crossings(ordering_map: Dict[int, List[str]]) -> float:
+                    pos_of: Dict[str, int] = {}
+                    for r_val, n_list in ordering_map.items():
+                        for i_pos, n_name in enumerate(n_list):
+                            pos_of[n_name] = i_pos
+                    cost = 0.0
+                    n_edges = len(comp_edges)
+                    for i in range(n_edges):
+                        u1, v1 = comp_edges[i]
+                        r_u1, r_v1 = comp_ranks[u1], comp_ranks[v1]
+                        if r_u1 > r_v1:
+                            u1, v1, r_u1, r_v1 = v1, u1, r_v1, r_u1
+                        for j in range(i + 1, n_edges):
+                            u2, v2 = comp_edges[j]
+                            r_u2, r_v2 = comp_ranks[u2], comp_ranks[v2]
+                            if r_u2 > r_v2:
+                                u2, v2, r_u2, r_v2 = v2, u2, r_v2, r_u2
+                            if max(r_u1, r_u2) < min(r_v1, r_v2) or (r_u1 == r_u2 and r_v1 == r_v2):
+                                diff_u = pos_of[u1] - pos_of[u2]
+                                diff_v = pos_of[v1] - pos_of[v2]
+                                if diff_u * diff_v < 0:
+                                    is_b1 = (u1, v1) in sub_blue_edges or (v1, u1) in sub_blue_edges
+                                    is_b2 = (u2, v2) in sub_blue_edges or (v2, u2) in sub_blue_edges
+                                    if is_b1 and is_b2:
+                                        cost += 100.0
+                                    elif is_b1 or is_b2:
+                                        cost += 25.0
+                                    else:
+                                        cost += 5.0
+                            if r_v1 - r_u1 > 1 and pos_of[u1] == pos_of[v1]:
+                                for mid_r in range(r_u1 + 1, r_v1):
+                                    if mid_r in ordering_map and pos_of[u1] < len(ordering_map[mid_r]):
+                                        cost += 50.0
+                    return cost
+
+                for _pass in range(2):
+                    for r in sorted_r:
+                        nodes_r = order_in_rank[r]
+                        if 1 < len(nodes_r) <= 6:
+                            best_perm = list(nodes_r)
+                            best_cost = count_crossings(order_in_rank)
+                            if best_cost > 0:
+                                for perm in itertools.permutations(nodes_r):
+                                    order_in_rank[r] = list(perm)
+                                    c_val = count_crossings(order_in_rank)
+                                    if c_val < best_cost:
+                                        best_cost = c_val
+                                        best_perm = list(perm)
+                                        if best_cost == 0:
+                                            break
+                                order_in_rank[r] = best_perm
+
+                comp_lanes: Dict[str, int] = {}
+                max_lane_used = 0
+                for r_idx, r in enumerate(sorted_r):
+                    nodes_r = order_in_rank[r]
+                    used_in_r: Set[int] = set()
+                    for idx_u, u in enumerate(nodes_r):
+                        desired_lane = idx_u
+                        if r_idx > 0:
+                            ups_in_prev = [
+                                p for p in sub_upstreams[u]
+                                if p in comp_lanes and comp_ranks[p] < r
+                            ]
+                            if ups_in_prev:
+                                blue_ups = [p for p in ups_in_prev if (p, u) in sub_blue_edges]
+                                ref_ups = blue_ups if blue_ups else ups_in_prev
+                                min_up_lane = min(comp_lanes[p] for p in ref_ups)
+                                if min_up_lane >= desired_lane and min_up_lane not in used_in_r:
+                                    desired_lane = min_up_lane
+                        while desired_lane in used_in_r:
+                            desired_lane += 1
+                        if idx_u > 0:
+                            prev_node_lane = comp_lanes[nodes_r[idx_u - 1]]
+                            if desired_lane <= prev_node_lane:
+                                desired_lane = prev_node_lane + 1
+                                while desired_lane in used_in_r:
+                                    desired_lane += 1
+                        used_in_r.add(desired_lane)
+                        comp_lanes[u] = desired_lane
+                        if desired_lane > max_lane_used:
+                            max_lane_used = desired_lane
+
+                for u in comp:
+                    ent_lane[u] = current_base_lane + comp_lanes[u]
+
+                current_base_lane += max_lane_used + 1
+
+            # Arrange unconnected entities at rank 0
+            if unconnected_ents:
+                for idx_u, u in enumerate(unconnected_ents):
+                    ranks[u] = 0
+                    ent_lane[u] = current_base_lane + idx_u
+
+            rank_groups_final: Dict[int, List[str]] = defaultdict(list)
+            for eid in entity_ids:
+                rank_groups_final[ranks[eid]].append(eid)
+            sorted_ranks = sorted(rank_groups_final.keys())
+            all_lanes = sorted(list(set(ent_lane.values())))
+
+            if direction == "horizontal":
+                rank_gap_x = 90.0
+                lane_gap_y = 80.0
+
+                lane_max_above: Dict[int, float] = {}
+                lane_max_below: Dict[int, float] = {}
+                for lane in all_lanes:
+                    ents_in_lane = [entity_extents[eid] for eid, l in ent_lane.items() if l == lane]
+                    lane_max_above[lane] = max((ext[2] for ext in ents_in_lane), default=60.0)
+                    lane_max_below[lane] = max((ext[3] for ext in ents_in_lane), default=60.0)
+
+                lane_center_y: Dict[int, float] = {}
+                cur_y = lane_max_above[all_lanes[0]]
+                for idx, lane in enumerate(all_lanes):
+                    if idx > 0:
+                        prev_lane = all_lanes[idx - 1]
+                        cur_y += lane_max_below[prev_lane] + lane_gap_y + lane_max_above[lane]
+                    lane_center_y[lane] = cur_y
+
+                center_x_map: Dict[str, float] = {}
+                cur_x = 0.0
+                for idx, r in enumerate(sorted_ranks):
+                    ents_in_r = rank_groups_final[r]
+                    max_left = max((entity_extents[eid][0] for eid in ents_in_r), default=90.0)
+                    max_right = max((entity_extents[eid][1] for eid in ents_in_r), default=90.0)
+                    if idx == 0:
+                        cur_x = max_left
+                    else:
+                        cur_x += max_left
+                    for eid in ents_in_r:
+                        center_x_map[eid] = cur_x
+                    cur_x += max_right + rank_gap_x
+
+                center_y_map = {eid: lane_center_y[ent_lane[eid]] for eid in entity_ids}
+            else:
+                rank_gap_y = 80.0
+                lane_gap_x = 90.0
+
+                lane_max_left: Dict[int, float] = {}
+                lane_max_right: Dict[int, float] = {}
+                for lane in all_lanes:
+                    ents_in_lane = [entity_extents[eid] for eid, l in ent_lane.items() if l == lane]
+                    lane_max_left[lane] = max((ext[0] for ext in ents_in_lane), default=90.0)
+                    lane_max_right[lane] = max((ext[1] for ext in ents_in_lane), default=90.0)
+
+                lane_center_x: Dict[int, float] = {}
+                cur_x = lane_max_left[all_lanes[0]]
+                for idx, lane in enumerate(all_lanes):
+                    if idx > 0:
+                        prev_lane = all_lanes[idx - 1]
+                        cur_x += lane_max_right[prev_lane] + lane_gap_x + lane_max_left[lane]
+                    lane_center_x[lane] = cur_x
+
+                center_y_map = {}
+                cur_y = 0.0
+                for idx, r in enumerate(sorted_ranks):
+                    ents_in_r = rank_groups_final[r]
+                    max_above = max((entity_extents[eid][2] for eid in ents_in_r), default=60.0)
+                    max_below = max((entity_extents[eid][3] for eid in ents_in_r), default=60.0)
+                    if idx == 0:
+                        cur_y = max_above
+                    else:
+                        cur_y += max_above
+                    for eid in ents_in_r:
+                        center_y_map[eid] = cur_y
+                    cur_y += max_below + rank_gap_y
+
+                center_x_map = {eid: lane_center_x[ent_lane[eid]] for eid in entity_ids}
+
+            return center_x_map, center_y_map
+
+        def _place_ops_from_centers(
+            ops_subset: List[str],
+            cx_map: Dict[str, float],
+            cy_map: Dict[str, float],
+            out_positions: Dict[str, Tuple[float, float]],
+        ) -> None:
+            for name in ops_subset:
+                c = clusters[name]
+                cx = cx_map[name]
+                cy = cy_map[name]
+
+                out_positions[c.prim.name()] = (cx - c.w_prim / 2.0, cy - c.h_prim / 2.0)
+                qname = c.prim.get_property("query_name") if hasattr(c.prim, "get_property") else None
+                if qname:
+                    out_positions[qname] = (cx - c.w_prim / 2.0, cy - c.h_prim / 2.0)
+
+                if c.left_b:
+                    cur_ly = cy - c.left_h / 2.0
+                    left_right_edge = cx - c.w_prim / 2.0 - c.gap_x_side
+                    for lb, (w_lb, h_lb) in zip(c.left_b, c.left_dims):
+                        out_positions[lb.name()] = (left_right_edge - w_lb, cur_ly)
+                        cur_ly += h_lb + c.intra_gap_y
+
+                if c.right_b:
+                    cur_ry = cy - c.right_h / 2.0
+                    right_left_edge = cx + c.w_prim / 2.0 + c.gap_x_side
+                    for rb, (w_rb, h_rb) in zip(c.right_b, c.right_dims):
+                        out_positions[rb.name()] = (right_left_edge, cur_ry)
+                        cur_ry += h_rb + c.intra_gap_y
+
+                if c.above_b:
+                    above_bottom_edge = cy - c.h_prim / 2.0 - c.gap_y_side
+                    cur_ax = cx - c.above_w / 2.0
+                    for ab, (w_ab, h_ab) in zip(c.above_b, c.above_dims):
+                        out_positions[ab.name()] = (cur_ax, above_bottom_edge - h_ab)
+                        cur_ax += w_ab + c.intra_gap_x
+
+                if c.below_b:
+                    below_top_edge = cy + c.h_prim / 2.0 + c.gap_y_side
+                    cur_bx = cx - c.below_w / 2.0
+                    for bb, (w_bb, h_bb) in zip(c.below_b, c.below_dims):
+                        out_positions[bb.name()] = (cur_bx, below_top_edge)
+                        cur_bx += w_bb + c.intra_gap_x
+
+        # 4. Check for GroupBoxNode instances on the canvas
+        group_nodes: List[GroupBoxNode] = [
+            n for n in all_nodes
+            if getattr(n, "type_", "") == "reporting.nodes.GroupBoxNode"
+            or n.__class__.__name__ == "GroupBoxNode"
+        ]
 
         new_positions: Dict[str, Tuple[float, float]] = {}
 
-        if direction == "horizontal":
-            rank_gap_x = 90.0
-            lane_gap_y = 80.0
-
-            # Compute vertical lane centers (Y) from max above/below extents in each lane
-            lane_max_above: Dict[int, float] = {}
-            lane_max_below: Dict[int, float] = {}
-            for lane in all_lanes:
-                ops_in_lane = [clusters[name] for name, l in op_lane.items() if l == lane]
-                lane_max_above[lane] = max((c.ext_above for c in ops_in_lane), default=60.0)
-                lane_max_below[lane] = max((c.ext_below for c in ops_in_lane), default=60.0)
-
-            lane_center_y: Dict[int, float] = {}
-            cur_y = lane_max_above[all_lanes[0]]
-            for idx, lane in enumerate(all_lanes):
-                if idx > 0:
-                    prev_lane = all_lanes[idx - 1]
-                    cur_y += lane_max_below[prev_lane] + lane_gap_y + lane_max_above[lane]
-                lane_center_y[lane] = cur_y
-
-            # Compute horizontal rank centers (X) from max left/right extents in each rank
-            op_center_x: Dict[str, float] = {}
-            cur_x = 0.0
-            for idx, r in enumerate(sorted_ranks):
-                ops_in_r = [clusters[name] for name in rank_groups_final[r]]
-                max_left = max((c.ext_left for c in ops_in_r), default=90.0)
-                max_right = max((c.ext_right for c in ops_in_r), default=90.0)
-                if idx == 0:
-                    cur_x = max_left
-                else:
-                    cur_x += max_left
-                for c in ops_in_r:
-                    op_center_x[c.name] = cur_x
-                cur_x += max_right + rank_gap_x
-
-            op_center_y_map = {name: lane_center_y[op_lane[name]] for name in valid_ops}
+        if not group_nodes:
+            op_extents = {
+                name: (clusters[name].ext_left, clusters[name].ext_right, clusters[name].ext_above, clusters[name].ext_below)
+                for name in valid_ops
+            }
+            cx_map, cy_map = _compute_entity_centers(
+                valid_ops,
+                op_extents,
+                upstreams,
+                downstreams,
+                blue_edges,
+                data_edges,
+            )
+            _place_ops_from_centers(valid_ops, cx_map, cy_map, new_positions)
         else:
-            rank_gap_y = 80.0
-            lane_gap_x = 90.0
+            # Determine which operations belong to which GroupBoxNode before moving any nodes
+            op_to_group_idx: Dict[str, int] = {}
+            group_contained_views: List[Set[str]] = []
+            group_areas: List[float] = []
 
-            # Compute horizontal lane centers (X) from max left/right extents in each lane
-            lane_max_left: Dict[int, float] = {}
-            lane_max_right: Dict[int, float] = {}
-            for lane in all_lanes:
-                ops_in_lane = [clusters[name] for name, l in op_lane.items() if l == lane]
-                lane_max_left[lane] = max((c.ext_left for c in ops_in_lane), default=90.0)
-                lane_max_right[lane] = max((c.ext_right for c in ops_in_lane), default=90.0)
-
-            lane_center_x: Dict[int, float] = {}
-            cur_x = lane_max_left[all_lanes[0]]
-            for idx, lane in enumerate(all_lanes):
-                if idx > 0:
-                    prev_lane = all_lanes[idx - 1]
-                    cur_x += lane_max_right[prev_lane] + lane_gap_x + lane_max_left[lane]
-                lane_center_x[lane] = cur_x
-
-            # Compute vertical rank centers (Y) from max above/below extents in each rank
-            op_center_y_map: Dict[str, float] = {}
-            cur_y = 0.0
-            for idx, r in enumerate(sorted_ranks):
-                ops_in_r = [clusters[name] for name in rank_groups_final[r]]
-                max_above = max((c.ext_above for c in ops_in_r), default=60.0)
-                max_below = max((c.ext_below for c in ops_in_r), default=60.0)
-                if idx == 0:
-                    cur_y = max_above
+            for g in group_nodes:
+                if hasattr(g, "view") and g.view:
+                    views_in_g = g.view.get_nodes(inc_intersects=False)
+                    group_contained_views.append({getattr(v, "id", None) for v in views_in_g})
+                    gw = float(getattr(g.view, "width", 380.0) or 380.0)
+                    gh = float(getattr(g.view, "height", 250.0) or 250.0)
+                    group_areas.append(gw * gh)
                 else:
-                    cur_y += max_above
-                for c in ops_in_r:
-                    op_center_y_map[c.name] = cur_y
-                cur_y += max_below + rank_gap_y
+                    group_contained_views.append(set())
+                    group_areas.append(380.0 * 250.0)
 
-            op_center_x = {name: lane_center_x[op_lane[name]] for name in valid_ops}
+            groups_with_explicit_members: Set[int] = set()
+            # First priority: check explicit member_node_names recorded on group nodes
+            for g_idx, gnode in enumerate(group_nodes):
+                explicit_names = gnode.get_property("member_node_names") if hasattr(gnode, "get_property") else None
+                if explicit_names and isinstance(explicit_names, (list, tuple, set)) and len(explicit_names) > 0:
+                    groups_with_explicit_members.add(g_idx)
+                    exp_set = set(explicit_names)
+                    for op_name in valid_ops:
+                        if op_name in op_to_group_idx:
+                            continue
+                        pnode = primary_nodes[op_name]
+                        qname = pnode.get_property("query_name") if hasattr(pnode, "get_property") else None
+                        if op_name in exp_set or pnode.name() in exp_set or (qname and qname in exp_set):
+                            op_to_group_idx[op_name] = g_idx
 
-        # 7. Place primary nodes and their directional table boxes around (cx, cy)
-        for name, c in clusters.items():
-            cx = op_center_x[name]
-            cy = op_center_y_map[name]
+            for op_name in valid_ops:
+                if op_name in op_to_group_idx:
+                    continue
+                pnode = primary_nodes[op_name]
+                p_vid = getattr(getattr(pnode, "view", None), "id", None) or pnode.id
+                candidate_g_indices = [
+                    g_idx for g_idx, vset in enumerate(group_contained_views)
+                    if p_vid in vset and g_idx not in groups_with_explicit_members
+                ]
+                if not candidate_g_indices:
+                    # Fallback: check if any of this operation's table boxes is inside a group
+                    op_boxes = in_boxes_by_op[op_name] + out_boxes_by_op[op_name]
+                    for b in op_boxes:
+                        b_vid = getattr(getattr(b, "view", None), "id", None) or b.id
+                        for g_idx, vset in enumerate(group_contained_views):
+                            if b_vid in vset and g_idx not in candidate_g_indices and g_idx not in groups_with_explicit_members:
+                                candidate_g_indices.append(g_idx)
 
-            # Primary node centered at (cx, cy)
-            new_positions[c.prim.name()] = (cx - c.w_prim / 2.0, cy - c.h_prim / 2.0)
-            qname = c.prim.get_property("query_name") if hasattr(c.prim, "get_property") else None
-            if qname:
-                new_positions[qname] = (cx - c.w_prim / 2.0, cy - c.h_prim / 2.0)
+                if candidate_g_indices:
+                    # If inside multiple overlapping groups, assign to the most specific (smallest-area) group
+                    best_g_idx = min(candidate_g_indices, key=lambda idx: (group_areas[idx], idx))
+                    op_to_group_idx[op_name] = best_g_idx
 
-            # Left boxes (stacked vertically to the left of primary node)
-            if c.left_b:
-                cur_ly = cy - c.left_h / 2.0
-                left_right_edge = cx - c.w_prim / 2.0 - c.gap_x_side
-                for lb, (w_lb, h_lb) in zip(c.left_b, c.left_dims):
-                    new_positions[lb.name()] = (left_right_edge - w_lb, cur_ly)
-                    cur_ly += h_lb + c.intra_gap_y
+            ops_by_group: Dict[int, List[str]] = defaultdict(list)
+            ungrouped_ops: List[str] = []
+            for op_name in valid_ops:
+                if op_name in op_to_group_idx:
+                    ops_by_group[op_to_group_idx[op_name]].append(op_name)
+                else:
+                    ungrouped_ops.append(op_name)
 
-            # Right boxes (stacked vertically to the right of primary node)
-            if c.right_b:
-                cur_ry = cy - c.right_h / 2.0
-                right_left_edge = cx + c.w_prim / 2.0 + c.gap_x_side
-                for rb, (w_rb, h_rb) in zip(c.right_b, c.right_dims):
-                    new_positions[rb.name()] = (right_left_edge, cur_ry)
-                    cur_ry += h_rb + c.intra_gap_y
+            # 4a. Layout internal nodes within each non-empty GroupBoxNode using the traditional rules,
+            #     and calculate the exact wrapped group box size (W_g, H_g) and member node offsets
+            group_layout_info: Dict[int, Dict[str, Any]] = {}
+            for g_idx, gnode in enumerate(group_nodes):
+                g_ops = ops_by_group.get(g_idx, [])
+                if not g_ops:
+                    gw = float(getattr(gnode.view, "width", 380.0) if hasattr(gnode, "view") and gnode.view else 380.0)
+                    gh = float(getattr(gnode.view, "height", 250.0) if hasattr(gnode, "view") and gnode.view else 250.0)
+                    group_layout_info[g_idx] = {
+                        "empty": True,
+                        "width": gw,
+                        "height": gh,
+                        "member_nodes": [],
+                        "offsets_from_center": {},
+                    }
+                    continue
 
-            # Above boxes (side-by-side above primary node)
-            if c.above_b:
-                above_bottom_edge = cy - c.h_prim / 2.0 - c.gap_y_side
-                cur_ax = cx - c.above_w / 2.0
-                for ab, (w_ab, h_ab) in zip(c.above_b, c.above_dims):
-                    new_positions[ab.name()] = (cur_ax, above_bottom_edge - h_ab)
-                    cur_ax += w_ab + c.intra_gap_x
+                g_ops_set = set(g_ops)
+                g_extents = {
+                    name: (clusters[name].ext_left, clusters[name].ext_right, clusters[name].ext_above, clusters[name].ext_below)
+                    for name in g_ops
+                }
+                g_ups = {u: {p for p in upstreams[u] if p in g_ops_set} for u in g_ops}
+                g_downs = {u: {d for d in downstreams[u] if d in g_ops_set} for u in g_ops}
+                g_blue = {(u, v) for (u, v) in blue_edges if u in g_ops_set and v in g_ops_set}
+                g_data = {(u, v) for (u, v) in data_edges if u in g_ops_set and v in g_ops_set}
 
-            # Below boxes (side-by-side below primary node)
-            if c.below_b:
-                below_top_edge = cy + c.h_prim / 2.0 + c.gap_y_side
-                cur_bx = cx - c.below_w / 2.0
-                for bb, (w_bb, h_bb) in zip(c.below_b, c.below_dims):
-                    new_positions[bb.name()] = (cur_bx, below_top_edge)
-                    cur_bx += w_bb + c.intra_gap_x
+                local_cx, local_cy = _compute_entity_centers(
+                    g_ops,
+                    g_extents,
+                    g_ups,
+                    g_downs,
+                    g_blue,
+                    g_data,
+                )
+                local_pos: Dict[str, Tuple[float, float]] = {}
+                _place_ops_from_centers(g_ops, local_cx, local_cy, local_pos)
+
+                member_nodes: List[BaseNode] = []
+                for op_name in g_ops:
+                    if primary_nodes[op_name] not in member_nodes:
+                        member_nodes.append(primary_nodes[op_name])
+                    for b in in_boxes_by_op[op_name] + out_boxes_by_op[op_name]:
+                        if b not in member_nodes:
+                            member_nodes.append(b)
+
+                # Temporarily move member_nodes to local_pos so calc_backdrop_size computes exact geometry
+                for mn in member_nodes:
+                    if mn.name() in local_pos:
+                        lx, ly = local_pos[mn.name()]
+                        mn.set_pos(lx, ly)
+
+                bd_size = gnode.view.calc_backdrop_size([mn.view for mn in member_nodes if hasattr(mn, "view") and mn.view])
+                gw = float(bd_size["width"])
+                gh = float(bd_size["height"])
+                gx_local = float(bd_size["pos"][0])
+                gy_local = float(bd_size["pos"][1])
+                g_center_local_x = gx_local + gw / 2.0
+                g_center_local_y = gy_local + gh / 2.0
+
+                offsets_from_center: Dict[str, Tuple[float, float]] = {}
+                for k, (lx, ly) in local_pos.items():
+                    offsets_from_center[k] = (lx - g_center_local_x, ly - g_center_local_y)
+
+                group_layout_info[g_idx] = {
+                    "empty": False,
+                    "width": gw,
+                    "height": gh,
+                    "member_nodes": member_nodes,
+                    "offsets_from_center": offsets_from_center,
+                }
+
+            # 4b. Build macro-level graph where each GroupBoxNode is a single entity and each ungrouped op is an entity
+            macro_ids: List[str] = []
+            macro_extents: Dict[str, Tuple[float, float, float, float]] = {}
+            op_to_macro_id: Dict[str, str] = {}
+
+            for g_idx in range(len(group_nodes)):
+                info = group_layout_info[g_idx]
+                if not info["empty"]:
+                    gid = f"__group__{g_idx}"
+                    macro_ids.append(gid)
+                    half_w = info["width"] / 2.0
+                    half_h = info["height"] / 2.0
+                    macro_extents[gid] = (half_w, half_w, half_h, half_h)
+                    for op_name in ops_by_group[g_idx]:
+                        op_to_macro_id[op_name] = gid
+
+            for op_name in ungrouped_ops:
+                macro_ids.append(op_name)
+                c = clusters[op_name]
+                macro_extents[op_name] = (c.ext_left, c.ext_right, c.ext_above, c.ext_below)
+                op_to_macro_id[op_name] = op_name
+
+            for g_idx in range(len(group_nodes)):
+                info = group_layout_info[g_idx]
+                if info["empty"]:
+                    gid = f"__group__{g_idx}"
+                    macro_ids.append(gid)
+                    half_w = info["width"] / 2.0
+                    half_h = info["height"] / 2.0
+                    macro_extents[gid] = (half_w, half_w, half_h, half_h)
+
+            macro_upstreams: Dict[str, Set[str]] = {mid: set() for mid in macro_ids}
+            macro_downstreams: Dict[str, Set[str]] = {mid: set() for mid in macro_ids}
+            macro_blue_edges: Set[Tuple[str, str]] = set()
+            macro_data_edges: Set[Tuple[str, str]] = set()
+
+            for u, v in blue_edges:
+                mu = op_to_macro_id.get(u)
+                mv = op_to_macro_id.get(v)
+                if mu and mv and mu != mv:
+                    macro_upstreams[mv].add(mu)
+                    macro_downstreams[mu].add(mv)
+                    macro_blue_edges.add((mu, mv))
+
+            for u, v in data_edges:
+                mu = op_to_macro_id.get(u)
+                mv = op_to_macro_id.get(v)
+                if mu and mv and mu != mv:
+                    macro_upstreams[mv].add(mu)
+                    macro_downstreams[mu].add(mv)
+                    macro_data_edges.add((mu, mv))
+
+            macro_cx, macro_cy = _compute_entity_centers(
+                macro_ids,
+                macro_extents,
+                macro_upstreams,
+                macro_downstreams,
+                macro_blue_edges,
+                macro_data_edges,
+            )
+
+            # Place ungrouped operations
+            if ungrouped_ops:
+                _place_ops_from_centers(ungrouped_ops, macro_cx, macro_cy, new_positions)
+
+            # Place grouped operations according to their group entity's macro center
+            for g_idx, gnode in enumerate(group_nodes):
+                gid = f"__group__{g_idx}"
+                info = group_layout_info[g_idx]
+                gcx = macro_cx[gid]
+                gcy = macro_cy[gid]
+                if not info["empty"]:
+                    for k, (ox, oy) in info["offsets_from_center"].items():
+                        new_positions[k] = (gcx + ox, gcy + oy)
 
         # Apply new positions to all matching nodes in the graph
         for node_name, (nx, ny) in new_positions.items():
@@ -955,8 +1184,29 @@ class ProcessFlowGraphBuilder:
             if node:
                 node.set_pos(nx, ny)
 
-        # Ensure all existing nodes are tracked in new_positions
+        # Resize and reposition each GroupBoxNode around its newly arranged internal nodes
+        if group_nodes:
+            for g_idx, gnode in enumerate(group_nodes):
+                gid = f"__group__{g_idx}"
+                info = group_layout_info[g_idx]
+                if not info["empty"] and info["member_nodes"]:
+                    try:
+                        gnode.wrap_nodes(info["member_nodes"])
+                        if hasattr(gnode, "view") and hasattr(gnode.view, "_sync_header_items"):
+                            gnode.view._sync_header_items()
+                    except Exception as e:
+                        logger.debug(f"Could not wrap group box {gnode.name()} during auto_layout: {e}")
+                else:
+                    gcx = macro_cx[gid]
+                    gcy = macro_cy[gid]
+                    gw = info["width"]
+                    gh = info["height"]
+                    gnode.set_pos(gcx - gw / 2.0, gcy - gh / 2.0)
+
+        # Ensure all existing non-group nodes are tracked in new_positions
         for node in all_nodes:
+            if getattr(node, "type_", "") == "reporting.nodes.GroupBoxNode" or node.__class__.__name__ == "GroupBoxNode":
+                continue
             if node.name() not in new_positions:
                 new_positions[node.name()] = (node.pos()[0], node.pos()[1])
 

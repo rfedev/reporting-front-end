@@ -118,6 +118,8 @@ class FlowStorage:
         for nid, ndata in nodes_dict.items():
             if not isinstance(ndata, dict):
                 continue
+            if ndata.get("type_") == "reporting.nodes.GroupBoxNode":
+                continue
             pos = ndata.get("pos")
             nname = ndata.get("name") or str(nid)
             qname = (ndata.get("custom") or {}).get("query_name") if isinstance(ndata.get("custom"), dict) else None
@@ -136,8 +138,44 @@ class FlowStorage:
         return extracted
 
     @staticmethod
+    def _extract_groups(
+        graph_session: Dict[str, Any],
+        existing_groups: Optional[List[Dict[str, Any]]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Extract GroupBoxNode definitions from graph_session for storage in meta.json."""
+        if not isinstance(graph_session, dict) or not graph_session:
+            return copy.deepcopy(list(existing_groups or []))
+
+        nodes_dict = graph_session.get("nodes")
+        if not isinstance(nodes_dict, dict):
+            return copy.deepcopy(list(existing_groups or []))
+
+        groups: List[Dict[str, Any]] = []
+        for nid, ndata in nodes_dict.items():
+            if not isinstance(ndata, dict):
+                continue
+            if ndata.get("type_") != "reporting.nodes.GroupBoxNode":
+                continue
+            pos = ndata.get("pos")
+            coord = (
+                [float(pos[0]), float(pos[1])]
+                if isinstance(pos, (list, tuple)) and len(pos) >= 2
+                else [0.0, 0.0]
+            )
+            groups.append({
+                "id": str(nid),
+                "name": str(ndata.get("name") or "Group Name"),
+                "pos": coord,
+                "width": float(ndata.get("width", 380.0)),
+                "height": float(ndata.get("height", 250.0)),
+                "color": list(ndata.get("color", [54, 54, 86, 255])),
+                "custom": copy.deepcopy(ndata.get("custom", {})),
+            })
+        return groups
+
+    @staticmethod
     def _canonicalize_graph_session(graph_session: Dict[str, Any]) -> Dict[str, Any]:
-        """Return a deterministic structural copy of graph_session with layout coordinates stripped."""
+        """Return a deterministic structural copy of graph_session with layout coordinates and groups stripped."""
         if not isinstance(graph_session, dict) or not graph_session:
             return {}
 
@@ -145,9 +183,17 @@ class FlowStorage:
         if not isinstance(nodes_raw, dict) or not nodes_raw:
             return {}
 
+        # Filter out GroupBoxNode entries so visual grouping lives purely in meta.json
+        structural_nodes_raw = {
+            k: v for k, v in nodes_raw.items()
+            if isinstance(v, dict) and v.get("type_") != "reporting.nodes.GroupBoxNode"
+        }
+        if not structural_nodes_raw:
+            return {}
+
         # Map volatile hex IDs to deterministic canonical IDs based on node name
         sorted_items = sorted(
-            nodes_raw.items(),
+            structural_nodes_raw.items(),
             key=lambda kv: (
                 str(kv[1].get("name", "")) if isinstance(kv[1], dict) else "",
                 str(kv[0]),
@@ -212,14 +258,17 @@ class FlowStorage:
     def _rehydrate_graph_session(
         graph_session: Dict[str, Any],
         node_positions: Dict[str, List[float]],
+        groups: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
-        """Inject node coordinates from meta.json back into graph_session['nodes']."""
-        if not isinstance(graph_session, dict) or not graph_session:
+        """Inject node coordinates and GroupBoxNode definitions from meta.json back into graph_session['nodes']."""
+        has_groups = bool(groups and isinstance(groups, list))
+        if (not isinstance(graph_session, dict) or not graph_session) and not has_groups:
             return {}
-        session = copy.deepcopy(graph_session)
-        nodes_dict = session.get("nodes")
-        if not isinstance(nodes_dict, dict):
-            return session
+
+        session = copy.deepcopy(graph_session) if isinstance(graph_session, dict) and graph_session else {"graph": {}, "nodes": {}, "connections": []}
+        if "nodes" not in session or not isinstance(session.get("nodes"), dict):
+            session["nodes"] = {}
+        nodes_dict = session["nodes"]
 
         for nid, ndata in nodes_dict.items():
             if not isinstance(ndata, dict):
@@ -239,6 +288,30 @@ class FlowStorage:
             elif "pos" not in ndata:
                 ndata["pos"] = [0.0, 0.0]
             ndata["selected"] = False
+
+        if has_groups:
+            for idx, g in enumerate(groups):
+                if not isinstance(g, dict):
+                    continue
+                gid = str(g.get("id") or f"group_{idx + 1}")
+                while gid in nodes_dict:
+                    gid = f"{gid}_{idx + 1}"
+                gpos = g.get("pos")
+                coord = (
+                    [float(gpos[0]), float(gpos[1])]
+                    if isinstance(gpos, (list, tuple)) and len(gpos) >= 2
+                    else [0.0, 0.0]
+                )
+                nodes_dict[gid] = {
+                    "type_": "reporting.nodes.GroupBoxNode",
+                    "name": str(g.get("name") or "Group Name"),
+                    "pos": coord,
+                    "width": float(g.get("width", 380.0)),
+                    "height": float(g.get("height", 250.0)),
+                    "color": list(g.get("color", [54, 54, 86, 255])),
+                    "selected": False,
+                    "custom": copy.deepcopy(g.get("custom", {"backdrop_text": ""})),
+                }
 
         return session
 
@@ -291,9 +364,14 @@ class FlowStorage:
             raw_session,
             existing_positions=raw_data.get("node_positions") or existing_meta.get("node_positions"),
         )
+        groups = FlowStorage._extract_groups(
+            raw_session,
+            existing_groups=raw_data.get("groups") or existing_meta.get("groups"),
+        )
 
         meta_entry = {
             "node_positions": node_positions,
+            "groups": groups,
             "parameter_defaults": raw_data.get("parameter_defaults", existing_meta.get("parameter_defaults", {})) or {},
             "parameter_date_options": raw_data.get("parameter_date_options", existing_meta.get("parameter_date_options", {})) or {},
             "selected_filename_date_param": raw_data.get(
@@ -327,6 +405,7 @@ class FlowStorage:
         combined["graph_session"] = FlowStorage._rehydrate_graph_session(
             structural_payload.get("graph_session", {}),
             node_positions,
+            groups=groups,
         )
         return combined
 
@@ -352,8 +431,10 @@ class FlowStorage:
             flow_meta = all_meta.get("flows", {}).get(flow_name, {})
 
             node_positions = flow_meta.get("node_positions", {})
+            groups = flow_meta.get("groups", [])
             combined = copy.deepcopy(data)
             combined["node_positions"] = copy.deepcopy(node_positions)
+            combined["groups"] = copy.deepcopy(groups)
             combined["parameter_defaults"] = copy.deepcopy(flow_meta.get("parameter_defaults", {}))
             combined["parameter_date_options"] = copy.deepcopy(flow_meta.get("parameter_date_options", {}))
             combined["selected_filename_date_param"] = flow_meta.get("selected_filename_date_param")
@@ -364,6 +445,7 @@ class FlowStorage:
             combined["graph_session"] = FlowStorage._rehydrate_graph_session(
                 data.get("graph_session", {}),
                 node_positions,
+                groups=groups,
             )
             return combined
         except Exception as e:
@@ -400,9 +482,14 @@ class FlowStorage:
             graph_session,
             existing_positions=node_positions or existing_meta.get("node_positions"),
         )
+        extracted_groups = FlowStorage._extract_groups(
+            graph_session,
+            existing_groups=existing_meta.get("groups"),
+        )
 
         meta_entry = {
             "node_positions": extracted_positions,
+            "groups": extracted_groups,
             "parameter_defaults": parameter_defaults or {},
             "parameter_date_options": parameter_date_options or {},
             "selected_filename_date_param": selected_filename_date_param,

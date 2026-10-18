@@ -2,8 +2,10 @@
 from pathlib import Path
 from typing import List, Optional, Tuple
 from PySide6 import QtCore, QtGui, QtWidgets
-from NodeGraphQt import BaseNode
-from NodeGraphQt.constants import NodeEnum
+from NodeGraphQt import BackdropNode, BaseNode
+from NodeGraphQt.constants import NodeEnum, NodePropWidgetEnum
+from NodeGraphQt.qgraphics.node_abstract import AbstractNodeItem
+from NodeGraphQt.qgraphics.node_backdrop import BackdropNodeItem
 from NodeGraphQt.qgraphics.node_base import NodeItem
 from NodeGraphQt.qgraphics.pipe import PipeItem
 
@@ -1061,6 +1063,571 @@ class TableBoxNode(BaseNode):
                     out_p.set_visible(True)
                     out_p.color = COLOR_DARK_ORANGE
                 self.set_color(COLOR_DARK_ORANGE[0], COLOR_DARK_ORANGE[1], COLOR_DARK_ORANGE[2])
+
+
+# Dark mode group box color palette matching the 10 swatches in reference image
+GROUP_DARK_COLORS: List[Tuple[str, Tuple[int, int, int]]] = [
+    ("Grey", (56, 56, 56)),
+    ("Red", (86, 54, 54)),
+    ("Brown", (89, 60, 51)),
+    ("Green", (54, 86, 54)),
+    ("Indigo", (54, 54, 86)),
+    ("Slate", (65, 82, 89)),
+    ("Teal", (54, 86, 86)),
+    ("Purple", (86, 54, 86)),
+    ("Gold", (102, 86, 54)),
+    ("Black", (0, 0, 0)),
+]
+DEFAULT_GROUP_COLOR: Tuple[int, int, int] = (54, 54, 86)
+
+
+class _ColorSwatchButton(QtWidgets.QWidget):
+    """Single circular color swatch in GroupColorPalettePopup."""
+
+    clicked = QtCore.Signal(tuple)
+
+    def __init__(self, label: str, rgb: Tuple[int, int, int], is_active: bool = False, parent=None):
+        super().__init__(parent)
+        self.label = label
+        self.rgb = (int(rgb[0]), int(rgb[1]), int(rgb[2]))
+        self.is_active = is_active
+        self._hovered = False
+        self.setFixedSize(26, 26)
+        self.setCursor(QtCore.Qt.PointingHandCursor)
+        self.setToolTip(label)
+        self.setMouseTracking(True)
+
+    def enterEvent(self, event) -> None:
+        self._hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._hovered = False
+        self.update()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == QtCore.Qt.LeftButton:
+            self.clicked.emit(self.rgb)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def paintEvent(self, event) -> None:
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+
+        r, g, b = self.rgb
+        circle_rect = QtCore.QRectF(3.0, 3.0, 20.0, 20.0)
+        painter.setBrush(QtGui.QBrush(QtGui.QColor(r, g, b)))
+
+        if self._hovered or self.is_active:
+            pen_color = QtGui.QColor(235, 240, 255, 240) if self._hovered else QtGui.QColor(195, 200, 225, 220)
+            painter.setPen(QtGui.QPen(pen_color, 1.6))
+        elif (r, g, b) == (0, 0, 0):
+            painter.setPen(QtGui.QPen(QtGui.QColor(80, 82, 92, 180), 1.0))
+        else:
+            painter.setPen(QtCore.Qt.NoPen)
+
+        painter.drawEllipse(circle_rect)
+        painter.end()
+
+
+class GroupColorPalettePopup(QtWidgets.QFrame):
+    """Frameless dark horizontal popup bar displaying the 10 group box color swatches."""
+
+    def __init__(self, current_rgb: Tuple[int, int, int], on_select, parent=None):
+        super().__init__(
+            parent,
+            QtCore.Qt.Popup | QtCore.Qt.FramelessWindowHint | QtCore.Qt.NoDropShadowWindowHint,
+        )
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
+        self._on_select = on_select
+        cur = (int(current_rgb[0]), int(current_rgb[1]), int(current_rgb[2]))
+
+        layout = QtWidgets.QHBoxLayout(self)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(6)
+
+        for label, rgb in GROUP_DARK_COLORS:
+            btn = _ColorSwatchButton(label, rgb, is_active=(rgb == cur), parent=self)
+            btn.clicked.connect(self._handle_swatch_clicked)
+            layout.addWidget(btn)
+
+    def _handle_swatch_clicked(self, rgb: Tuple[int, int, int]) -> None:
+        if callable(self._on_select):
+            self._on_select(rgb)
+        self.close()
+
+    def paintEvent(self, event) -> None:
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        rect = QtCore.QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        painter.setBrush(QtGui.QBrush(QtGui.QColor(17, 17, 19, 248)))
+        painter.setPen(QtGui.QPen(QtGui.QColor(68, 70, 82, 210), 1.0))
+        painter.drawRoundedRect(rect, 7.0, 7.0)
+        painter.end()
+
+
+class GroupColorButtonItem(QtWidgets.QGraphicsItem):
+    """Discrete color swatch & chevron button ([ ● ⌄ ]) in the GroupBoxItem header bar."""
+
+    def __init__(self, group_item: "GroupBoxItem", callback=None):
+        super().__init__(group_item)
+        self._group_item = group_item
+        self.callback = callback
+        self._hovered = False
+        self.setAcceptHoverEvents(True)
+        self.setAcceptedMouseButtons(QtCore.Qt.LeftButton)
+        self.setCursor(QtCore.Qt.PointingHandCursor)
+        self.setToolTip("Change Group Colour")
+
+    def boundingRect(self) -> QtCore.QRectF:
+        return QtCore.QRectF(-18.0, -10.0, 36.0, 20.0)
+
+    def paint(self, painter: QtGui.QPainter, option, widget=None) -> None:
+        painter.save()
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+
+        rect = QtCore.QRectF(-17.0, -9.0, 34.0, 18.0)
+        if self._hovered:
+            bg_brush = QtGui.QBrush(QtGui.QColor(34, 36, 44, 235))
+            border_pen = QtGui.QPen(QtGui.QColor(225, 230, 245, 230), 1.2)
+            chevron_color = QtGui.QColor(245, 248, 255)
+        else:
+            bg_brush = QtGui.QBrush(QtGui.QColor(26, 28, 34, 185))
+            border_pen = QtGui.QPen(QtGui.QColor(160, 165, 190, 185), 1.0)
+            chevron_color = QtGui.QColor(200, 205, 225)
+
+        painter.setBrush(bg_brush)
+        painter.setPen(border_pen)
+        painter.drawRoundedRect(rect, 4.5, 4.5)
+
+        # Draw color circle on left side of pill
+        c = getattr(self._group_item, "color", DEFAULT_GROUP_COLOR)
+        r, g, b = int(c[0]), int(c[1]), int(c[2])
+        dot_rect = QtCore.QRectF(-12.5, -5.5, 11.0, 11.0)
+        painter.setBrush(QtGui.QBrush(QtGui.QColor(r, g, b)))
+        painter.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 100), 0.9))
+        painter.drawEllipse(dot_rect)
+
+        # Draw downward chevron (⌄) on right side of pill
+        chev = QtGui.QPainterPath()
+        chev.moveTo(3.5, -1.8)
+        chev.lineTo(7.2, 2.0)
+        chev.lineTo(10.9, -1.8)
+        painter.setBrush(QtCore.Qt.NoBrush)
+        painter.setPen(QtGui.QPen(chevron_color, 1.4, QtCore.Qt.SolidLine, QtCore.Qt.RoundCap, QtCore.Qt.RoundJoin))
+        painter.drawPath(chev)
+
+        painter.restore()
+
+    def hoverEnterEvent(self, event) -> None:
+        self._hovered = True
+        self.update()
+        super().hoverEnterEvent(event)
+
+    def hoverLeaveEvent(self, event) -> None:
+        self._hovered = False
+        self.update()
+        super().hoverLeaveEvent(event)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == QtCore.Qt.LeftButton:
+            if callable(self.callback):
+                self.callback(event.screenPos())
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
+class GroupPlayButtonItem(QtWidgets.QGraphicsItem):
+    """Top-right Play (▶) button in a GroupBoxItem header bar to execute all executable nodes in the group."""
+
+    def __init__(self, parent=None, callback=None):
+        super().__init__(parent)
+        self.callback = callback
+        self._hovered = False
+        self.setAcceptHoverEvents(True)
+        self.setAcceptedMouseButtons(QtCore.Qt.LeftButton)
+        self.setCursor(QtCore.Qt.PointingHandCursor)
+        self.setToolTip("Run All Executable Nodes in Group")
+
+    def boundingRect(self) -> QtCore.QRectF:
+        return QtCore.QRectF(-10.0, -10.0, 20.0, 20.0)
+
+    def paint(self, painter: QtGui.QPainter, option, widget=None) -> None:
+        painter.save()
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+
+        rect = QtCore.QRectF(-9.0, -9.0, 18.0, 18.0)
+        if self._hovered:
+            bg_brush = QtGui.QBrush(QtGui.QColor(52, 145, 90, 235))
+            border_pen = QtGui.QPen(QtGui.QColor(255, 255, 255, 230), 1.2)
+            icon_color = QtGui.QColor(255, 255, 255)
+        else:
+            bg_brush = QtGui.QBrush(QtGui.QColor(26, 28, 34, 185))
+            border_pen = QtGui.QPen(QtGui.QColor(160, 165, 190, 185), 1.0)
+            icon_color = QtGui.QColor(210, 216, 240)
+
+        painter.setBrush(bg_brush)
+        painter.setPen(border_pen)
+        painter.drawRoundedRect(rect, 4.5, 4.5)
+
+        tri = QtGui.QPainterPath()
+        tri.moveTo(-2.6, -4.4)
+        tri.lineTo(4.8, 0.0)
+        tri.lineTo(-2.6, 4.4)
+        tri.closeSubpath()
+
+        painter.setPen(QtCore.Qt.NoPen)
+        painter.setBrush(QtGui.QBrush(icon_color))
+        painter.drawPath(tri)
+
+        painter.restore()
+
+    def hoverEnterEvent(self, event) -> None:
+        self._hovered = True
+        self.update()
+        super().hoverEnterEvent(event)
+
+    def hoverLeaveEvent(self, event) -> None:
+        self._hovered = False
+        self.update()
+        super().hoverLeaveEvent(event)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == QtCore.Qt.LeftButton:
+            if callable(self.callback):
+                self.callback()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
+class GroupBoxItem(BackdropNodeItem):
+    """Visual group box item with double-click editable title, color picker, top-right play button, and uniform node dragging."""
+
+    HEADER_HEIGHT = 32.0
+
+    def __init__(self, name="Group Name", text="", parent=None):
+        super().__init__(name=name, text=text, parent=parent)
+        r, g, b = DEFAULT_GROUP_COLOR
+        self._properties["color"] = (r, g, b, 255)
+        self._width = 380.0
+        self._height = 250.0
+        self.setCacheMode(QtWidgets.QGraphicsItem.NoCache)
+        self.setFlag(QtWidgets.QGraphicsItem.ItemSendsGeometryChanges, True)
+        self.setFlag(QtWidgets.QGraphicsItem.ItemSendsScenePositionChanges, True)
+
+        self._title_item = CustomNodeTextItem(self.name, self)
+        title_font = QtGui.QFont("sans-serif", 11, QtGui.QFont.Normal)
+        self._title_item.setFont(title_font)
+        self._text_item = self._title_item
+
+        self._color_btn = GroupColorButtonItem(self, callback=self._on_color_btn_clicked)
+        self._play_btn = GroupPlayButtonItem(self, callback=self._on_play_clicked)
+        self._active_color_popup: Optional[GroupColorPalettePopup] = None
+
+        self._is_dragging_group: bool = False
+        self._drag_last_scene_pos: Optional[QtCore.QPointF] = None
+        self._drag_contained_items: List[AbstractNodeItem] = []
+
+        self._update_theme_colors()
+        self._sync_header_items()
+
+    def _compute_palette_tones(self) -> Tuple[QtGui.QColor, QtGui.QColor, QtGui.QColor, QtGui.QColor]:
+        """Compute (body_color, header_color, border_color, title_color) from self.color for additive blending."""
+        c = self.color or (*DEFAULT_GROUP_COLOR, 255)
+        r, g, b = int(c[0]), int(c[1]), int(c[2])
+        if (r, g, b) == (0, 0, 0):
+            # Subtle additive dark-slate tint so overlapping black boxes also visibly layer
+            body_color = QtGui.QColor(28, 28, 32, 95)
+            header_color = QtGui.QColor(32, 32, 38, 85)
+            border_color = QtGui.QColor(95, 97, 110, 185)
+            title_color = QtGui.QColor(195, 198, 210)
+        else:
+            # With CompositionMode_Plus, body_color adds ~(r*0.38, g*0.38, b*0.35) to the canvas,
+            # and header_color adds another layer on top of the body, matching the reference image:
+            # bg (32,32,32) -> 1 body (53,53,61) -> 2 overlapping bodies or 1 header (74,74,89)
+            # -> header overlapping another body (89,89,109).
+            body_color = QtGui.QColor(r, g, b, 98)
+            header_color = QtGui.QColor(r, g, b, 88)
+            border_color = QtGui.QColor(min(r + 65, 255), min(g + 65, 255), min(b + 75, 255), 195)
+            title_color = QtGui.QColor(min(r + 115, 230), min(g + 115, 230), min(b + 125, 235))
+        return body_color, header_color, border_color, title_color
+
+    def _update_theme_colors(self) -> None:
+        _, _, _, title_color = self._compute_palette_tones()
+        if hasattr(self, "_title_item") and self._title_item is not None:
+            self._title_item.setDefaultTextColor(title_color)
+        if hasattr(self, "_color_btn") and self._color_btn is not None:
+            self._color_btn.update()
+        if hasattr(self, "_sizer") and self._sizer is not None:
+            self._sizer.update()
+
+    def _sync_header_items(self) -> None:
+        if hasattr(self, "_title_item") and self._title_item is not None:
+            self._title_item.setPos(10.0, 3.0)
+        if hasattr(self, "_play_btn") and self._play_btn is not None:
+            self._play_btn.setPos(max(self._width - 18.0, 70.0), self.HEADER_HEIGHT / 2.0)
+        if hasattr(self, "_color_btn") and self._color_btn is not None:
+            self._color_btn.setPos(max(self._width - 52.0, 36.0), self.HEADER_HEIGHT / 2.0)
+        if hasattr(self, "_sizer") and self._sizer is not None:
+            self._sizer.set_pos(self._width, self._height)
+
+    def _on_play_clicked(self) -> None:
+        viewer = self.viewer()
+        if viewer and hasattr(viewer, "group_play_clicked"):
+            viewer.group_play_clicked.emit(self.id)
+
+    def _on_color_btn_clicked(self, screen_pos: Optional[QtCore.QPoint] = None) -> None:
+        c = self.color or (*DEFAULT_GROUP_COLOR, 255)
+        cur_rgb = (int(c[0]), int(c[1]), int(c[2]))
+
+        def on_picked(rgb: Tuple[int, int, int]) -> None:
+            self.apply_group_color(rgb[0], rgb[1], rgb[2])
+
+        popup = GroupColorPalettePopup(cur_rgb, on_select=on_picked)
+        self._active_color_popup = popup
+        popup.adjustSize()
+        if screen_pos is not None:
+            popup_x = screen_pos.x() - (popup.width() // 2)
+            popup_y = screen_pos.y() - popup.height() - 10
+            popup.move(popup_x, popup_y)
+        popup.show()
+
+    def apply_group_color(self, r: int, g: int, b: int) -> None:
+        """Apply a new RGB color to this group box and notify the viewer."""
+        self.color = (int(r), int(g), int(b), 255)
+        viewer = self.viewer()
+        if viewer and hasattr(viewer, "group_color_changed"):
+            viewer.group_color_changed.emit(self.id, [int(r), int(g), int(b)])
+
+    @AbstractNodeItem.color.setter
+    def color(self, color=(54, 54, 86, 255)):
+        if isinstance(color, (list, tuple)) and len(color) == 3:
+            color = (int(color[0]), int(color[1]), int(color[2]), 255)
+        AbstractNodeItem.color.fset(self, color)
+        self._update_theme_colors()
+        self.update()
+
+    @AbstractNodeItem.name.setter
+    def name(self, value=""):
+        AbstractNodeItem.name.fset(self, value)
+        if hasattr(self, "_title_item") and self._title_item is not None:
+            if self._title_item.toPlainText() != value:
+                self._title_item.setPlainText(value)
+        self.update()
+
+    @BackdropNodeItem.width.setter
+    def width(self, width=0.0):
+        self.prepareGeometryChange()
+        BackdropNodeItem.width.fset(self, width)
+        self._sync_header_items()
+        self.update()
+
+    @BackdropNodeItem.height.setter
+    def height(self, height=0.0):
+        self.prepareGeometryChange()
+        BackdropNodeItem.height.fset(self, height)
+        self._sync_header_items()
+        self.update()
+
+    def on_sizer_pos_changed(self, pos) -> None:
+        self.prepareGeometryChange()
+        self._width = pos.x() + self._sizer.size
+        self._height = pos.y() + self._sizer.size
+        if hasattr(self, "_title_item") and self._title_item is not None:
+            self._title_item.setPos(10.0, 3.0)
+        if hasattr(self, "_play_btn") and self._play_btn is not None:
+            self._play_btn.setPos(max(self._width - 18.0, 70.0), self.HEADER_HEIGHT / 2.0)
+        if hasattr(self, "_color_btn") and self._color_btn is not None:
+            self._color_btn.setPos(max(self._width - 52.0, 36.0), self.HEADER_HEIGHT / 2.0)
+        self.update()
+
+    def calc_backdrop_size(self, nodes=None):
+        """Calculate group box position and dimensions to cleanly wrap the given nodes below the header bar."""
+        nodes = nodes or self.get_nodes(True)
+        if nodes:
+            nodes_rect = self._combined_rect(nodes)
+        else:
+            center = self.mapToScene(self.boundingRect().center())
+            nodes_rect = QtCore.QRectF(
+                center.x(), center.y(),
+                self._min_size[0], self._min_size[1],
+            )
+
+        pad_x = 40.0
+        pad_top = 54.0
+        pad_bottom = 40.0
+        return {
+            "pos": [
+                nodes_rect.x() - pad_x,
+                nodes_rect.y() - pad_top,
+            ],
+            "width": max(nodes_rect.width() + (pad_x * 2.0), 220.0),
+            "height": max(nodes_rect.height() + pad_top + pad_bottom, 140.0),
+        }
+
+    def get_nodes(self, inc_intersects=False) -> List[AbstractNodeItem]:
+        """Return all non-group node items contained within (or intersecting) this group box."""
+        nodes: List[AbstractNodeItem] = []
+        scene = self.scene()
+        if not scene:
+            return nodes
+
+        group_rect = self.mapToScene(self.boundingRect()).boundingRect()
+        for item in scene.items(group_rect, QtCore.Qt.IntersectsItemBoundingRect):
+            if item is self or isinstance(item, (PipeItem, BackdropNodeItem)):
+                continue
+            if isinstance(item, AbstractNodeItem):
+                item_rect = item.mapToScene(item.boundingRect()).boundingRect()
+                if inc_intersects:
+                    if group_rect.intersects(item_rect):
+                        nodes.append(item)
+                else:
+                    if group_rect.contains(item_rect.center()):
+                        nodes.append(item)
+        return nodes
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        if event.button() == QtCore.Qt.LeftButton:
+            play_rect = self._play_btn.boundingRect().translated(self._play_btn.pos())
+            color_rect = self._color_btn.boundingRect().translated(self._color_btn.pos())
+            if (
+                not play_rect.contains(event.pos())
+                and not color_rect.contains(event.pos())
+                and event.pos().y() <= self.HEADER_HEIGHT + 4.0
+            ):
+                self._title_item.set_editable(True)
+                event.accept()
+                return
+        super().mouseDoubleClickEvent(event)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == QtCore.Qt.LeftButton:
+            self._is_dragging_group = True
+            self._drag_last_scene_pos = QtCore.QPointF(self.scenePos())
+            self._drag_contained_items = self.get_nodes(inc_intersects=False)
+            AbstractNodeItem.mousePressEvent(self, event)
+            return
+        super().mousePressEvent(event)
+
+    def itemChange(self, change, value):
+        res = super().itemChange(change, value)
+        if (
+            change == QtWidgets.QGraphicsItem.ItemPositionHasChanged
+            and self._is_dragging_group
+            and self._drag_last_scene_pos is not None
+        ):
+            new_pos = self.scenePos()
+            dx = new_pos.x() - self._drag_last_scene_pos.x()
+            dy = new_pos.y() - self._drag_last_scene_pos.y()
+            self._drag_last_scene_pos = QtCore.QPointF(new_pos)
+            if (dx != 0.0 or dy != 0.0) and self._drag_contained_items:
+                for item in self._drag_contained_items:
+                    if not item.isSelected():
+                        item.setPos(item.pos().x() + dx, item.pos().y() + dy)
+                if self.scene():
+                    for scene_item in self.scene().items():
+                        if isinstance(scene_item, PipeItem):
+                            scene_item.reset()
+        return res
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == QtCore.Qt.LeftButton:
+            self._is_dragging_group = False
+            self._drag_last_scene_pos = None
+            self._drag_contained_items = []
+        AbstractNodeItem.mouseReleaseEvent(self, event)
+
+    def drag_by(self, dx: float, dy: float) -> None:
+        """Uniformly move this group box and all contained nodes by (dx, dy)."""
+        contained = self.get_nodes(inc_intersects=False)
+        self.setPos(self.pos().x() + dx, self.pos().y() + dy)
+        for item in contained:
+            item.setPos(item.pos().x() + dx, item.pos().y() + dy)
+        if self.scene():
+            for scene_item in self.scene().items():
+                if isinstance(scene_item, PipeItem):
+                    scene_item.reset()
+
+    def paint(self, painter: QtGui.QPainter, option, widget) -> None:
+        painter.save()
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        painter.setRenderHint(QtGui.QPainter.TextAntialiasing, True)
+
+        rect = self.boundingRect()
+        radius = 3.0
+        body_color, header_color, default_border_color, _ = self._compute_palette_tones()
+
+        # Use additive composition so overlapping group boxes (and headers over bodies) additively brighten
+        painter.setCompositionMode(QtGui.QPainter.CompositionMode_Plus)
+
+        # 1. Additive dark-mode body fill over the grid
+        painter.setPen(QtCore.Qt.NoPen)
+        painter.setBrush(QtGui.QBrush(body_color))
+        painter.drawRoundedRect(rect, radius, radius)
+
+        # 2. Additive top header bar (~32px height) layered over the body
+        header_h = min(self.HEADER_HEIGHT, rect.height())
+        header_rect = QtCore.QRectF(rect.x(), rect.y(), rect.width(), header_h)
+        painter.setBrush(QtGui.QBrush(header_color))
+        painter.drawRoundedRect(header_rect, radius, radius)
+
+        # Restore standard SourceOver composition for text and crisp border
+        painter.setCompositionMode(QtGui.QPainter.CompositionMode_SourceOver)
+
+        # Optional body notes text if set
+        if self.backdrop_text:
+            painter.setPen(QtGui.QColor(*self.text_color))
+            txt_rect = QtCore.QRectF(
+                header_rect.x() + 8.0,
+                header_rect.height() + 6.0,
+                rect.width() - 16.0,
+                rect.height() - header_rect.height() - 12.0,
+            )
+            painter.drawText(
+                txt_rect,
+                QtCore.Qt.AlignLeft | QtCore.Qt.TextWordWrap,
+                self.backdrop_text,
+            )
+
+        # 3. Crisp outer border
+        if self.selected:
+            border_color = QtGui.QColor(*NodeEnum.SELECTED_BORDER_COLOR.value)
+            border_width = 1.5
+        else:
+            border_color = default_border_color
+            border_width = 1.0
+
+        border_rect = QtCore.QRectF(rect.left(), rect.top(), rect.width(), rect.height())
+        painter.setBrush(QtCore.Qt.NoBrush)
+        painter.setPen(QtGui.QPen(border_color, border_width))
+        painter.drawRoundedRect(border_rect, radius, radius)
+
+        painter.restore()
+
+
+class GroupBoxNode(BackdropNode):
+    """Backdrop group box node for visually grouping sub-flows and executing all executable nodes within it."""
+
+    __identifier__ = "reporting.nodes"
+    NODE_NAME = "Group Name"
+
+    def __init__(self):
+        super(BackdropNode, self).__init__(GroupBoxItem)
+        self.set_color(*DEFAULT_GROUP_COLOR)
+        self.create_property("backdrop_text", "", widget_type=NodePropWidgetEnum.QTEXT_EDIT.value, tab="Backdrop")
+
+    def nodes(self) -> List[BaseNode]:
+        """Return all BaseNode instances currently located inside this group box."""
+        node_ids = [n.id for n in self.view.get_nodes(inc_intersects=False)]
+        if not self.graph:
+            return []
+        return [self.graph.get_node_by_id(nid) for nid in node_ids if self.graph.get_node_by_id(nid) is not None]
 
 
 def get_noodle_color(pipe: PipeItem) -> Tuple[int, int, int, int]:

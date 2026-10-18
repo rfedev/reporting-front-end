@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 )
 from NodeGraphQt import BaseNode, NodeGraph
 from NodeGraphQt.constants import PipeEnum
+from NodeGraphQt.qgraphics.node_backdrop import BackdropNodeItem
 from NodeGraphQt.qgraphics.pipe import PipeItem
 from NodeGraphQt.qgraphics.port import PortItem
 
@@ -48,7 +49,19 @@ from reporting_app.core.models import ProcessFlowInfo, QueryInfo, QueryParameter
 from reporting_app.core.sql_parser import sync_query_csv_comments, update_query_csv_comment
 from reporting_app.presentation.flow_editor.graph_builder import ProcessFlowGraphBuilder
 from reporting_app.utils.date_calc import format_filename_with_date
-from reporting_app.presentation.flow_editor.nodes import ImportCsvNode, ImportFilesNode, QueryNode, TableBoxNode
+from reporting_app.presentation.flow_editor.nodes import (
+    CircularInfoButtonItem,
+    CustomNodeTextItem,
+    DEFAULT_GROUP_COLOR,
+    GROUP_DARK_COLORS,
+    GroupBoxNode,
+    GroupColorButtonItem,
+    GroupPlayButtonItem,
+    ImportCsvNode,
+    ImportFilesNode,
+    QueryNode,
+    TableBoxNode,
+)
 from reporting_app.presentation.flow_editor.schema_dialog import SchemaEditorDialog
 from reporting_app.presentation.flow_editor.parameter_overlay import CanvasParameterOverlay
 from reporting_app.presentation.flow_editor.query_tree_widget import QueryManagementPanel
@@ -130,6 +143,7 @@ class ProcessFlowEditorWindow(QMainWindow):
         self.graph.register_node(QueryNode)
         self.graph.register_node(TableBoxNode)
         self.graph.register_node(ImportCsvNode)
+        self.graph.register_node(GroupBoxNode)
 
         # Wire node double click
         self.graph.node_double_clicked.connect(self._on_node_double_clicked)
@@ -164,7 +178,8 @@ class ProcessFlowEditorWindow(QMainWindow):
                 return
             if not target_node or not new_name:
                 return
-            old_name = target_node.get_property("query_name") or target_node.name()
+            is_group = isinstance(target_node, GroupBoxNode) or getattr(target_node, "type_", "") == "reporting.nodes.GroupBoxNode"
+            old_name = target_node.name() if is_group else (target_node.get_property("query_name") or target_node.name())
             new_name = new_name.strip()
             if not new_name or new_name == old_name:
                 return
@@ -173,6 +188,11 @@ class ProcessFlowEditorWindow(QMainWindow):
             elif isinstance(target_node, ImportCsvNode) or getattr(target_node, "type_", "") == "reporting.nodes.ImportCsvNode":
                 target_node.set_name(new_name)
                 self._sync_graph_topology()
+            elif is_group:
+                target_node.model.name = new_name
+                if hasattr(target_node, "view") and target_node.view:
+                    target_node.view.name = new_name
+                self._mark_dirty_and_schedule_save()
 
         def on_graph_property_changed(node, prop_name, value):
             if prop_name == "name":
@@ -200,6 +220,22 @@ class ProcessFlowEditorWindow(QMainWindow):
             viewer._info_emitter = _ViewerSignalEmitter()
             viewer.node_info_clicked = viewer._info_emitter.node_info_clicked
         viewer.node_info_clicked.connect(lambda node_name: self._on_open_logs(filter_node=node_name))
+
+        # Wire group box (▶) play button click to execute all executable nodes in that group
+        if not hasattr(viewer, "group_play_clicked"):
+            class _GroupPlaySignalEmitter(QtCore.QObject):
+                group_play_clicked = QtCore.Signal(str)
+            viewer._group_play_emitter = _GroupPlaySignalEmitter()
+            viewer.group_play_clicked = viewer._group_play_emitter.group_play_clicked
+        viewer.group_play_clicked.connect(self._on_group_play_clicked)
+
+        # Wire group box color palette change to update GroupBoxNode model and trigger auto-save
+        if not hasattr(viewer, "group_color_changed"):
+            class _GroupColorSignalEmitter(QtCore.QObject):
+                group_color_changed = QtCore.Signal(str, list)
+            viewer._group_color_emitter = _GroupColorSignalEmitter()
+            viewer.group_color_changed = viewer._group_color_emitter.group_color_changed
+        viewer.group_color_changed.connect(self._on_group_color_changed)
 
     def _setup_canvas_pan_and_select(self) -> None:
         """Configure left-click empty space panning, smooth resize, and Ctrl+drag multi-select on NodeViewer."""
@@ -246,9 +282,24 @@ class ProcessFlowEditorWindow(QMainWindow):
                 # Check if click lands on or near a pipe item: select only the pipe
                 map_pos = viewer.mapToScene(event.pos())
                 items_exact = viewer.scene().items(map_pos) if viewer.scene() else []
-                # Check if user clicked directly on a port (ports have priority over pipes)
-                port_clicked = next((it for it in items_exact if isinstance(it, PortItem)), None)
-                if not port_clicked:
+                # Check if user clicked directly on a port or UI control button (which have priority over pipes)
+                control_clicked = next(
+                    (
+                        it for it in items_exact
+                        if isinstance(
+                            it,
+                            (
+                                PortItem,
+                                GroupPlayButtonItem,
+                                GroupColorButtonItem,
+                                CustomNodeTextItem,
+                                CircularInfoButtonItem,
+                            ),
+                        )
+                    ),
+                    None,
+                )
+                if not control_clicked:
                     # Check if click is on or close to a pipe
                     items_near_pipe = viewer._items_near(map_pos, PipeItem, 8, 8)
                     pipe_item = next((it for it in items_exact if isinstance(it, PipeItem)), None)
@@ -302,9 +353,13 @@ class ProcessFlowEditorWindow(QMainWindow):
                 pos = event.scenePos()
                 items = viewer._items_near(pos, None, 5, 5)
                 has_port = any(isinstance(it, PortItem) for it in items)
-                has_node = any(hasattr(it, "node") or hasattr(it, "type_") for it in items if not isinstance(it, PipeItem))
+                has_node = any(
+                    (hasattr(it, "node") or hasattr(it, "type_")) and not isinstance(it, BackdropNodeItem)
+                    for it in items
+                    if not isinstance(it, PipeItem)
+                )
                 pipe_item = next((it for it in items if isinstance(it, PipeItem)), None)
-                # If clicking on a pipe and NOT directly on a port or node, do not allow pipe detachment
+                # If clicking on a pipe and NOT directly on a port or foreground node, do not allow pipe detachment
                 if pipe_item and not has_port and not has_node:
                     self.graph.clear_selection()
                     if viewer.scene():
@@ -461,6 +516,76 @@ class ProcessFlowEditorWindow(QMainWindow):
                         cur = cur.parentItem() if hasattr(cur, "parentItem") else None
         return None
 
+    def _find_group_node_near(self, scene_pos: QtCore.QPointF) -> Optional[GroupBoxNode]:
+        """Find a GroupBoxNode directly under the given scene point."""
+        viewer = self.graph.viewer()
+        items = viewer.scene().items(scene_pos) if viewer.scene() else []
+        for item in items:
+            for node in self.graph.all_nodes():
+                if isinstance(node, GroupBoxNode) or getattr(node, "type_", "") == "reporting.nodes.GroupBoxNode":
+                    if getattr(node, "view", None) == item:
+                        return node
+                    cur = item
+                    while cur:
+                        if cur == getattr(node, "view", None):
+                            return node
+                        cur = cur.parentItem() if hasattr(cur, "parentItem") else None
+        return None
+
+    @staticmethod
+    def _create_color_swatch_icon(r: int, g: int, b: int, selected: bool = False) -> QtGui.QIcon:
+        """Create a circular swatch QIcon for a dark-mode group color."""
+        pix = QtGui.QPixmap(18, 18)
+        pix.fill(QtCore.Qt.transparent)
+        p = QtGui.QPainter(pix)
+        p.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        p.setBrush(QtGui.QBrush(QtGui.QColor(r, g, b)))
+        if selected:
+            p.setPen(QtGui.QPen(QtGui.QColor(245, 245, 250), 2.0))
+        else:
+            p.setPen(QtGui.QPen(QtGui.QColor(135, 138, 152, 190), 1.2))
+        p.drawEllipse(QtCore.QRectF(2.0, 2.0, 14.0, 14.0))
+        p.end()
+        return QtGui.QIcon(pix)
+
+    @staticmethod
+    def _create_group_toolbar_icon() -> QtGui.QIcon:
+        """Create a crisp custom group-box icon for the top bar button."""
+        pix = QtGui.QPixmap(20, 20)
+        pix.fill(QtCore.Qt.transparent)
+        p = QtGui.QPainter(pix)
+        p.setRenderHint(QtGui.QPainter.Antialiasing, True)
+
+        # Group box body & header bar
+        box_rect = QtCore.QRectF(1.5, 2.5, 15.0, 14.0)
+        p.setPen(QtGui.QPen(QtGui.QColor(150, 155, 215), 1.4))
+        p.setBrush(QtGui.QBrush(QtGui.QColor(54, 54, 86, 175)))
+        p.drawRoundedRect(box_rect, 2.5, 2.5)
+
+        header_rect = QtCore.QRectF(1.5, 2.5, 15.0, 4.5)
+        p.setPen(QtCore.Qt.NoPen)
+        p.setBrush(QtGui.QBrush(QtGui.QColor(86, 86, 135, 235)))
+        p.drawRoundedRect(header_rect, 2.0, 2.0)
+
+        # Mini inner nodes
+        p.setBrush(QtGui.QBrush(QtGui.QColor(210, 215, 235, 220)))
+        p.drawRoundedRect(QtCore.QRectF(3.5, 9.2, 4.5, 4.5), 1.0, 1.0)
+        p.drawRoundedRect(QtCore.QRectF(9.8, 9.2, 4.5, 4.5), 1.0, 1.0)
+
+        # Plus badge at bottom-right
+        badge_rect = QtCore.QRectF(11.5, 11.5, 7.5, 7.5)
+        p.setPen(QtGui.QPen(QtGui.QColor(35, 38, 46), 1.0))
+        p.setBrush(QtGui.QBrush(QtGui.QColor(72, 168, 104)))
+        p.drawEllipse(badge_rect)
+
+        p.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255), 1.5, QtCore.Qt.SolidLine, QtCore.Qt.RoundCap))
+        cx, cy = badge_rect.center().x(), badge_rect.center().y()
+        p.drawLine(QtCore.QPointF(cx - 2.0, cy), QtCore.QPointF(cx + 2.0, cy))
+        p.drawLine(QtCore.QPointF(cx, cy - 2.0), QtCore.QPointF(cx, cy + 2.0))
+
+        p.end()
+        return QtGui.QIcon(pix)
+
     def _get_selected_pipes(self) -> List[PipeItem]:
         """Return list of currently selected PipeItems in the scene."""
         scene = self.graph.viewer().scene()
@@ -512,6 +637,7 @@ class ProcessFlowEditorWindow(QMainWindow):
         """Display context menu on canvas right-click with tabulated shortcut keys."""
         viewer = self.graph.viewer()
         target_node = self._find_executable_node_near(scene_pos)
+        target_group = self._find_group_node_near(scene_pos) if not target_node else None
         selected_nodes = self._get_selected_query_nodes()
         selected_pipes = self._get_selected_pipes()
 
@@ -555,6 +681,26 @@ class ProcessFlowEditorWindow(QMainWindow):
             open_log_act.triggered.connect(lambda: self._on_open_logs(filter_node=node_name))
 
         else:
+            if target_group is not None:
+                run_grp_act = menu.addAction(f"Run Group '{target_group.name()}'")
+                run_grp_act.triggered.connect(lambda: self.run_group_nodes(target_group))
+
+                color_menu = menu.addMenu("Group Colour")
+                cur_c = target_group.color()
+                cur_rgb = (int(cur_c[0]), int(cur_c[1]), int(cur_c[2])) if cur_c and len(cur_c) >= 3 else DEFAULT_GROUP_COLOR
+                for cname, (cr, cg, cb) in GROUP_DARK_COLORS:
+                    c_act = color_menu.addAction(
+                        self._create_color_swatch_icon(cr, cg, cb, selected=((cr, cg, cb) == cur_rgb)),
+                        cname,
+                    )
+                    c_act.triggered.connect(
+                        lambda checked=False, grp=target_group, rgb=(cr, cg, cb): self._apply_color_to_group(grp, rgb)
+                    )
+
+                del_grp_act = menu.addAction("Delete Group")
+                del_grp_act.triggered.connect(lambda: self._delete_group_node(target_group))
+                menu.addSeparator()
+
             # Empty space context menu
             has_selected = len(selected_nodes) > 0
             if not has_selected:
@@ -565,6 +711,7 @@ class ProcessFlowEditorWindow(QMainWindow):
             menu.addSeparator()
             add_menu_item("Create Query", "q", lambda: self._on_create_query_at_pos(scene_pos))
             add_menu_item("Import Files", "i", lambda: self._on_add_import_csv(pos=(scene_pos.x(), scene_pos.y())))
+            add_menu_item("Create Group", "g", lambda: self._on_add_group_box(pos=(scene_pos.x(), scene_pos.y())))
 
             menu.addSeparator()
             add_menu_item("Auto Layout H", "h", lambda: self._auto_layout("horizontal"))
@@ -654,6 +801,13 @@ class ProcessFlowEditorWindow(QMainWindow):
         import_files_btn.setToolTip("Add an Import Files node to load CSV or Excel files into BigQuery tables")
         import_files_btn.clicked.connect(self._on_add_import_csv)
         toolbar.addWidget(import_files_btn)
+
+        self.add_group_btn = QPushButton("Add Group")
+        self.add_group_btn.setIcon(self._create_group_toolbar_icon())
+        self.add_group_btn.setIconSize(QtCore.QSize(18, 18))
+        self.add_group_btn.setToolTip("Add a Group Box around selected nodes or on the canvas (G)")
+        self.add_group_btn.clicked.connect(lambda: self._on_add_group_box())
+        toolbar.addWidget(self.add_group_btn)
 
         toolbar.addSeparator()
 
@@ -1071,6 +1225,9 @@ class ProcessFlowEditorWindow(QMainWindow):
                             qinfo = self.report.get_query(qname)
                             if qinfo:
                                 node.set_parameters(qinfo.parameter_names)
+                        elif isinstance(node, GroupBoxNode) or getattr(node, "type_", "") == "reporting.nodes.GroupBoxNode":
+                            if hasattr(node, "view") and hasattr(node.view, "_sync_header_items"):
+                                node.view._sync_header_items()
                     # Re-apply custom noodle colors to all pipes in the restored scene
                     for item in self.graph.viewer().scene().items():
                         if isinstance(item, PipeItem):
@@ -1111,6 +1268,84 @@ class ProcessFlowEditorWindow(QMainWindow):
             self._suppress_dirty = False
             self._is_dirty = False
             self._update_dirty_ui()
+
+    def _on_add_group_box(self, pos: Optional[Tuple[float, float]] = None, name: str = "Group Name") -> GroupBoxNode:
+        """Add a visual GroupBoxNode to the canvas (wrapping selected nodes if any, or placed at pos)."""
+        selected_non_groups = [
+            n for n in self.graph.selected_nodes()
+            if not (isinstance(n, GroupBoxNode) or getattr(n, "type_", "") == "reporting.nodes.GroupBoxNode")
+        ]
+
+        if not isinstance(pos, (list, tuple)) or len(pos) < 2:
+            try:
+                viewer = self.graph.viewer()
+                vp = viewer.viewport()
+                vp_w = vp.width() if vp else viewer.width()
+                vp_h = vp.height() if vp else viewer.height()
+                center_viewport = QPoint(vp_w // 2, vp_h // 2)
+                scene_pt = viewer.mapToScene(center_viewport)
+                node_pos = [float(scene_pt.x()) - 190.0, float(scene_pt.y()) - 125.0]
+            except Exception:
+                node_pos = [0.0, 0.0]
+        else:
+            node_pos = [float(pos[0]), float(pos[1])]
+
+        gnode: GroupBoxNode = self.graph.create_node(
+            "reporting.nodes.GroupBoxNode",
+            name=name,
+            pos=node_pos,
+            selected=False,
+        )
+        # Keep the requested group name cleanly without unnecessary numbering if desired, or set_name
+        if name:
+            gnode.model.name = name
+            if hasattr(gnode, "view") and gnode.view:
+                gnode.view.name = name
+
+        if selected_non_groups:
+            try:
+                gnode.wrap_nodes(selected_non_groups)
+                if hasattr(gnode, "view") and hasattr(gnode.view, "_sync_header_items"):
+                    gnode.view._sync_header_items()
+            except Exception as e:
+                logger.debug(f"Could not wrap selected nodes in group box: {e}")
+
+        # Ensure inner nodes are not selected so toolbar Run mode is not altered
+        self.graph.clear_selection()
+        if self.graph.viewer().scene():
+            self.graph.viewer().scene().clearSelection()
+        gnode.set_selected(True)
+        self._update_run_button_state()
+        self._mark_dirty_and_schedule_save()
+        return gnode
+
+    def _apply_color_to_group(self, group_node: BaseNode, rgb: Tuple[int, int, int]) -> None:
+        """Apply an RGB dark-mode colour to a GroupBoxNode and schedule save."""
+        if not group_node:
+            return
+        r, g, b = int(rgb[0]), int(rgb[1]), int(rgb[2])
+        group_node.set_color(r, g, b)
+        self._mark_dirty_and_schedule_save()
+
+    def _on_group_color_changed(self, node_id: str, rgb_list: list) -> None:
+        """Handle group colour selection from the header colour palette popup."""
+        if not rgb_list or len(rgb_list) < 3:
+            return
+        target_group = None
+        for n in self.graph.all_nodes():
+            if n.id == node_id or (hasattr(n, "view") and getattr(n.view, "id", None) == node_id):
+                target_group = n
+                break
+        if target_group is not None:
+            self._apply_color_to_group(target_group, (int(rgb_list[0]), int(rgb_list[1]), int(rgb_list[2])))
+
+    def _delete_group_node(self, group_node: BaseNode) -> None:
+        """Delete a single GroupBoxNode without affecting contained nodes."""
+        if not group_node:
+            return
+        self.graph.delete_nodes([group_node])
+        self._mark_dirty_and_schedule_save()
+        self.status_bar.showMessage("Deleted group box.", 3000)
 
     def _on_add_import_csv(self, pos: Optional[Tuple[float, float]] = None) -> Optional[ImportCsvNode]:
         """Add an Import Files node to the canvas."""
@@ -1743,20 +1978,25 @@ class ProcessFlowEditorWindow(QMainWindow):
             self.status_bar.showMessage(f"Pasted {len(new_nodes)} node(s).", 3000)
 
     def _on_delete_selected(self) -> None:
-        """Delete currently selected query or CSV import nodes and resynchronize topology.
+        """Delete currently selected query, CSV import, or group box nodes and resynchronize topology if needed.
 
         Tables are automatically managed and cannot be directly deleted.
         """
         selected_nodes = self.graph.selected_nodes()
-        deletable_nodes = [
+        deletable_exec_nodes = [
             n for n in selected_nodes
             if isinstance(n, (QueryNode, ImportCsvNode))
             or getattr(n, "type_", "") in ("reporting.nodes.QueryNode", "reporting.nodes.ImportCsvNode")
         ]
+        deletable_group_nodes = [
+            n for n in selected_nodes
+            if isinstance(n, GroupBoxNode) or getattr(n, "type_", "") == "reporting.nodes.GroupBoxNode"
+        ]
+        deletable_nodes = deletable_exec_nodes + deletable_group_nodes
         if deletable_nodes:
             # If any ImportCsvNode is deleted, update saved csv_imports
             deleted_import_names = {
-                n.name() for n in deletable_nodes
+                n.name() for n in deletable_exec_nodes
                 if isinstance(n, ImportCsvNode) or getattr(n, "type_", "") == "reporting.nodes.ImportCsvNode"
             }
             if deleted_import_names:
@@ -1768,7 +2008,9 @@ class ProcessFlowEditorWindow(QMainWindow):
                 self.flow_controller.set_csv_imports(remaining_imports)
 
             self.graph.delete_nodes(deletable_nodes)
-            self._sync_graph_topology()
+            if deletable_exec_nodes:
+                self._sync_graph_topology()
+            self._mark_dirty_and_schedule_save()
             self.status_bar.showMessage(f"Deleted {len(deletable_nodes)} node(s).", 3000)
         else:
             selected_pipes = self._get_selected_pipes()
@@ -1776,7 +2018,7 @@ class ProcessFlowEditorWindow(QMainWindow):
                 self._delete_selected_blue_pipes()
             elif selected_nodes:
                 self.status_bar.showMessage(
-                    "Table boxes are managed automatically; only query and CSV import nodes can be deleted.", 3000
+                    "Table boxes are managed automatically; only query, CSV import, and group nodes can be deleted.", 3000
                 )
 
     def _auto_layout(self, direction: str = "horizontal") -> None:
@@ -1964,6 +2206,32 @@ class ProcessFlowEditorWindow(QMainWindow):
         finally:
             self._suppress_dirty = False
 
+    def _on_nodes_moved_on_canvas(self, node_data: dict) -> None:
+        """Update cached node positions when nodes (or group boxes) are moved on canvas."""
+        for node_view in (node_data or {}):
+            node = self.graph.get_node_by_id(getattr(node_view, "id", None))
+            if not node:
+                continue
+            pos = node.pos()
+            if not (isinstance(node, GroupBoxNode) or getattr(node, "type_", "") == "reporting.nodes.GroupBoxNode"):
+                self._node_positions[node.name()] = (float(pos[0]), float(pos[1]))
+                qname = node.get_property("query_name") if hasattr(node, "get_property") else None
+                if qname:
+                    self._node_positions[qname] = (float(pos[0]), float(pos[1]))
+        self._mark_dirty_and_schedule_save()
+
+    def _on_backdrop_updated(self, node_id: str, update_type: str, size_data: dict) -> None:
+        """Handle group box resize events from the bottom-right sizer handle."""
+        node = self.graph.get_node_by_id(node_id)
+        if node and isinstance(size_data, dict):
+            if "width" in size_data:
+                node.model.width = float(size_data["width"])
+            if "height" in size_data:
+                node.model.height = float(size_data["height"])
+            if "pos" in size_data and isinstance(size_data["pos"], (list, tuple)) and len(size_data["pos"]) >= 2:
+                node.model.pos = [float(size_data["pos"][0]), float(size_data["pos"][1])]
+        self._mark_dirty_and_schedule_save()
+
     def _wire_auto_save_signals(self) -> None:
         """Connect graph, parameter, and UI mutation signals to the auto-save change tracker."""
         # 1. Graph node and pipe mutations
@@ -1971,10 +2239,12 @@ class ProcessFlowEditorWindow(QMainWindow):
         self.graph.port_connected.connect(lambda *_: self._mark_dirty_and_schedule_save())
         self.graph.port_disconnected.connect(lambda *_: self._mark_dirty_and_schedule_save())
 
-        # 2. Viewer node movements
+        # 2. Viewer node movements and group box resize
         viewer = self.graph.viewer()
         if hasattr(viewer, "moved_nodes"):
-            viewer.moved_nodes.connect(lambda *_: self._mark_dirty_and_schedule_save())
+            viewer.moved_nodes.connect(self._on_nodes_moved_on_canvas)
+        if hasattr(viewer, "node_backdrop_updated"):
+            viewer.node_backdrop_updated.connect(self._on_backdrop_updated)
 
         # 3. Canvas Parameter Overlay edits
         if hasattr(self, "param_overlay"):
@@ -2132,6 +2402,47 @@ class ProcessFlowEditorWindow(QMainWindow):
             self.run_selected_queries()
         else:
             self._on_run_flow()
+
+    def _on_group_play_clicked(self, node_id: str) -> None:
+        """Handle clicking the Play (▶) button in a GroupBoxNode header."""
+        target_group = None
+        for n in self.graph.all_nodes():
+            if n.id == node_id or (hasattr(n, "view") and getattr(n.view, "id", None) == node_id):
+                target_group = n
+                break
+        if target_group is not None:
+            self.run_group_nodes(target_group)
+
+    def run_group_nodes(self, group_node: BaseNode) -> None:
+        """Run all executable nodes (QueryNode and ImportCsvNode) located inside group_node in topological order."""
+        if not group_node or not hasattr(group_node, "view") or not group_node.view:
+            return
+
+        contained_views = group_node.view.get_nodes(inc_intersects=False)
+        contained_view_ids = {getattr(v, "id", None) for v in contained_views}
+        exec_nodes_in_group = [
+            n for n in self.graph.all_nodes()
+            if (n.id in contained_view_ids or getattr(getattr(n, "view", None), "id", None) in contained_view_ids)
+            and (
+                isinstance(n, (QueryNode, ImportCsvNode))
+                or getattr(n, "type_", "") in ("reporting.nodes.QueryNode", "reporting.nodes.ImportCsvNode")
+            )
+        ]
+
+        if not exec_nodes_in_group:
+            self.status_bar.showMessage(f"No executable nodes inside group '{group_node.name()}'.", 4000)
+            return
+
+        session_data = self.graph.serialize_session()
+        node_order = self.flow_controller.get_node_execution_order(session_data)
+
+        group_exec_ids = {n.id for n in exec_nodes_in_group}
+        filtered_order = [item for item in node_order if item["id"] in group_exec_ids]
+        if not filtered_order:
+            group_exec_names = {n.name() for n in exec_nodes_in_group}
+            filtered_order = [item for item in node_order if item["name"] in group_exec_names]
+
+        self._execute_ordered_nodes(filtered_order, context_title=f"Group '{group_node.name()}'")
 
     def run_selected_queries(self) -> None:
         """Run only the currently selected query and import CSV nodes in topological dependency order."""
@@ -2473,6 +2784,11 @@ class ProcessFlowEditorWindow(QMainWindow):
                     cursor_pos = viewer.mapFromGlobal(QCursor.pos())
                     scene_pos = viewer.mapToScene(cursor_pos)
                     self._on_add_import_csv(pos=(scene_pos.x(), scene_pos.y()))
+                    return True
+                elif key == Qt.Key_G:
+                    cursor_pos = viewer.mapFromGlobal(QCursor.pos())
+                    scene_pos = viewer.mapToScene(cursor_pos)
+                    self._on_add_group_box(pos=(scene_pos.x(), scene_pos.y()))
                     return True
                 elif key == Qt.Key_H:
                     self._auto_layout("horizontal")

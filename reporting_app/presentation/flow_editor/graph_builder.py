@@ -15,7 +15,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from NodeGraphQt import BaseNode, NodeGraph
 from reporting_app.core.models import QueryInfo
-from reporting_app.presentation.flow_editor.nodes import ImportCsvNode, QueryNode, TableBoxNode
+from reporting_app.presentation.flow_editor.nodes import GroupBoxNode, ImportCsvNode, QueryNode, TableBoxNode
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +56,8 @@ class ProcessFlowGraphBuilder:
         # 0. Capture user execution connections (run_out -> run_in) to preserve them
         preserved_run_conns: List[Tuple[str, str]] = []
         for node in graph.all_nodes():
+            if isinstance(node, GroupBoxNode) or getattr(node, "type_", "") == "reporting.nodes.GroupBoxNode":
+                continue
             run_out = node.get_output("run_out")
             if run_out:
                 for target_port in run_out.connected_ports():
@@ -67,6 +69,8 @@ class ProcessFlowGraphBuilder:
         # 1. Capture current live positions of all existing nodes from canvas.
         # Canvas positions MUST take precedence over any stale/passed-in positions.
         for node in graph.all_nodes():
+            if isinstance(node, GroupBoxNode) or getattr(node, "type_", "") == "reporting.nodes.GroupBoxNode":
+                continue
             pos = node.pos()
             existing_positions[node.name()] = (pos[0], pos[1])
             qname = node.get_property("query_name") if hasattr(node, "get_property") else None
@@ -88,8 +92,13 @@ class ProcessFlowGraphBuilder:
         for k in keys_to_remove:
             existing_positions.pop(k, None)
 
-        # Clear existing nodes
-        graph.delete_nodes(graph.all_nodes())
+        # Clear existing non-group nodes (leave GroupBoxNode instances intact)
+        nodes_to_delete = [
+            n for n in graph.all_nodes()
+            if not (isinstance(n, GroupBoxNode) or getattr(n, "type_", "") == "reporting.nodes.GroupBoxNode")
+        ]
+        if nodes_to_delete:
+            graph.delete_nodes(nodes_to_delete)
 
         if not queries and not import_csv_data:
             return existing_positions

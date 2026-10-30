@@ -86,6 +86,16 @@ def scan_query_parameters(sql: str) -> List[str]:
             i += 3
             continue
 
+        # Colon parameter: ':', 'param' (avoiding '::' cast)
+        if t.text == ":" and i + 1 < n and tokens[i + 1].token_type in (TokenType.VAR, TokenType.IDENTIFIER):
+            if i == 0 or tokens[i - 1].text != ":":
+                param = tokens[i + 1].text.strip()
+                if param and param not in seen:
+                    seen.add(param)
+                    found.append(param)
+                i += 2
+                continue
+
         # Inside string literal '{param}' or colon parameter ':param'
         for m in _PARAM_RE.finditer(t.text):
             param = (m.group(1) or m.group(2) or "").strip()

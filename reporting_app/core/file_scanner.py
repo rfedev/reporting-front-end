@@ -70,20 +70,12 @@ class FileScanner:
         if queries_dir.is_dir():
             return True
 
-        # Check for sql files in root or code/
-        has_sql = any(directory.glob("*.sql"))
-        if not has_sql:
-            code_dir = directory / "code"
-            if code_dir.is_dir():
-                has_sql = any(code_dir.glob("*.sql"))
-
-        has_json = any(directory.glob("*.json"))
         try:
             is_empty = not any(directory.iterdir())
         except Exception:
             is_empty = False
 
-        return has_sql or has_json or is_empty
+        return is_empty
 
     def scan_all_reports(self) -> List[Report]:
         """Scan all configured working directories and return all discovered reports."""
@@ -138,24 +130,11 @@ class FileScanner:
         return res
 
     def _scan_queries(self, report_dir: Path, report_name: str) -> List[QueryInfo]:
-        """Discover SQL files in ./queries/*.sql, ./code/*.sql, and root/*.sql without reading or parsing file content."""
+        """Discover SQL files strictly in ./<report>/queries/*.sql without reading or parsing file content."""
         sql_files: List[Path] = []
-
-        # Primary location: ./<report>/queries/*.sql
         queries_dir = report_dir / "queries"
         if queries_dir.exists() and queries_dir.is_dir():
             sql_files.extend(queries_dir.glob("*.sql"))
-
-        # Fallback locations
-        code_dir = report_dir / "code"
-        if code_dir.exists() and code_dir.is_dir():
-            for p in code_dir.glob("*.sql"):
-                if p not in sql_files:
-                    sql_files.append(p)
-
-        for p in report_dir.glob("*.sql"):
-            if p not in sql_files:
-                sql_files.append(p)
 
         queries: List[QueryInfo] = []
         for file_path in sorted(sql_files, key=lambda x: x.name):
@@ -183,34 +162,36 @@ class FileScanner:
 
         return queries
 
-
     def _scan_process_flows(self, report_dir: Path, report_name: str) -> List[ProcessFlowInfo]:
-        """Scan JSON files representing process flows in ./queries/*.json and root/*.json."""
-        json_files: List[Path] = []
+        """Scan JSON files representing process flows strictly in ./<report>/queries/*.json."""
+        from reporting_app.persistence.flow_storage import FlowStorage
 
-        # Primary location: ./<report>/queries/*.json
+        json_files: List[Path] = []
         queries_dir = report_dir / "queries"
         if queries_dir.exists() and queries_dir.is_dir():
-            json_files.extend(queries_dir.glob("*.json"))
-
-        # Fallback in report root
-        for p in report_dir.glob("*.json"):
-            if p not in json_files:
-                json_files.append(p)
+            for fp in queries_dir.glob("*.json"):
+                if not FlowStorage.is_meta_file(fp):
+                    json_files.append(fp)
 
         flows: List[ProcessFlowInfo] = []
         for file_path in sorted(json_files, key=lambda x: x.name):
             try:
                 mtime = file_path.stat().st_mtime
+                meta_path = FlowStorage.get_meta_path(file_path)
+                meta_mtime = meta_path.stat().st_mtime if meta_path.exists() else 0.0
+                combined_mtime = max(mtime, meta_mtime)
                 cache_key = str(file_path.resolve())
 
                 cached = self._flow_cache.get(cache_key)
-                if cached and cached.mtime == mtime:
+                if cached and cached.mtime == combined_mtime:
                     flows.append(cached)
                     continue
 
-                raw_text = file_path.read_text(encoding="utf-8", errors="replace").strip()
-                data = json.loads(raw_text) if raw_text else {}
+                data = FlowStorage.load(file_path)
+                # Refresh mtimes in case FlowStorage.load migrated the file on disk
+                mtime = file_path.stat().st_mtime
+                meta_mtime = meta_path.stat().st_mtime if meta_path.exists() else 0.0
+                combined_mtime = max(mtime, meta_mtime)
 
                 query_names = data.get("query_names", [])
                 parameter_defaults = data.get("parameter_defaults", {})
@@ -231,7 +212,7 @@ class FileScanner:
                     query_names=query_names,
                     parameter_defaults=parameter_defaults,
                     raw_data=data,
-                    mtime=mtime,
+                    mtime=combined_mtime,
                 )
                 self._flow_cache[cache_key] = flow_info
                 flows.append(flow_info)

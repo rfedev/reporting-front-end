@@ -1,8 +1,13 @@
-"""Application entry point and setup."""
-
 import logging
-import sys
+import os
 from pathlib import Path
+import sys
+import warnings
+
+# Suppress noisy Google Cloud SDK ADC warnings and missing default project logs
+warnings.filterwarnings("ignore", category=UserWarning, module="google.auth._default")
+logging.getLogger("google.auth._default").setLevel(logging.ERROR)
+
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication
@@ -43,6 +48,13 @@ def apply_dark_theme(app: QApplication) -> None:
 
 
 def main() -> int:
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.user32.DisableProcessWindowsGhosting()
+        except Exception as e:
+            logger.debug(f"DisableProcessWindowsGhosting failed: {e}")
+
     app = QApplication(sys.argv)
     app.setApplicationName("Reporting Front End")
     apply_dark_theme(app)
@@ -51,8 +63,33 @@ def main() -> int:
     db_manager = DatabaseManager(db_path=db_path)
 
     controller = AppController(db_manager=db_manager)
+    try:
+        wb = controller.repo.get_workbench_dataset().strip()
+        if wb and "." in wb:
+            proj = wb.split(".")[0].strip()
+            if proj and not os.environ.get("GOOGLE_CLOUD_PROJECT"):
+                os.environ["GOOGLE_CLOUD_PROJECT"] = proj
+    except Exception:
+        pass
+
     window = MainWindow(controller=controller)
     window.show()
+
+    def on_about_to_quit():
+        if hasattr(controller, "watcher"):
+            try:
+                controller.watcher.stop()
+            except Exception:
+                pass
+        for editor in list(window.editor_windows):
+            try:
+                if editor.isVisible():
+                    editor.close()
+            except Exception:
+                pass
+        QApplication.processEvents()
+
+    app.aboutToQuit.connect(on_about_to_quit)
 
     return app.exec()
 

@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 )
 from NodeGraphQt import BaseNode, NodeGraph
 from NodeGraphQt.constants import PipeEnum
+from NodeGraphQt.qgraphics.node_backdrop import BackdropNodeItem
 from NodeGraphQt.qgraphics.pipe import PipeItem
 from NodeGraphQt.qgraphics.port import PortItem
 
@@ -48,7 +49,19 @@ from reporting_app.core.models import ProcessFlowInfo, QueryInfo, QueryParameter
 from reporting_app.core.sql_parser import sync_query_csv_comments, update_query_csv_comment
 from reporting_app.presentation.flow_editor.graph_builder import ProcessFlowGraphBuilder
 from reporting_app.utils.date_calc import format_filename_with_date
-from reporting_app.presentation.flow_editor.nodes import ImportCsvNode, ImportFilesNode, QueryNode, TableBoxNode
+from reporting_app.presentation.flow_editor.nodes import (
+    CircularInfoButtonItem,
+    CustomNodeTextItem,
+    DEFAULT_GROUP_COLOR,
+    GROUP_DARK_COLORS,
+    GroupBoxNode,
+    GroupColorButtonItem,
+    GroupPlayButtonItem,
+    ImportCsvNode,
+    ImportFilesNode,
+    QueryNode,
+    TableBoxNode,
+)
 from reporting_app.presentation.flow_editor.schema_dialog import SchemaEditorDialog
 from reporting_app.presentation.flow_editor.parameter_overlay import CanvasParameterOverlay
 from reporting_app.presentation.flow_editor.query_tree_widget import QueryManagementPanel
@@ -57,464 +70,12 @@ from reporting_app.presentation.query_dialog import QueryRunDialog
 logger = logging.getLogger(__name__)
 
 
-class SelectOutputTablesDialog(QDialog):
-    """Dialog for selecting which tables to export to CSV when multiple tables exist in an output TableBox."""
-
-    def __init__(self, raw_tables: List[str], parent: Optional[QWidget] = None):
-        super().__init__(parent)
-        self.setWindowTitle("Select Tables")
-        self.resize(360, 280)
-        self.raw_tables = list(raw_tables)
-        self.items: List[Tuple[str, QListWidgetItem]] = []
-
-        layout = QVBoxLayout(self)
-        layout.setSpacing(10)
-
-        header = QLabel("<b>Select tables to output:</b>")
-        layout.addWidget(header)
-
-        self.list_widget = QListWidget(self)
-        for t in self.raw_tables:
-            clean_name = t.split(".")[-1] if "." in t else t
-            item = QListWidgetItem(clean_name)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Checked)
-            self.list_widget.addItem(item)
-            self.items.append((t, item))
-        layout.addWidget(self.list_widget)
-
-        # Buttons
-        btn_bar = QHBoxLayout()
-        btn_bar.addStretch()
-        cancel_btn = QPushButton("Cancel")
-        cancel_btn.clicked.connect(self.reject)
-        ok_btn = QPushButton("OK")
-        ok_btn.setStyleSheet("font-weight: bold; background-color: #2b78e4; color: white;")
-        ok_btn.clicked.connect(self.accept)
-        btn_bar.addWidget(cancel_btn)
-        btn_bar.addWidget(ok_btn)
-        layout.addLayout(btn_bar)
-
-    def get_selected_tables(self) -> List[str]:
-        return [raw_t for raw_t, item in self.items if item.checkState() == Qt.Checked]
-
-
-class ImportCsvDialog(QDialog):
-    """Dialog window to configure CSV / Excel file import(s) into BigQuery table(s)."""
-
-    def __init__(
-        self,
-        initial_imports: Optional[List[dict]] = None,
-        workbench_dataset: str = "",
-        report_folder: Optional[Path] = None,
-        parent: Optional[QWidget] = None,
-    ):
-        super().__init__(parent)
-        self.setWindowTitle("Import Files Configuration")
-        self.resize(750, 520)
-        self.workbench_dataset = workbench_dataset.strip()
-        self.report_folder = Path(report_folder) if report_folder else None
-        self.inputs_dir = (self.report_folder / "inputs") if self.report_folder else None
-        if self.inputs_dir:
-            try:
-                self.inputs_dir.mkdir(parents=True, exist_ok=True)
-            except Exception:
-                pass
-        self.rows: List[dict] = []
-        self._build_ui(initial_imports or [])
-
-    def _get_input_files(self) -> List[str]:
-        """Return list of CSV and Excel filenames located in the report's inputs folder."""
-        if not self.inputs_dir or not self.inputs_dir.exists():
-            return []
-        try:
-            exts = {".csv", ".xlsx"}
-            return sorted([f.name for f in self.inputs_dir.iterdir() if f.is_file() and f.suffix.lower() in exts])
-        except Exception:
-            return []
-
-    def _get_input_csv_files(self) -> List[str]:
-        return self._get_input_files()
-
-    def _inspect_sheets(self, file_path: str) -> List[str]:
-        """Return list of sheet names from an Excel workbook."""
-        p = Path(file_path)
-        if not p.is_absolute() and self.inputs_dir:
-            cand = self.inputs_dir / p
-            if cand.exists():
-                p = cand
-        if not p.exists() or p.suffix.lower() not in (".xlsx", ".xls"):
-            return []
-        try:
-            import openpyxl
-            wb = openpyxl.load_workbook(str(p), read_only=True)
-            names = wb.sheetnames
-            wb.close()
-            return names
-        except Exception:
-            return []
-
-    def _compute_auto_table(self, file_path: str) -> str:
-        """Derive projectid.dataset.csvtablename from the CSV or Excel file path and workbench dataset.
-
-        Strips away variable expressions enclosed in '%...%' and any trailing '-' or '_' prior to them.
-        Example: test-import-%YYYYMM%.csv -> test_import
-        """
-        if not file_path:
-            return ""
-        import re
-        stem = Path(file_path).stem
-        # Strip away any %...% tokens and any '-' or '_' immediately preceding them
-        clean_stem = re.sub(r"[-_]?%[^%]+%", "", stem)
-        # Strip any trailing '-' or '_' left over
-        clean_stem = clean_stem.rstrip("-_")
-        # Replace remaining non-alphanumeric (except underscores and hyphens in table names)
-        clean_stem = "".join(c if c.isalnum() or c in ("_", "-") else "_" for c in clean_stem)
-        if not clean_stem:
-            clean_stem = "imported_table"
-
-        if self.workbench_dataset:
-            wb_prefix = self.workbench_dataset.rstrip(".") + "."
-        else:
-            wb_prefix = "projectid.dataset."
-        return f"{wb_prefix}{clean_stem}"
-
-    def _build_ui(self, initial_imports: List[dict]):
-        main_layout = QVBoxLayout(self)
-
-        header_label = QLabel(
-            "<b>Configure File Import:</b><br>"
-            "<i>Specify CSV or Excel (.xlsx) file, sheet, headers, schema mode, and destination BigQuery output table.</i>"
-        )
-        header_label.setWordWrap(True)
-        main_layout.addWidget(header_label)
-
-        # Scroll area for rows
-        scroll = QScrollArea(self)
-        scroll.setWidgetResizable(True)
-        self.container = QWidget()
-        self.container_layout = QVBoxLayout(self.container)
-        self.container_layout.setAlignment(Qt.AlignTop)
-        self.container_layout.setSpacing(12)
-        scroll.setWidget(self.container)
-        main_layout.addWidget(scroll)
-
-        # Bottom buttons
-        bottom_bar = QHBoxLayout()
-        add_btn = QPushButton("➕ Add File")
-        add_btn.setToolTip("Add another file import section")
-        add_btn.clicked.connect(lambda: self._add_row())
-        bottom_bar.addWidget(add_btn)
-        bottom_bar.addStretch()
-
-        ok_btn = QPushButton("OK")
-        ok_btn.setStyleSheet("font-weight: bold; background-color: #2b78e4; color: white;")
-        ok_btn.clicked.connect(self.accept)
-        cancel_btn = QPushButton("Cancel")
-        cancel_btn.clicked.connect(self.reject)
-        bottom_bar.addWidget(cancel_btn)
-        bottom_bar.addWidget(ok_btn)
-        main_layout.addLayout(bottom_bar)
-
-        # Populate rows
-        if initial_imports:
-            for item in initial_imports:
-                self._add_row(
-                    file_path=item.get("file_path") or item.get("csv_path", ""),
-                    has_headers=item.get("has_headers", True),
-                    output_table=item.get("output_table", ""),
-                    sheet_name=item.get("sheet_name"),
-                    schema_mode=item.get("schema_mode", "auto"),
-                    manual_schema=item.get("manual_schema"),
-                )
-        else:
-            self._add_row()
-
-    def _add_row(
-        self,
-        file_path: str = "",
-        has_headers: bool = True,
-        output_table: str = "",
-        sheet_name: Optional[str] = None,
-        schema_mode: str = "auto",
-        manual_schema: Optional[List[dict]] = None,
-        **kwargs,
-    ):
-        if not file_path and "csv_path" in kwargs:
-            file_path = kwargs["csv_path"] or ""
-        if not isinstance(file_path, str):
-            file_path = ""
-        if not isinstance(output_table, str):
-            output_table = ""
-        if not isinstance(manual_schema, list):
-            manual_schema = []
-        if schema_mode not in ("auto", "manual"):
-            schema_mode = "auto"
-
-        sec_num = len(self.rows) + 1
-        section_box = QGroupBox(f"File Import #{sec_num}", self.container)
-        section_box.setStyleSheet(
-            "QGroupBox { font-weight: bold; border: 1px solid #555; border-radius: 6px; margin-top: 10px; padding: 12px; }"
-            "QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; color: #ddd; }"
-        )
-        row_layout = QVBoxLayout(section_box)
-        row_layout.setSpacing(8)
-
-        # Row 1: File path (editable combo) + square Browse button + Headers checkbox + square Delete button
-        r1 = QHBoxLayout()
-        lbl_file = QLabel("File:")
-        lbl_file.setFixedWidth(85)
-        r1.addWidget(lbl_file)
-
-        path_combo = QComboBox(self.container)
-        path_combo.setEditable(True)
-        path_combo.setInsertPolicy(QComboBox.NoInsert)
-        path_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        path_combo.lineEdit().setPlaceholderText("Select or enter CSV/XLSX filename or path...")
-
-        # Populate dropdown with available CSV/XLSX files in inputs folder
-        input_files = self._get_input_files()
-        for f in input_files:
-            path_combo.addItem(f)
-
-        if file_path:
-            idx = path_combo.findText(file_path)
-            if idx >= 0:
-                path_combo.setCurrentIndex(idx)
-            else:
-                path_combo.setEditText(file_path)
-        else:
-            path_combo.setEditText("")
-
-        r1.addWidget(path_combo, 1)
-
-        browse_btn = QPushButton("📁")
-        browse_btn.setToolTip("Browse for CSV or Excel file...")
-        browse_btn.setFixedSize(30, 30)
-        r1.addWidget(browse_btn)
-
-        headers_cb = QCheckBox("Headers")
-        headers_cb.setChecked(has_headers)
-        r1.addWidget(headers_cb)
-
-        del_btn = QPushButton("🗑")
-        del_btn.setToolTip("Remove this file import section")
-        del_btn.setFixedSize(30, 30)
-        r1.addWidget(del_btn)
-
-        # Row 2: Output table text box
-        r2 = QHBoxLayout()
-        lbl_table = QLabel("Output Table:")
-        lbl_table.setFixedWidth(85)
-        r2.addWidget(lbl_table)
-        table_edit = QLineEdit(output_table)
-        table_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        table_edit.setPlaceholderText("projectid.dataset.tablename")
-        r2.addWidget(table_edit, 1)
-
-        # Row 3: Sheet selector + Schema Mode + Configure Schema Button
-        r3 = QHBoxLayout()
-        lbl_sheet = QLabel("Sheet:")
-        lbl_sheet.setFixedWidth(85)
-        r3.addWidget(lbl_sheet)
-
-        sheet_combo = QComboBox(self.container)
-        sheet_combo.setMinimumWidth(150)
-        sheet_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        r3.addWidget(sheet_combo, 1)
-
-        r3.addSpacing(15)
-
-        lbl_schema = QLabel("Schema:")
-        lbl_schema.setFixedWidth(55)
-        r3.addWidget(lbl_schema)
-
-        schema_combo = QComboBox(self.container)
-        schema_combo.addItems(["Auto Detect", "Manual"])
-        schema_combo.setCurrentText("Manual" if schema_mode == "manual" else "Auto Detect")
-        schema_combo.setFixedWidth(110)
-        r3.addWidget(schema_combo)
-
-        schema_btn = QPushButton("⚙ Configure Schema...")
-        schema_btn.setStyleSheet(
-            "QPushButton:disabled { color: #6e7681; background-color: rgba(45, 49, 56, 0.4); border: 1px solid #383c44; }"
-        )
-        schema_btn.setToolTip("Open manual schema field definition editor")
-        r3.addWidget(schema_btn)
-
-        row_layout.addLayout(r1)
-        row_layout.addLayout(r2)
-        row_layout.addLayout(r3)
-
-        path_combo.text = path_combo.currentText
-        path_combo.setText = path_combo.setEditText
-
-        row_data = {
-            "widget": section_box,
-            "path_combo": path_combo,
-            "path_edit": path_combo,
-            "headers_cb": headers_cb,
-            "table_edit": table_edit,
-            "sheet_combo": sheet_combo,
-            "schema_mode_combo": schema_combo,
-            "schema_btn": schema_btn,
-            "del_btn": del_btn,
-            "manual_schema": list(manual_schema),
-        }
-
-        def update_schema_btn_label():
-            cnt = len(row_data["manual_schema"])
-            is_manual = "manual" in schema_combo.currentText().lower()
-            schema_btn.setEnabled(is_manual)
-            if is_manual:
-                if cnt > 0:
-                    schema_btn.setText(f"⚙ Schema ({cnt} fields)...")
-                else:
-                    schema_btn.setText("⚙ Configure Schema...")
-                schema_btn.setToolTip("Open manual schema field definition editor")
-            else:
-                schema_btn.setText("Configure Schema...")
-                schema_btn.setToolTip("Select 'Manual' schema mode to configure fields")
-
-        def update_sheet_combo():
-            raw_path = path_combo.currentText().strip()
-            sheets = self._inspect_sheets(raw_path)
-            sheet_combo.blockSignals(True)
-            sheet_combo.clear()
-            if sheets:
-                sheet_combo.setEnabled(True)
-                sheet_combo.addItems(sheets)
-                target_sheet = sheet_name or ""
-                if target_sheet and target_sheet in sheets:
-                    sheet_combo.setCurrentText(target_sheet)
-                else:
-                    sheet_combo.setCurrentIndex(0)
-            else:
-                sheet_combo.setEnabled(False)
-                if Path(raw_path).suffix.lower() in (".xlsx", ".xls"):
-                    sheet_combo.addItem("(No sheets found)")
-                else:
-                    sheet_combo.addItem("(CSV - No sheets)")
-            sheet_combo.blockSignals(False)
-
-        def pick_file():
-            start_dir = str(self.inputs_dir) if self.inputs_dir and self.inputs_dir.exists() else ""
-            selected, _ = QFileDialog.getOpenFileName(
-                self,
-                "Select Data File",
-                start_dir,
-                "Data Files (*.csv *.xlsx);;CSV Files (*.csv);;Excel Files (*.xlsx);;All Files (*)",
-            )
-            if selected:
-                sel_path = Path(selected)
-                if self.inputs_dir and sel_path.parent.resolve() == self.inputs_dir.resolve():
-                    display_val = sel_path.name
-                else:
-                    display_val = selected
-                path_combo.setEditText(display_val)
-                auto_val = self._compute_auto_table(display_val)
-                if auto_val:
-                    table_edit.setText(auto_val)
-                    table_edit._is_auto_populated = True
-                update_sheet_combo()
-
-        browse_btn.clicked.connect(pick_file)
-
-        def on_path_changed(new_path: str):
-            curr_table = table_edit.text().strip()
-            if not curr_table or getattr(table_edit, "_is_auto_populated", False):
-                auto_val = self._compute_auto_table(new_path)
-                if auto_val:
-                    table_edit.setText(auto_val)
-                    table_edit._is_auto_populated = True
-            update_sheet_combo()
-
-        path_combo.currentTextChanged.connect(on_path_changed)
-
-        def open_schema_editor():
-            f_text = path_combo.currentText().strip()
-            resolved_p = Path(f_text)
-            if not resolved_p.is_absolute() and self.inputs_dir:
-                cand = self.inputs_dir / resolved_p
-                if cand.exists():
-                    resolved_p = cand
-            sh_text = sheet_combo.currentText().strip()
-            if sh_text.startswith("(") or not sheet_combo.isEnabled():
-                sh_text = None
-            tbl_text = table_edit.text().strip()
-            dlg = SchemaEditorDialog(
-                parent=self,
-                current_schema=row_data["manual_schema"],
-                file_path=str(resolved_p) if resolved_p.exists() else None,
-                sheet_name=sh_text,
-                has_headers=headers_cb.isChecked(),
-                table_name=tbl_text,
-            )
-            if dlg.exec() == QDialog.Accepted:
-                row_data["manual_schema"] = dlg.get_schema()
-                if row_data["manual_schema"]:
-                    schema_combo.setCurrentText("Manual")
-                update_schema_btn_label()
-
-        def on_schema_mode_changed(mode: str):
-            update_schema_btn_label()
-            if mode == "Manual" and not row_data["manual_schema"]:
-                open_schema_editor()
-
-        schema_combo.currentTextChanged.connect(on_schema_mode_changed)
-        schema_btn.clicked.connect(open_schema_editor)
-
-        # Initial updates
-        update_sheet_combo()
-        update_schema_btn_label()
-
-        self.rows.append(row_data)
-        self.container_layout.addWidget(section_box)
-        section_box.show()
-        self.container.adjustSize()
-
-        def remove_this_row():
-            if row_data in self.rows:
-                self.rows.remove(row_data)
-                section_box.setParent(None)
-                section_box.deleteLater()
-                self._update_section_titles()
-                self.container.adjustSize()
-
-        del_btn.clicked.connect(remove_this_row)
-        self._update_section_titles()
-
-    def _update_section_titles(self):
-        for idx, r in enumerate(self.rows):
-            r["widget"].setTitle(f"File Import #{idx + 1}")
-            # Only allow deleting if more than 1 section
-            r["del_btn"].setEnabled(len(self.rows) > 1)
-
-    def get_imports(self) -> List[dict]:
-        results = []
-        for r in self.rows:
-            f_path = r["path_combo"].currentText().strip()
-            table = r["table_edit"].text().strip()
-            headers = r["headers_cb"].isChecked()
-            sh = r["sheet_combo"].currentText().strip() if r.get("sheet_combo") else ""
-            if not r["sheet_combo"].isEnabled() or sh.startswith("(") or not sh:
-                sh = None
-            schema_mode = "manual" if r["schema_mode_combo"].currentText() == "Manual" else "auto"
-            manual_schema = r.get("manual_schema") or []
-            if f_path or table:
-                results.append({
-                    "file_path": f_path,
-                    "csv_path": f_path,
-                    "has_headers": headers,
-                    "output_table": table,
-                    "sheet_name": sh,
-                    "schema_mode": schema_mode,
-                    "manual_schema": manual_schema if schema_mode == "manual" else None,
-                })
-        return results
-
-
-ImportFilesDialog = ImportCsvDialog
+from reporting_app.presentation.flow_editor.import_dialog import (
+    ImportCsvDialog,
+    ImportFilesDialog,
+    SelectOutputTablesDialog,
+)
+from reporting_app.presentation.flow_editor.execution_tab import FlowExecutionTab
 
 
 class ProcessFlowEditorWindow(QMainWindow):
@@ -544,9 +105,10 @@ class ProcessFlowEditorWindow(QMainWindow):
 
         self.setWindowTitle(f"Process Flow - {report.name} - {self.flow_controller.flow_name}")
         self.resize(1200, 750)
+        self.setAttribute(Qt.WA_DeleteOnClose, True)
 
         self._node_counter = 0
-        self._node_positions: Dict[str, Tuple[float, float]] = {}
+        self._node_positions: Dict[str, Tuple[float, float]] = self.flow_controller.get_node_positions()
         # Track pending query renames (original_disk_name -> current_working_name)
         self._pending_query_renames: Dict[str, str] = {}
         self.show_full_table_names = self.flow_controller.get_show_full_table_names()
@@ -581,6 +143,7 @@ class ProcessFlowEditorWindow(QMainWindow):
         self.graph.register_node(QueryNode)
         self.graph.register_node(TableBoxNode)
         self.graph.register_node(ImportCsvNode)
+        self.graph.register_node(GroupBoxNode)
 
         # Wire node double click
         self.graph.node_double_clicked.connect(self._on_node_double_clicked)
@@ -615,7 +178,8 @@ class ProcessFlowEditorWindow(QMainWindow):
                 return
             if not target_node or not new_name:
                 return
-            old_name = target_node.get_property("query_name") or target_node.name()
+            is_group = isinstance(target_node, GroupBoxNode) or getattr(target_node, "type_", "") == "reporting.nodes.GroupBoxNode"
+            old_name = target_node.name() if is_group else (target_node.get_property("query_name") or target_node.name())
             new_name = new_name.strip()
             if not new_name or new_name == old_name:
                 return
@@ -624,6 +188,11 @@ class ProcessFlowEditorWindow(QMainWindow):
             elif isinstance(target_node, ImportCsvNode) or getattr(target_node, "type_", "") == "reporting.nodes.ImportCsvNode":
                 target_node.set_name(new_name)
                 self._sync_graph_topology()
+            elif is_group:
+                target_node.model.name = new_name
+                if hasattr(target_node, "view") and target_node.view:
+                    target_node.view.name = new_name
+                self._mark_dirty_and_schedule_save()
 
         def on_graph_property_changed(node, prop_name, value):
             if prop_name == "name":
@@ -651,6 +220,22 @@ class ProcessFlowEditorWindow(QMainWindow):
             viewer._info_emitter = _ViewerSignalEmitter()
             viewer.node_info_clicked = viewer._info_emitter.node_info_clicked
         viewer.node_info_clicked.connect(lambda node_name: self._on_open_logs(filter_node=node_name))
+
+        # Wire group box (▶) play button click to execute all executable nodes in that group
+        if not hasattr(viewer, "group_play_clicked"):
+            class _GroupPlaySignalEmitter(QtCore.QObject):
+                group_play_clicked = QtCore.Signal(str)
+            viewer._group_play_emitter = _GroupPlaySignalEmitter()
+            viewer.group_play_clicked = viewer._group_play_emitter.group_play_clicked
+        viewer.group_play_clicked.connect(self._on_group_play_clicked)
+
+        # Wire group box color palette change to update GroupBoxNode model and trigger auto-save
+        if not hasattr(viewer, "group_color_changed"):
+            class _GroupColorSignalEmitter(QtCore.QObject):
+                group_color_changed = QtCore.Signal(str, list)
+            viewer._group_color_emitter = _GroupColorSignalEmitter()
+            viewer.group_color_changed = viewer._group_color_emitter.group_color_changed
+        viewer.group_color_changed.connect(self._on_group_color_changed)
 
     def _setup_canvas_pan_and_select(self) -> None:
         """Configure left-click empty space panning, smooth resize, and Ctrl+drag multi-select on NodeViewer."""
@@ -697,9 +282,24 @@ class ProcessFlowEditorWindow(QMainWindow):
                 # Check if click lands on or near a pipe item: select only the pipe
                 map_pos = viewer.mapToScene(event.pos())
                 items_exact = viewer.scene().items(map_pos) if viewer.scene() else []
-                # Check if user clicked directly on a port (ports have priority over pipes)
-                port_clicked = next((it for it in items_exact if isinstance(it, PortItem)), None)
-                if not port_clicked:
+                # Check if user clicked directly on a port or UI control button (which have priority over pipes)
+                control_clicked = next(
+                    (
+                        it for it in items_exact
+                        if isinstance(
+                            it,
+                            (
+                                PortItem,
+                                GroupPlayButtonItem,
+                                GroupColorButtonItem,
+                                CustomNodeTextItem,
+                                CircularInfoButtonItem,
+                            ),
+                        )
+                    ),
+                    None,
+                )
+                if not control_clicked:
                     # Check if click is on or close to a pipe
                     items_near_pipe = viewer._items_near(map_pos, PipeItem, 8, 8)
                     pipe_item = next((it for it in items_exact if isinstance(it, PipeItem)), None)
@@ -753,9 +353,13 @@ class ProcessFlowEditorWindow(QMainWindow):
                 pos = event.scenePos()
                 items = viewer._items_near(pos, None, 5, 5)
                 has_port = any(isinstance(it, PortItem) for it in items)
-                has_node = any(hasattr(it, "node") or hasattr(it, "type_") for it in items if not isinstance(it, PipeItem))
+                has_node = any(
+                    (hasattr(it, "node") or hasattr(it, "type_")) and not isinstance(it, BackdropNodeItem)
+                    for it in items
+                    if not isinstance(it, PipeItem)
+                )
                 pipe_item = next((it for it in items if isinstance(it, PipeItem)), None)
-                # If clicking on a pipe and NOT directly on a port or node, do not allow pipe detachment
+                # If clicking on a pipe and NOT directly on a port or foreground node, do not allow pipe detachment
                 if pipe_item and not has_port and not has_node:
                     self.graph.clear_selection()
                     if viewer.scene():
@@ -777,9 +381,9 @@ class ProcessFlowEditorWindow(QMainWindow):
             if not isinstance(selected_port, PortItem):
                 return
 
-            # Allow starting a manual connection from run_out, run_in, or out_tables (for output table dragging)
+            # Allow starting a manual connection from run_out, run_in, out_tables, csv_out, in_csv
             port_name = getattr(selected_port, "name", "")
-            if port_name not in ("run_out", "run_in", "out_tables"):
+            if port_name not in ("run_out", "run_in", "out_tables", "csv_out", "in_csv"):
                 return
 
             if viewer._origin_pos is None and selected_port:
@@ -804,7 +408,7 @@ class ProcessFlowEditorWindow(QMainWindow):
             pipe_visible = getattr(viewer, "_LIVE_PIPE", None) and viewer._LIVE_PIPE.isVisible()
             if pipe_visible and start_port is not None:
                 start_name = getattr(start_port, "name", "")
-                if start_name not in ("run_out", "run_in", "out_tables"):
+                if start_name not in ("run_out", "run_in", "out_tables", "csv_out", "in_csv"):
                     viewer.end_live_connection()
                     return
 
@@ -827,16 +431,18 @@ class ProcessFlowEditorWindow(QMainWindow):
                     return
                 else:
                     # Connection dropped onto an existing port:
-                    # Enforce that user can ONLY connect run_out <-> run_in (no connecting out_tables to random ports)
+                    # Enforce that user can ONLY connect compatible ports
                     end_name = getattr(end_port, "name", "")
                     valid_connection = (
                         (start_name == "run_out" and end_name == "run_in")
                         or (start_name == "run_in" and end_name == "run_out")
+                        or (start_name == "csv_out" and end_name == "in_csv")
+                        or (start_name == "in_csv" and end_name == "csv_out")
                     )
                     if not valid_connection:
                         # Reject disallowed connection
                         viewer.end_live_connection()
-                        self.status_bar.showMessage("Manual execution connections are only allowed between run_out and run_in.", 3000)
+                        self.status_bar.showMessage("Manual execution connections are only allowed between compatible ports.", 3000)
                         return
 
             orig_apply_live_connection(event)
@@ -910,6 +516,76 @@ class ProcessFlowEditorWindow(QMainWindow):
                         cur = cur.parentItem() if hasattr(cur, "parentItem") else None
         return None
 
+    def _find_group_node_near(self, scene_pos: QtCore.QPointF) -> Optional[GroupBoxNode]:
+        """Find a GroupBoxNode directly under the given scene point."""
+        viewer = self.graph.viewer()
+        items = viewer.scene().items(scene_pos) if viewer.scene() else []
+        for item in items:
+            for node in self.graph.all_nodes():
+                if isinstance(node, GroupBoxNode) or getattr(node, "type_", "") == "reporting.nodes.GroupBoxNode":
+                    if getattr(node, "view", None) == item:
+                        return node
+                    cur = item
+                    while cur:
+                        if cur == getattr(node, "view", None):
+                            return node
+                        cur = cur.parentItem() if hasattr(cur, "parentItem") else None
+        return None
+
+    @staticmethod
+    def _create_color_swatch_icon(r: int, g: int, b: int, selected: bool = False) -> QtGui.QIcon:
+        """Create a circular swatch QIcon for a dark-mode group color."""
+        pix = QtGui.QPixmap(18, 18)
+        pix.fill(QtCore.Qt.transparent)
+        p = QtGui.QPainter(pix)
+        p.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        p.setBrush(QtGui.QBrush(QtGui.QColor(r, g, b)))
+        if selected:
+            p.setPen(QtGui.QPen(QtGui.QColor(245, 245, 250), 2.0))
+        else:
+            p.setPen(QtGui.QPen(QtGui.QColor(135, 138, 152, 190), 1.2))
+        p.drawEllipse(QtCore.QRectF(2.0, 2.0, 14.0, 14.0))
+        p.end()
+        return QtGui.QIcon(pix)
+
+    @staticmethod
+    def _create_group_toolbar_icon() -> QtGui.QIcon:
+        """Create a crisp custom group-box icon for the top bar button."""
+        pix = QtGui.QPixmap(20, 20)
+        pix.fill(QtCore.Qt.transparent)
+        p = QtGui.QPainter(pix)
+        p.setRenderHint(QtGui.QPainter.Antialiasing, True)
+
+        # Group box body & header bar
+        box_rect = QtCore.QRectF(1.5, 2.5, 15.0, 14.0)
+        p.setPen(QtGui.QPen(QtGui.QColor(150, 155, 215), 1.4))
+        p.setBrush(QtGui.QBrush(QtGui.QColor(54, 54, 86, 175)))
+        p.drawRoundedRect(box_rect, 2.5, 2.5)
+
+        header_rect = QtCore.QRectF(1.5, 2.5, 15.0, 4.5)
+        p.setPen(QtCore.Qt.NoPen)
+        p.setBrush(QtGui.QBrush(QtGui.QColor(86, 86, 135, 235)))
+        p.drawRoundedRect(header_rect, 2.0, 2.0)
+
+        # Mini inner nodes
+        p.setBrush(QtGui.QBrush(QtGui.QColor(210, 215, 235, 220)))
+        p.drawRoundedRect(QtCore.QRectF(3.5, 9.2, 4.5, 4.5), 1.0, 1.0)
+        p.drawRoundedRect(QtCore.QRectF(9.8, 9.2, 4.5, 4.5), 1.0, 1.0)
+
+        # Plus badge at bottom-right
+        badge_rect = QtCore.QRectF(11.5, 11.5, 7.5, 7.5)
+        p.setPen(QtGui.QPen(QtGui.QColor(35, 38, 46), 1.0))
+        p.setBrush(QtGui.QBrush(QtGui.QColor(72, 168, 104)))
+        p.drawEllipse(badge_rect)
+
+        p.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255), 1.5, QtCore.Qt.SolidLine, QtCore.Qt.RoundCap))
+        cx, cy = badge_rect.center().x(), badge_rect.center().y()
+        p.drawLine(QtCore.QPointF(cx - 2.0, cy), QtCore.QPointF(cx + 2.0, cy))
+        p.drawLine(QtCore.QPointF(cx, cy - 2.0), QtCore.QPointF(cx, cy + 2.0))
+
+        p.end()
+        return QtGui.QIcon(pix)
+
     def _get_selected_pipes(self) -> List[PipeItem]:
         """Return list of currently selected PipeItems in the scene."""
         scene = self.graph.viewer().scene()
@@ -961,6 +637,7 @@ class ProcessFlowEditorWindow(QMainWindow):
         """Display context menu on canvas right-click with tabulated shortcut keys."""
         viewer = self.graph.viewer()
         target_node = self._find_executable_node_near(scene_pos)
+        target_group = self._find_group_node_near(scene_pos) if not target_node else None
         selected_nodes = self._get_selected_query_nodes()
         selected_pipes = self._get_selected_pipes()
 
@@ -1004,6 +681,26 @@ class ProcessFlowEditorWindow(QMainWindow):
             open_log_act.triggered.connect(lambda: self._on_open_logs(filter_node=node_name))
 
         else:
+            if target_group is not None:
+                run_grp_act = menu.addAction(f"Run Group '{target_group.name()}'")
+                run_grp_act.triggered.connect(lambda: self.run_group_nodes(target_group))
+
+                color_menu = menu.addMenu("Group Colour")
+                cur_c = target_group.color()
+                cur_rgb = (int(cur_c[0]), int(cur_c[1]), int(cur_c[2])) if cur_c and len(cur_c) >= 3 else DEFAULT_GROUP_COLOR
+                for cname, (cr, cg, cb) in GROUP_DARK_COLORS:
+                    c_act = color_menu.addAction(
+                        self._create_color_swatch_icon(cr, cg, cb, selected=((cr, cg, cb) == cur_rgb)),
+                        cname,
+                    )
+                    c_act.triggered.connect(
+                        lambda checked=False, grp=target_group, rgb=(cr, cg, cb): self._apply_color_to_group(grp, rgb)
+                    )
+
+                del_grp_act = menu.addAction("Delete Group")
+                del_grp_act.triggered.connect(lambda: self._delete_group_node(target_group))
+                menu.addSeparator()
+
             # Empty space context menu
             has_selected = len(selected_nodes) > 0
             if not has_selected:
@@ -1014,6 +711,7 @@ class ProcessFlowEditorWindow(QMainWindow):
             menu.addSeparator()
             add_menu_item("Create Query", "q", lambda: self._on_create_query_at_pos(scene_pos))
             add_menu_item("Import Files", "i", lambda: self._on_add_import_csv(pos=(scene_pos.x(), scene_pos.y())))
+            add_menu_item("Create Group", "g", lambda: self._on_add_group_box(pos=(scene_pos.x(), scene_pos.y())))
 
             menu.addSeparator()
             add_menu_item("Auto Layout H", "h", lambda: self._auto_layout("horizontal"))
@@ -1104,6 +802,13 @@ class ProcessFlowEditorWindow(QMainWindow):
         import_files_btn.clicked.connect(self._on_add_import_csv)
         toolbar.addWidget(import_files_btn)
 
+        self.add_group_btn = QPushButton("Add Group")
+        self.add_group_btn.setIcon(self._create_group_toolbar_icon())
+        self.add_group_btn.setIconSize(QtCore.QSize(18, 18))
+        self.add_group_btn.setToolTip("Add a Group Box around selected nodes or on the canvas (G)")
+        self.add_group_btn.clicked.connect(lambda: self._on_add_group_box())
+        toolbar.addWidget(self.add_group_btn)
+
         toolbar.addSeparator()
 
         self.run_flow_btn = QPushButton("▶ Run Flow")
@@ -1192,6 +897,11 @@ class ProcessFlowEditorWindow(QMainWindow):
         self.param_overlay.show()
         self.param_overlay.raise_()
 
+        # Lower-right collapsible execution status & progress tab
+        self.execution_tab = FlowExecutionTab(self.graph_widget, editor_window=self)
+        self.execution_tab.hide()
+        self.execution_tab.run_state_changed.connect(self._update_run_button_state)
+
         self.splitter.addWidget(self.graph_widget)
 
         # Right Panel (Currently unused / placeholder)
@@ -1240,45 +950,13 @@ class ProcessFlowEditorWindow(QMainWindow):
         self.select_all_shortcut.activated.connect(self._on_select_all)
         self._clipboard_query_name: Optional[str] = None
 
-        # File watcher and polling timer to automatically sync query edits on disk
-        self._query_watcher = QFileSystemWatcher(self)
-        self._query_watcher.fileChanged.connect(self._on_query_file_modified)
-        self._query_watcher.directoryChanged.connect(self._on_query_file_modified)
-        self._setup_query_file_watcher()
-        self._sync_timer = QTimer(self)
-        self._sync_timer.setInterval(2000)
-        self._sync_timer.timeout.connect(self._sync_query_files_and_parameters)
-        self._sync_timer.start()
-
     def _setup_query_file_watcher(self) -> None:
-        """Watch query files and folder to detect external modifications."""
-        if not hasattr(self, "_query_watcher") or not self.report or not self.report.folder_path:
-            return
-        files_to_watch = []
-        queries_dir = self.report.folder_path / "queries"
-        if queries_dir.exists():
-            files_to_watch.append(str(queries_dir.resolve()))
-        active_qnames = {
-            n.get_property("query_name") or n.name()
-            for n in self.graph.all_nodes()
-            if isinstance(n, QueryNode) or getattr(n, "type_", "") == "reporting.nodes.QueryNode"
-        }
-        for qname in active_qnames:
-            q = self._get_working_query(qname)
-            if q and q.file_path and q.file_path.exists():
-                files_to_watch.append(str(q.file_path.resolve()))
-        if files_to_watch:
-            existing = self._query_watcher.files() + self._query_watcher.directories()
-            new_paths = [p for p in files_to_watch if p not in existing]
-            if new_paths:
-                self._query_watcher.addPaths(new_paths)
+        """Query file watching is centralized via app_controller.watcher."""
+        pass
 
-    def _on_query_file_modified(self, path: str) -> None:
-        """Called when a query file or queries directory is modified on disk."""
+    def _on_query_file_modified(self, path: str = "") -> None:
+        """Called when a query file is modified on disk."""
         self._sync_query_files_and_parameters()
-        if hasattr(self, "_query_watcher") and Path(path).exists():
-            if path not in self._query_watcher.files() and path not in self._query_watcher.directories():
-                self._query_watcher.addPath(path)
 
     def _toggle_left_panel(self) -> None:
         """Collapse or expand left queries panel."""
@@ -1291,16 +969,6 @@ class ProcessFlowEditorWindow(QMainWindow):
         is_visible = self.right_panel.isVisible()
         self.right_panel.setVisible(not is_visible)
         self.toggle_right_btn.setText("◀" if is_visible else "▶")
-
-    # def _toggle_table_names_display(self) -> None:
-    #     """Toggle full table address vs short table name across all TableBoxNodes."""
-    #     self.show_full_table_names = self.toggle_table_names_btn.isChecked()
-    #     self.toggle_table_names_btn.setText(
-    #         "🏷 Full Table Address" if self.show_full_table_names else "🏷 Short Table Name"
-    #     )
-    #     for node in self.graph.all_nodes():
-    #         if isinstance(node, TableBoxNode) or node.type_ == "reporting.nodes.TableBoxNode":
-    #             node.set_display_mode(self.show_full_table_names)
 
     def _toggle_table_names_display(self) -> None:
         """Toggle full table address vs short table name across all TableBoxNodes."""
@@ -1557,6 +1225,9 @@ class ProcessFlowEditorWindow(QMainWindow):
                             qinfo = self.report.get_query(qname)
                             if qinfo:
                                 node.set_parameters(qinfo.parameter_names)
+                        elif isinstance(node, GroupBoxNode) or getattr(node, "type_", "") == "reporting.nodes.GroupBoxNode":
+                            if hasattr(node, "view") and hasattr(node.view, "_sync_header_items"):
+                                node.view._sync_header_items()
                     # Re-apply custom noodle colors to all pipes in the restored scene
                     for item in self.graph.viewer().scene().items():
                         if isinstance(item, PipeItem):
@@ -1597,6 +1268,84 @@ class ProcessFlowEditorWindow(QMainWindow):
             self._suppress_dirty = False
             self._is_dirty = False
             self._update_dirty_ui()
+
+    def _on_add_group_box(self, pos: Optional[Tuple[float, float]] = None, name: str = "Group Name") -> GroupBoxNode:
+        """Add a visual GroupBoxNode to the canvas (wrapping selected nodes if any, or placed at pos)."""
+        selected_non_groups = [
+            n for n in self.graph.selected_nodes()
+            if not (isinstance(n, GroupBoxNode) or getattr(n, "type_", "") == "reporting.nodes.GroupBoxNode")
+        ]
+
+        if not isinstance(pos, (list, tuple)) or len(pos) < 2:
+            try:
+                viewer = self.graph.viewer()
+                vp = viewer.viewport()
+                vp_w = vp.width() if vp else viewer.width()
+                vp_h = vp.height() if vp else viewer.height()
+                center_viewport = QPoint(vp_w // 2, vp_h // 2)
+                scene_pt = viewer.mapToScene(center_viewport)
+                node_pos = [float(scene_pt.x()) - 190.0, float(scene_pt.y()) - 125.0]
+            except Exception:
+                node_pos = [0.0, 0.0]
+        else:
+            node_pos = [float(pos[0]), float(pos[1])]
+
+        gnode: GroupBoxNode = self.graph.create_node(
+            "reporting.nodes.GroupBoxNode",
+            name=name,
+            pos=node_pos,
+            selected=False,
+        )
+        # Keep the requested group name cleanly without unnecessary numbering if desired, or set_name
+        if name:
+            gnode.model.name = name
+            if hasattr(gnode, "view") and gnode.view:
+                gnode.view.name = name
+
+        if selected_non_groups:
+            try:
+                gnode.wrap_nodes(selected_non_groups)
+                if hasattr(gnode, "view") and hasattr(gnode.view, "_sync_header_items"):
+                    gnode.view._sync_header_items()
+            except Exception as e:
+                logger.debug(f"Could not wrap selected nodes in group box: {e}")
+
+        # Ensure inner nodes are not selected so toolbar Run mode is not altered
+        self.graph.clear_selection()
+        if self.graph.viewer().scene():
+            self.graph.viewer().scene().clearSelection()
+        gnode.set_selected(True)
+        self._update_run_button_state()
+        self._mark_dirty_and_schedule_save()
+        return gnode
+
+    def _apply_color_to_group(self, group_node: BaseNode, rgb: Tuple[int, int, int]) -> None:
+        """Apply an RGB dark-mode colour to a GroupBoxNode and schedule save."""
+        if not group_node:
+            return
+        r, g, b = int(rgb[0]), int(rgb[1]), int(rgb[2])
+        group_node.set_color(r, g, b)
+        self._mark_dirty_and_schedule_save()
+
+    def _on_group_color_changed(self, node_id: str, rgb_list: list) -> None:
+        """Handle group colour selection from the header colour palette popup."""
+        if not rgb_list or len(rgb_list) < 3:
+            return
+        target_group = None
+        for n in self.graph.all_nodes():
+            if n.id == node_id or (hasattr(n, "view") and getattr(n.view, "id", None) == node_id):
+                target_group = n
+                break
+        if target_group is not None:
+            self._apply_color_to_group(target_group, (int(rgb_list[0]), int(rgb_list[1]), int(rgb_list[2])))
+
+    def _delete_group_node(self, group_node: BaseNode) -> None:
+        """Delete a single GroupBoxNode without affecting contained nodes."""
+        if not group_node:
+            return
+        self.graph.delete_nodes([group_node])
+        self._mark_dirty_and_schedule_save()
+        self.status_bar.showMessage("Deleted group box.", 3000)
 
     def _on_add_import_csv(self, pos: Optional[Tuple[float, float]] = None) -> Optional[ImportCsvNode]:
         """Add an Import Files node to the canvas."""
@@ -1713,6 +1462,9 @@ class ProcessFlowEditorWindow(QMainWindow):
 
         # Refresh parameter overlay for active queries in the flow
         self._refresh_parameter_overlay()
+
+        if hasattr(self, "execution_tab"):
+            self.execution_tab.sync_canvas_nodes()
 
     def add_query_to_canvas(self, query_name: str, pos: Optional[tuple] = None) -> Optional[QueryNode]:
         """Add a query to the canvas and recalculate the process flow graph topology."""
@@ -1973,6 +1725,48 @@ class ProcessFlowEditorWindow(QMainWindow):
                 row_counter += 1
 
         dlg_layout.addWidget(form_widget)
+
+        # Secondary LAN Destination Group Box
+        lan_group = QGroupBox("Secondary LAN Destination (Optional)")
+        lan_group.setStyleSheet("QGroupBox { font-weight: bold; margin-top: 6px; }")
+        lan_layout = QVBoxLayout(lan_group)
+        lan_layout.setContentsMargins(10, 10, 10, 10)
+        lan_layout.setSpacing(8)
+
+        cur_lan = self.flow_controller.get_lan_output_folder()
+        lan_checkbox = QCheckBox("Also copy generated output files to LAN folder")
+        lan_checkbox.setChecked(bool(cur_lan))
+
+        lan_path_row = QHBoxLayout()
+        lan_edit = QLineEdit(cur_lan)
+        lan_edit.setPlaceholderText(r"e.g. \\server\share\reports or /mnt/lan/reports")
+        lan_edit.setEnabled(bool(cur_lan))
+        lan_browse_btn = QPushButton("Browse...")
+        lan_browse_btn.setEnabled(bool(cur_lan))
+
+        def _on_lan_toggled(checked: bool):
+            lan_edit.setEnabled(checked)
+            lan_browse_btn.setEnabled(checked)
+
+        def _on_browse_lan():
+            chosen = QFileDialog.getExistingDirectory(
+                dialog,
+                "Select Secondary LAN Output Folder",
+                lan_edit.text().strip() or str(Path.home()),
+            )
+            if chosen:
+                lan_edit.setText(chosen)
+
+        lan_checkbox.toggled.connect(_on_lan_toggled)
+        lan_browse_btn.clicked.connect(_on_browse_lan)
+
+        lan_path_row.addWidget(lan_edit, stretch=1)
+        lan_path_row.addWidget(lan_browse_btn)
+
+        lan_layout.addWidget(lan_checkbox)
+        lan_layout.addLayout(lan_path_row)
+        dlg_layout.addWidget(lan_group)
+
         dlg_layout.addStretch()
 
         btn_row = QHBoxLayout()
@@ -1988,6 +1782,12 @@ class ProcessFlowEditorWindow(QMainWindow):
         cancel_btn.clicked.connect(dialog.reject)
 
         if dialog.exec() == QDialog.Accepted:
+            # Update secondary LAN output folder for process flow
+            new_lan = lan_edit.text().strip() if lan_checkbox.isChecked() else ""
+            if new_lan != self.flow_controller.get_lan_output_folder():
+                self.flow_controller.set_lan_output_folder(new_lan)
+                self._mark_dirty_and_schedule_save()
+
             node_files_map: Dict[Any, List[str]] = {
                 cnode: list(cnode.raw_tables or [f"{cnode.name()}.csv"])
                 for cnode in active_csv_nodes
@@ -2178,20 +1978,25 @@ class ProcessFlowEditorWindow(QMainWindow):
             self.status_bar.showMessage(f"Pasted {len(new_nodes)} node(s).", 3000)
 
     def _on_delete_selected(self) -> None:
-        """Delete currently selected query or CSV import nodes and resynchronize topology.
+        """Delete currently selected query, CSV import, or group box nodes and resynchronize topology if needed.
 
         Tables are automatically managed and cannot be directly deleted.
         """
         selected_nodes = self.graph.selected_nodes()
-        deletable_nodes = [
+        deletable_exec_nodes = [
             n for n in selected_nodes
             if isinstance(n, (QueryNode, ImportCsvNode))
             or getattr(n, "type_", "") in ("reporting.nodes.QueryNode", "reporting.nodes.ImportCsvNode")
         ]
+        deletable_group_nodes = [
+            n for n in selected_nodes
+            if isinstance(n, GroupBoxNode) or getattr(n, "type_", "") == "reporting.nodes.GroupBoxNode"
+        ]
+        deletable_nodes = deletable_exec_nodes + deletable_group_nodes
         if deletable_nodes:
             # If any ImportCsvNode is deleted, update saved csv_imports
             deleted_import_names = {
-                n.name() for n in deletable_nodes
+                n.name() for n in deletable_exec_nodes
                 if isinstance(n, ImportCsvNode) or getattr(n, "type_", "") == "reporting.nodes.ImportCsvNode"
             }
             if deleted_import_names:
@@ -2203,7 +2008,9 @@ class ProcessFlowEditorWindow(QMainWindow):
                 self.flow_controller.set_csv_imports(remaining_imports)
 
             self.graph.delete_nodes(deletable_nodes)
-            self._sync_graph_topology()
+            if deletable_exec_nodes:
+                self._sync_graph_topology()
+            self._mark_dirty_and_schedule_save()
             self.status_bar.showMessage(f"Deleted {len(deletable_nodes)} node(s).", 3000)
         else:
             selected_pipes = self._get_selected_pipes()
@@ -2211,7 +2018,7 @@ class ProcessFlowEditorWindow(QMainWindow):
                 self._delete_selected_blue_pipes()
             elif selected_nodes:
                 self.status_bar.showMessage(
-                    "Table boxes are managed automatically; only query and CSV import nodes can be deleted.", 3000
+                    "Table boxes are managed automatically; only query, CSV import, and group nodes can be deleted.", 3000
                 )
 
     def _auto_layout(self, direction: str = "horizontal") -> None:
@@ -2360,6 +2167,13 @@ class ProcessFlowEditorWindow(QMainWindow):
                     existing_defaults.pop("Report Date", None)
                     date_options.pop("Report Date", None)
 
+            flow_path = getattr(self.flow_controller, "file_path", None)
+            if flow_path and self.app_controller and hasattr(self.app_controller, "watcher"):
+                from reporting_app.persistence.flow_storage import FlowStorage
+
+                self.app_controller.watcher.suppress(Path(flow_path))
+                self.app_controller.watcher.suppress(FlowStorage.get_meta_path(Path(flow_path)))
+
             self.flow_controller.save_flow(
                 active_query_names=active_query_names,
                 parameter_defaults=existing_defaults,
@@ -2372,11 +2186,8 @@ class ProcessFlowEditorWindow(QMainWindow):
                 parameter_date_options=date_options,
                 selected_filename_date_param=sel_filename_date_param,
                 has_report_date=has_report_date,
+                lan_output_folder=self.flow_controller.get_lan_output_folder(),
             )
-
-            flow_path = getattr(self.flow_controller, "flow_file_path", None)
-            if flow_path and self.app_controller and hasattr(self.app_controller, "watcher"):
-                self.app_controller.watcher.update_file_mtime(Path(flow_path))
 
             if self.app_controller:
                 self.app_controller.scan()
@@ -2395,6 +2206,32 @@ class ProcessFlowEditorWindow(QMainWindow):
         finally:
             self._suppress_dirty = False
 
+    def _on_nodes_moved_on_canvas(self, node_data: dict) -> None:
+        """Update cached node positions when nodes (or group boxes) are moved on canvas."""
+        for node_view in (node_data or {}):
+            node = self.graph.get_node_by_id(getattr(node_view, "id", None))
+            if not node:
+                continue
+            pos = node.pos()
+            if not (isinstance(node, GroupBoxNode) or getattr(node, "type_", "") == "reporting.nodes.GroupBoxNode"):
+                self._node_positions[node.name()] = (float(pos[0]), float(pos[1]))
+                qname = node.get_property("query_name") if hasattr(node, "get_property") else None
+                if qname:
+                    self._node_positions[qname] = (float(pos[0]), float(pos[1]))
+        self._mark_dirty_and_schedule_save()
+
+    def _on_backdrop_updated(self, node_id: str, update_type: str, size_data: dict) -> None:
+        """Handle group box resize events from the bottom-right sizer handle."""
+        node = self.graph.get_node_by_id(node_id)
+        if node and isinstance(size_data, dict):
+            if "width" in size_data:
+                node.model.width = float(size_data["width"])
+            if "height" in size_data:
+                node.model.height = float(size_data["height"])
+            if "pos" in size_data and isinstance(size_data["pos"], (list, tuple)) and len(size_data["pos"]) >= 2:
+                node.model.pos = [float(size_data["pos"][0]), float(size_data["pos"][1])]
+        self._mark_dirty_and_schedule_save()
+
     def _wire_auto_save_signals(self) -> None:
         """Connect graph, parameter, and UI mutation signals to the auto-save change tracker."""
         # 1. Graph node and pipe mutations
@@ -2402,10 +2239,12 @@ class ProcessFlowEditorWindow(QMainWindow):
         self.graph.port_connected.connect(lambda *_: self._mark_dirty_and_schedule_save())
         self.graph.port_disconnected.connect(lambda *_: self._mark_dirty_and_schedule_save())
 
-        # 2. Viewer node movements
+        # 2. Viewer node movements and group box resize
         viewer = self.graph.viewer()
         if hasattr(viewer, "moved_nodes"):
-            viewer.moved_nodes.connect(lambda *_: self._mark_dirty_and_schedule_save())
+            viewer.moved_nodes.connect(self._on_nodes_moved_on_canvas)
+        if hasattr(viewer, "node_backdrop_updated"):
+            viewer.node_backdrop_updated.connect(self._on_backdrop_updated)
 
         # 3. Canvas Parameter Overlay edits
         if hasattr(self, "param_overlay"):
@@ -2501,6 +2340,32 @@ class ProcessFlowEditorWindow(QMainWindow):
                     self.app_controller.repo.set_setting("flow_editor_splitter_sizes", ",".join(str(s) for s in cur_sizes))
         except Exception as e:
             logger.debug(f"Error saving splitter sizes on close: {e}")
+
+        # Stop debounce auto-save timer and shut down execution tab
+        if hasattr(self, "_auto_save_timer") and self._auto_save_timer.isActive():
+            self._auto_save_timer.stop()
+        if hasattr(self, "execution_tab"):
+            self.execution_tab.shutdown()
+
+        # Disconnect controller active_report_changed signal
+        if self.app_controller:
+            try:
+                self.app_controller.active_report_changed.disconnect(self._on_report_updated_from_controller)
+            except Exception:
+                pass
+
+        # Cancel any active live connection on viewer and close graph
+        try:
+            viewer = self.graph.viewer()
+            if hasattr(viewer, "end_live_connection"):
+                viewer.end_live_connection()
+            if hasattr(self, "graph"):
+                self.graph.close()
+        except Exception:
+            pass
+
+        self.hide()
+        event.accept()
         super().closeEvent(event)
 
     def _get_selected_query_nodes(self) -> List[BaseNode]:
@@ -2515,6 +2380,11 @@ class ProcessFlowEditorWindow(QMainWindow):
         """Update Run Flow button label based on whether query/import nodes are selected."""
         if not hasattr(self, "run_flow_btn"):
             return
+        if hasattr(self, "execution_tab") and self.execution_tab.is_running():
+            self.run_flow_btn.setEnabled(False)
+            self.run_flow_btn.setText("⏳ Running...")
+            return
+        self.run_flow_btn.setEnabled(True)
         selected_nodes = self._get_selected_query_nodes()
         if selected_nodes:
             self.run_flow_btn.setText("▶ Run Selected")
@@ -2525,17 +2395,60 @@ class ProcessFlowEditorWindow(QMainWindow):
 
     def _on_run_flow_button_clicked(self) -> None:
         """Handler for toolbar Run button: runs selected if any are selected, else runs full flow."""
+        if hasattr(self, "execution_tab") and self.execution_tab.is_running():
+            return
         selected_nodes = self._get_selected_query_nodes()
         if selected_nodes:
             self.run_selected_queries()
         else:
             self._on_run_flow()
 
+    def _on_group_play_clicked(self, node_id: str) -> None:
+        """Handle clicking the Play (▶) button in a GroupBoxNode header."""
+        target_group = None
+        for n in self.graph.all_nodes():
+            if n.id == node_id or (hasattr(n, "view") and getattr(n.view, "id", None) == node_id):
+                target_group = n
+                break
+        if target_group is not None:
+            self.run_group_nodes(target_group)
+
+    def run_group_nodes(self, group_node: BaseNode) -> None:
+        """Run all executable nodes (QueryNode and ImportCsvNode) located inside group_node in topological order."""
+        if not group_node or not hasattr(group_node, "view") or not group_node.view:
+            return
+
+        contained_views = group_node.view.get_nodes(inc_intersects=False)
+        contained_view_ids = {getattr(v, "id", None) for v in contained_views}
+        exec_nodes_in_group = [
+            n for n in self.graph.all_nodes()
+            if (n.id in contained_view_ids or getattr(getattr(n, "view", None), "id", None) in contained_view_ids)
+            and (
+                isinstance(n, (QueryNode, ImportCsvNode))
+                or getattr(n, "type_", "") in ("reporting.nodes.QueryNode", "reporting.nodes.ImportCsvNode")
+            )
+        ]
+
+        if not exec_nodes_in_group:
+            self.status_bar.showMessage(f"No executable nodes inside group '{group_node.name()}'.", 4000)
+            return
+
+        session_data = self.graph.serialize_session()
+        node_order = self.flow_controller.get_node_execution_order(session_data)
+
+        group_exec_ids = {n.id for n in exec_nodes_in_group}
+        filtered_order = [item for item in node_order if item["id"] in group_exec_ids]
+        if not filtered_order:
+            group_exec_names = {n.name() for n in exec_nodes_in_group}
+            filtered_order = [item for item in node_order if item["name"] in group_exec_names]
+
+        self._execute_ordered_nodes(filtered_order, context_title=f"Group '{group_node.name()}'")
+
     def run_selected_queries(self) -> None:
         """Run only the currently selected query and import CSV nodes in topological dependency order."""
         selected_nodes = self._get_selected_query_nodes()
         if not selected_nodes:
-            QMessageBox.information(self, "No Selection", "Please select at least one query or CSV import node to run.")
+            self.status_bar.showMessage("Please select at least one query or import node to run.", 4000)
             return
 
         session_data = self.graph.serialize_session()
@@ -2564,7 +2477,7 @@ class ProcessFlowEditorWindow(QMainWindow):
                 break
 
         if start_idx == -1:
-            QMessageBox.warning(self, "Error", f"Could not determine order for '{start_node.name()}'.")
+            self.status_bar.showMessage(f"Could not determine execution order for '{start_node.name()}'.", 4000)
             return
 
         downstream_order = node_order[start_idx:]
@@ -2577,9 +2490,13 @@ class ProcessFlowEditorWindow(QMainWindow):
         self._execute_ordered_nodes(node_order, context_title=f"Process flow '{self.flow_controller.flow_name}'")
 
     def _execute_ordered_nodes(self, ordered_items: List[Dict[str, Any]], context_title: str = "Process Flow") -> None:
-        """Execute the specified ordered list of nodes (both CSV imports and queries)."""
+        """Execute the specified ordered list of nodes via FlowExecutionTab."""
+        if hasattr(self, "execution_tab") and self.execution_tab.is_running():
+            self.status_bar.showMessage("A process flow is already running.", 3000)
+            return
+
         if not ordered_items:
-            QMessageBox.information(self, "Empty Flow", "There are no queries or CSV imports to run.")
+            self.status_bar.showMessage("There are no queries or file imports to run.", 4000)
             return
 
         # If auto-save is enabled and there are pending modifications, save before running
@@ -2611,237 +2528,42 @@ class ProcessFlowEditorWindow(QMainWindow):
         outputs_dir.mkdir(parents=True, exist_ok=True)
         csv_map = self.flow_controller.get_csv_filenames()
 
-        import uuid
-        from datetime import datetime, timezone
-        run_id = str(uuid.uuid4())
-        flow_start_time = datetime.now(timezone.utc).isoformat()
-        flow_name = self.flow_controller.flow_name or "Process Flow"
-        repo = self.app_controller.repo if self.app_controller else None
-
-        results_log = []
-        errors = []
-
-        total_steps = len(ordered_items)
-        self.status_bar.showMessage(f"Running {context_title} ({total_steps} step(s))...")
-        failed_node_name = None
-
-        for idx, item in enumerate(ordered_items, start=1):
+        steps = []
+        for item in ordered_items:
             ntype = item.get("type")
             nid = item.get("id")
             nname = item.get("name")
-            step_start_time = datetime.now(timezone.utc).isoformat()
-            t0 = datetime.now(timezone.utc)
-
             if ntype == "import_csv":
-                # Find matching ImportCsvNode
                 inode = next((n for n in self.graph.all_nodes() if n.id == nid or n.name() == nname), None)
-                if not inode or not (isinstance(inode, ImportCsvNode) or getattr(inode, "type_", "") == "reporting.nodes.ImportCsvNode"):
-                    continue
-
-                imp_items = inode.get_imports()
-                imp_records = []
-                for imp in imp_items:
-                    f_path = (imp.get("file_path") or imp.get("csv_path") or "").strip()
-                    d_table = imp.get("output_table", "").strip()
-                    headers = imp.get("has_headers", True)
-                    sheet_name = imp.get("sheet_name")
-                    schema_mode = imp.get("schema_mode", "auto")
-                    manual_schema = imp.get("manual_schema")
-                    if not f_path or not d_table:
-                        continue
-                    if filename_date:
-                        f_path = format_filename_with_date(f_path, filename_date)
-
-                    resolved_file = Path(f_path)
-                    if not resolved_file.is_absolute() and self.report and self.report.folder_path:
-                        candidate = self.report.folder_path / "inputs" / resolved_file
-                        if candidate.exists() or not resolved_file.exists():
-                            resolved_file = candidate
-
-                    self.status_bar.showMessage(f"[{idx}/{total_steps}] Importing {resolved_file.name} -> {d_table}...")
-                    QtWidgets.QApplication.processEvents()
-                    try:
-                        imp_res = run_bigquery_import_file(
-                            file_path=resolved_file,
-                            destination_table=d_table,
-                            has_headers=headers,
-                            sheet_name=sheet_name,
-                            schema_mode=schema_mode,
-                            manual_schema=manual_schema,
-                        )
-                        row_cnt = imp_res.get("row_count")
-                        cnt_str = f"{row_cnt:,} rows" if row_cnt is not None else "completed"
-                        results_log.append(f"[{idx}/{total_steps}] 📥 Imported '{f_path}' into '{d_table}' ({cnt_str})")
-                        imp_records.append({
-                            "file_path": str(f_path),
-                            "destination_table": d_table,
-                            "row_count": row_cnt,
-                            "has_headers": headers,
-                            "sheet_name": sheet_name,
-                            "schema_mode": schema_mode,
-                        })
-                    except Exception as e:
-                        failed_node_name = nname or "Import Files"
-                        err_msg = f"Import failed for {d_table}: {e}"
-                        errors.append(err_msg)
-                        results_log.append(f"[{idx}/{total_steps}] ❌ {err_msg}")
-                        if repo:
-                            t1 = datetime.now(timezone.utc)
-                            repo.record_execution_log({
-                                "run_id": run_id,
-                                "flow_start_time": flow_start_time,
-                                "node_start_time": step_start_time,
-                                "node_end_time": t1.isoformat(),
-                                "duration_seconds": (t1 - t0).total_seconds(),
-                                "report_name": self.report.name,
-                                "flow_name": flow_name,
-                                "node_type": "import_csv",
-                                "node_name": nname or "Import Files",
-                                "status": "FAILED",
-                                "error_message": err_msg,
-                                "import_details_json": imp_records,
-                            })
-                        break
-
-                if errors:
-                    break
-
-                if repo and imp_records:
-                    t1 = datetime.now(timezone.utc)
-                    total_rows = sum(r.get("row_count") or 0 for r in imp_records)
-                    repo.record_execution_log({
-                        "run_id": run_id,
-                        "flow_start_time": flow_start_time,
-                        "node_start_time": step_start_time,
-                        "node_end_time": t1.isoformat(),
-                        "duration_seconds": (t1 - t0).total_seconds(),
-                        "report_name": self.report.name,
-                        "flow_name": flow_name,
-                        "node_type": "import_csv",
-                        "node_name": nname or "Import Files",
-                        "status": "SUCCESS",
-                        "output_rows": total_rows,
-                        "import_details_json": imp_records,
-                    })
-
+                imp_items = inode.get_imports() if (inode and hasattr(inode, "get_imports")) else []
+                steps.append({
+                    "type": "import_csv",
+                    "id": nid,
+                    "name": nname or "Import Files",
+                    "items": imp_items,
+                })
             elif ntype == "query":
-                qname = nname
-                qinfo = self.report.get_query(qname)
-                if not qinfo or not qinfo.file_path.exists():
-                    failed_node_name = qname
-                    err = f"Query '{qname}' SQL file not found."
-                    errors.append(err)
-                    results_log.append(f"[{idx}/{total_steps}] ❌ {qname}: {err}")
-                    if repo:
-                        t1 = datetime.now(timezone.utc)
-                        repo.record_execution_log({
-                            "run_id": run_id,
-                            "flow_start_time": flow_start_time,
-                            "node_start_time": step_start_time,
-                            "node_end_time": t1.isoformat(),
-                            "duration_seconds": (t1 - t0).total_seconds(),
-                            "report_name": self.report.name,
-                            "flow_name": flow_name,
-                            "node_type": "query",
-                            "node_name": qname,
-                            "status": "FAILED",
-                            "error_message": err,
-                        })
-                    break
+                qinfo = self.report.get_query(nname)
+                steps.append({
+                    "type": "query",
+                    "id": nid,
+                    "name": nname,
+                    "file_path": qinfo.file_path if qinfo else None,
+                })
 
-                self.status_bar.showMessage(f"[{idx}/{total_steps}] Running {qname}...")
-                QtWidgets.QApplication.processEvents()
-
-                try:
-                    custom_csv = csv_map.get(qname)
-                    if custom_csv and filename_date:
-                        custom_csv = format_filename_with_date(custom_csv, filename_date)
-                    res = run_bigquery_script(
-                        sql_script_path=qinfo.file_path,
-                        report_name=self.report.name,
-                        outputs_dir=outputs_dir,
-                        parameters=param_values,
-                        output_filename=custom_csv,
-                    )
-                    if res.get("is_export"):
-                        details = res.get("export_details", [])
-                        if len(details) == 1:
-                            d = details[0]
-                            results_log.append(
-                                f"[{idx}/{total_steps}] ✅ {qname}: Exported '{d['filename']}' ({d['row_count']:,} rows)"
-                            )
-                        elif len(details) > 1:
-                            lines = [f"[{idx}/{total_steps}] ✅ {qname}: Exported {len(details)} tables:"]
-                            for d in details:
-                                lines.append(f"* {d['filename']} ({d['row_count']:,} rows)")
-                            results_log.append("\n".join(lines))
-                        else:
-                            results_log.append(f"[{idx}/{total_steps}] ✅ {qname}: Exported {res.get('row_count', 0):,} rows to {res.get('output_file')}")
-                    else:
-                        tbl_rows = res.get("row_count")
-                        tbl_rows_str = f" ({tbl_rows:,} rows)" if tbl_rows is not None else ""
-                        results_log.append(f"[{idx}/{total_steps}] ✅ {qname}: Executed table creation/update in BigQuery{tbl_rows_str}")
-
-                    if repo:
-                        t1 = datetime.now(timezone.utc)
-                        wall_node_dur = (t1 - t0).total_seconds()
-                        repo.record_execution_log({
-                            "run_id": run_id,
-                            "flow_start_time": flow_start_time,
-                            "node_start_time": step_start_time,
-                            "node_end_time": t1.isoformat(),
-                            "duration_seconds": max(float(res.get("duration_seconds", 0.0) or 0.0), wall_node_dur),
-                            "bq_duration_seconds": res.get("bq_duration_seconds"),
-                            "report_name": self.report.name,
-                            "flow_name": flow_name,
-                            "node_type": "query",
-                            "node_name": qname,
-                            "status": "SUCCESS",
-                            "submitted_query": res.get("submitted_query"),
-                            "output_rows": res.get("row_count"),
-                            "total_bytes_processed": res.get("total_bytes_processed"),
-                            "total_bytes_billed": res.get("total_bytes_billed"),
-                            "slot_millis": res.get("slot_millis"),
-                            "cache_hit": res.get("cache_hit"),
-                            "export_details_json": res.get("export_details", []),
-                        })
-                except Exception as e:
-                    failed_node_name = qname
-                    err_msg = str(e)
-                    errors.append(f"{qname}: {err_msg}")
-                    results_log.append(f"[{idx}/{total_steps}] ❌ {qname}: Failed ({err_msg})")
-                    if repo:
-                        t1 = datetime.now(timezone.utc)
-                        repo.record_execution_log({
-                            "run_id": run_id,
-                            "flow_start_time": flow_start_time,
-                            "node_start_time": step_start_time,
-                            "node_end_time": t1.isoformat(),
-                            "duration_seconds": (t1 - t0).total_seconds(),
-                            "report_name": self.report.name,
-                            "flow_name": flow_name,
-                            "node_type": "query",
-                            "node_name": qname,
-                            "status": "FAILED",
-                            "error_message": err_msg,
-                        })
-                    break
-
-        summary_text = "\n".join(results_log)
-        self.status_bar.showMessage(f"{context_title} execution finished.", 5000)
-
-        if errors:
-            failed_node_header = f"Error in node: '{failed_node_name}'\n\n" if failed_node_name else ""
-            QMessageBox.critical(
-                self,
-                f"{context_title} Execution Error",
-                f"{failed_node_header}Execution failed with errors:\n\n{summary_text}\n\nNote: If authentication failed, please run 'gcloud auth application-default login' in terminal.",
-            )
-        else:
-            QMessageBox.information(
-                self,
-                f"{context_title} Completed",
-                f"{context_title} completed successfully!\n\n{summary_text}",
+        if hasattr(self, "execution_tab"):
+            self.execution_tab.execute_steps(
+                steps=steps,
+                report_folder=self.report.folder_path,
+                report_name=self.report.name,
+                flow_name=self.flow_controller.flow_name,
+                param_values=param_values,
+                filename_date=filename_date,
+                csv_map=csv_map,
+                outputs_dir=outputs_dir,
+                context_title=context_title,
+                repo=self.app_controller.repo if self.app_controller else None,
+                lan_output_folder=self.flow_controller.get_lan_output_folder(),
             )
 
     def _on_open_logs(self, filter_node: Optional[str] = None) -> None:
@@ -2894,30 +2616,7 @@ class ProcessFlowEditorWindow(QMainWindow):
             else:
                 self._pending_query_renames[orig_name] = new_name
 
-            # 1. Immediately rename the query file on disk if app_controller is available
-            if self.app_controller:
-                renamed_ok = self.app_controller.rename_query(old_name, new_name)
-                if renamed_ok:
-                    self.report = self.app_controller.active_report or self.report
-                    if orig_name in self._pending_query_renames:
-                        self._pending_query_renames.pop(orig_name, None)
-            else:
-                # If app_controller is not wired, attempt direct file rename
-                try:
-                    qinfo = self._get_working_query(old_name)
-                    if qinfo and qinfo.file_path and qinfo.file_path.exists():
-                        clean_new = new_name.strip()
-                        if clean_new.endswith(".sql"):
-                            clean_new = clean_new[:-4]
-                        target_file = qinfo.file_path.parent / f"{clean_new}.sql"
-                        if not target_file.exists():
-                            qinfo.file_path.rename(target_file)
-                            qinfo.name = clean_new
-                            qinfo.file_path = target_file
-                except Exception as e:
-                    logger.error(f"Direct file rename failed: {e}")
-
-            # 2. Immediately update the left panel to reflect the new name
+            # 1. Immediately update the left panel to reflect the new name
             self._refresh_left_queries()
 
             # 3. Update flow_controller references in memory
@@ -2951,12 +2650,8 @@ class ProcessFlowEditorWindow(QMainWindow):
             # 6. Re-sync graph topology to preserve all connections and table boxes
             self._sync_graph_topology()
 
-            # 7. Persist updated flow JSON immediately so there's no mismatch
-            if self.flow_controller:
-                try:
-                    self._on_save(show_popup=False)
-                except Exception as e:
-                    logger.warning(f"Could not auto-save flow after query rename: {e}")
+            # 7. Mark flow as dirty and schedule save
+            self._mark_dirty_and_schedule_save()
         finally:
             self._is_renaming_query = False
 
@@ -3089,6 +2784,11 @@ class ProcessFlowEditorWindow(QMainWindow):
                     cursor_pos = viewer.mapFromGlobal(QCursor.pos())
                     scene_pos = viewer.mapToScene(cursor_pos)
                     self._on_add_import_csv(pos=(scene_pos.x(), scene_pos.y()))
+                    return True
+                elif key == Qt.Key_G:
+                    cursor_pos = viewer.mapFromGlobal(QCursor.pos())
+                    scene_pos = viewer.mapToScene(cursor_pos)
+                    self._on_add_group_box(pos=(scene_pos.x(), scene_pos.y()))
                     return True
                 elif key == Qt.Key_H:
                     self._auto_layout("horizontal")

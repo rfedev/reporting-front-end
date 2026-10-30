@@ -42,7 +42,7 @@ class AppController(QObject):
         self.scanner = FileScanner(working_dirs)
 
         # File watcher
-        self.watcher = FileWatcherService(check_interval_ms=5000, parent=self)
+        self.watcher = FileWatcherService(parent=self)
         self._update_watcher_directories(working_dirs)
         self.watcher.set_enabled(self.repo.get_auto_scan())
         self.watcher.directory_changed.connect(self.scan)
@@ -96,21 +96,23 @@ class AppController(QObject):
 
     def _create_default_process_flow(self, report: Report) -> ProcessFlowInfo:
         """Create a default 'Process Flow 01' if none exists for the report (Requirement 2)."""
-        import json
+        from reporting_app.persistence.flow_storage import FlowStorage
+
         queries_dir = report.folder_path / "queries"
         queries_dir.mkdir(parents=True, exist_ok=True)
         flow_path = queries_dir / f"{self.DEFAULT_PROCESS_FLOW_NAME}.json"
         if not flow_path.exists():
-            data = {
-                "flow_name": self.DEFAULT_PROCESS_FLOW_NAME,
-                "report_name": report.name,
-                "query_names": [],
-                "parameter_defaults": {},
-                "show_full_table_names": False,
-                "csv_filenames": {},
-                "graph_session": {},
-            }
-            flow_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            FlowStorage.save(
+                file_path=flow_path,
+                flow_name=self.DEFAULT_PROCESS_FLOW_NAME,
+                report_name=report.name,
+                query_names=[],
+                parameter_defaults={},
+                graph_session={},
+                show_full_table_names=False,
+                csv_filenames={},
+                csv_imports=[],
+            )
 
         info = ProcessFlowInfo(
             name=self.DEFAULT_PROCESS_FLOW_NAME,
@@ -182,6 +184,8 @@ class AppController(QObject):
         """Select active report by its key/name and populate flows and queries."""
         report = self.reports_by_key.get(report_key) or self.reports_by_name.get(report_key)
         self.active_report = report
+        if report and report.folder_path:
+            self.watcher.set_target_report(report.folder_path)
         self.active_report_changed.emit(report)
 
         if not report:
@@ -256,6 +260,10 @@ class AppController(QObject):
                         return
 
         elif suffix == ".json":
+            from reporting_app.persistence.flow_storage import FlowStorage
+
+            if FlowStorage.is_meta_file(resolved):
+                return
             for report in self.reports_by_name.values():
                 try:
                     if resolved.is_relative_to(report.folder_path.resolve()):
@@ -384,32 +392,40 @@ class AppController(QObject):
         if not clean_name:
             return None
 
-        import json
+        from reporting_app.persistence.flow_storage import FlowStorage
+
         queries_dir = self.active_report.folder_path / "queries"
         queries_dir.mkdir(parents=True, exist_ok=True)
         flow_path = queries_dir / f"{clean_name}.json"
 
         if not flow_path.exists():
-            data = {
-                "flow_name": clean_name,
-                "report_name": self.active_report.name,
-                "query_names": [],
-                "parameter_defaults": {},
-                "show_full_table_names": False,
-                "csv_filenames": {},
-                "graph_session": {},
-            }
+            src_data = {}
             if source_flow_name:
                 src_info = self.active_report.get_process_flow(source_flow_name)
                 if src_info and src_info.file_path.exists():
                     try:
-                        src_data = json.loads(src_info.file_path.read_text(encoding="utf-8"))
-                        data.update(src_data)
-                        data["flow_name"] = clean_name
-                        data["report_name"] = self.active_report.name
+                        src_data = FlowStorage.load(src_info.file_path)
                     except Exception as e:
                         logger.error(f"Failed to clone flow data from {source_flow_name}: {e}")
-            flow_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+            FlowStorage.save(
+                file_path=flow_path,
+                flow_name=clean_name,
+                report_name=self.active_report.name,
+                query_names=src_data.get("query_names", []),
+                parameter_defaults=src_data.get("parameter_defaults", {}),
+                graph_session=src_data.get("graph_session", {}),
+                show_full_table_names=src_data.get("show_full_table_names", False),
+                csv_filenames=src_data.get("csv_filenames", {}),
+                csv_imports=src_data.get("csv_imports", []),
+                view_state=src_data.get("view_state", {}),
+                splitter_sizes=src_data.get("splitter_sizes"),
+                parameter_date_options=src_data.get("parameter_date_options", {}),
+                selected_filename_date_param=src_data.get("selected_filename_date_param"),
+                has_report_date=src_data.get("has_report_date"),
+                lan_output_folder=src_data.get("lan_output_folder"),
+                node_positions=src_data.get("node_positions"),
+            )
 
         self.scan()
         self.select_process_flow(clean_name)
@@ -424,7 +440,10 @@ class AppController(QObject):
         if not flow_info or not flow_info.file_path.exists():
             return False
 
+        from reporting_app.persistence.flow_storage import FlowStorage
+
         try:
+            FlowStorage.remove_flow_meta(flow_info.file_path, flow_info.name)
             flow_info.file_path.unlink()
             self.scan()
             return True
@@ -460,6 +479,8 @@ class AppController(QObject):
             return False
 
         import json
+        from reporting_app.persistence.flow_storage import FlowStorage
+
         try:
             try:
                 data = json.loads(flow_info.file_path.read_text(encoding="utf-8"))
@@ -468,6 +489,7 @@ class AppController(QObject):
             except Exception:
                 pass
 
+            FlowStorage.rename_flow_meta(flow_info.file_path, clean_old, clean_new)
             flow_info.file_path.rename(target_file)
             self.scan()
             self.select_process_flow(clean_new)

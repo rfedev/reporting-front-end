@@ -11,14 +11,54 @@ Features:
 import csv
 from datetime import datetime, timezone
 import logging
+import os
 from pathlib import Path
 import re
 from typing import Any, Dict, List, Optional, Tuple
+import warnings
+
+# Suppress noisy Google Cloud SDK ADC warnings and missing default project logs
+warnings.filterwarnings("ignore", category=UserWarning, module="google.auth._default")
+logging.getLogger("google.auth._default").setLevel(logging.ERROR)
 
 from google.cloud import bigquery
+from google.api_core.exceptions import Forbidden, Unauthorized, GoogleAPICallError
+from google.auth.exceptions import GoogleAuthError
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+# Default timeouts (in seconds) for BigQuery operations to fail fast instead of hanging indefinitely
+DEFAULT_BQ_QUERY_TIMEOUT = 60.0
+DEFAULT_BQ_JOB_RESULT_TIMEOUT = 300.0
+
+
+def format_bigquery_error(exc: Exception, project_id: Optional[str] = None) -> str:
+    """Format BigQuery, IAM permission, and authentication exceptions into clear, actionable messages."""
+    msg = str(exc)
+    err_lower = msg.lower()
+
+    if isinstance(exc, Forbidden) or "403" in msg or "access denied" in err_lower or "permission" in err_lower:
+        proj_str = f" in project '{project_id}'" if project_id else ""
+        guidance = (
+            f"BigQuery IAM Permission Denied (403){proj_str}.\n"
+            f"Details: {msg}\n\n"
+            f"Action Required:\n"
+            f"• To run queries and create jobs, grant role: 'roles/bigquery.jobUser' (or permission 'bigquery.jobs.create'){proj_str}.\n"
+            f"• To read datasets and tables, grant role: 'roles/bigquery.dataViewer'.\n"
+            f"• To write/create workbench tables, grant role: 'roles/bigquery.dataEditor'."
+        )
+        return guidance
+
+    if isinstance(exc, (Unauthorized, GoogleAuthError)) or "401" in msg or "credentials" in err_lower:
+        return (
+            f"BigQuery Authentication Error:\n"
+            f"Details: {msg}\n\n"
+            f"Action Required:\n"
+            f"Run 'gcloud auth application-default login' in your terminal to re-authenticate."
+        )
+
+    return f"BigQuery Error: {msg}"
 
 # Regex to detect statements that modify/create tables instead of returning rows
 _MODIFY_TABLE_RE = re.compile(
@@ -62,6 +102,7 @@ def run_bigquery_script(
     stream_to_csv: bool = False,
     client: Optional[Any] = None,
     output_filename: Optional[str] = None,
+    on_job_created: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Execute a single query script and conditionally export results to CSV.
 
@@ -74,6 +115,7 @@ def run_bigquery_script(
         stream_to_csv: Stream large result sets directly to CSV.
         client: Optional pre-configured bigquery.Client.
         output_filename: Optional custom CSV filename (e.g. 'custom_name.csv').
+        on_job_created: Optional callback invoked with the created BigQuery QueryJob.
 
     Returns:
         Dictionary with execution details: query_name, is_export, output_file, row_count, status.
@@ -112,6 +154,10 @@ def run_bigquery_script(
         except Exception:
             pass
 
+    # Secondary fallback: extract project from the first table referenced in the SQL script
+    if not project_id:
+        project_id = extract_project_id_from_sql(substituted_sql)
+
     out_dir = Path(outputs_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -135,16 +181,54 @@ def run_bigquery_script(
         for f in target_csv_filenames
     ]
 
+    if project_id and not os.environ.get("GOOGLE_CLOUD_PROJECT"):
+        os.environ["GOOGLE_CLOUD_PROJECT"] = project_id
+
     # Initialize BigQuery client using ADC with detected or explicit project_id
     if client is None:
-        client = bigquery.Client(project=project_id) if project_id else bigquery.Client()
+        try:
+            client = bigquery.Client(project=project_id) if project_id else bigquery.Client()
+        except Exception as e:
+            raise RuntimeError(format_bigquery_error(e, project_id)) from e
+
+    # Fail fast if client has no valid project resolved
+    active_project = project_id or getattr(client, "project", None)
+    if not active_project:
+        raise RuntimeError(
+            "No Google Cloud project specified or resolved for BigQuery execution. "
+            "Please configure the Workbench Dataset (e.g. 'my-project.my_dataset') in Settings, "
+            "or specify a project in the SQL query table addresses."
+        )
 
     logger.info(
-        f"Submitting BigQuery job for {query_name} (Project: {project_id}, "
+        f"Submitting BigQuery job for {query_name} (Project: {active_project}, "
         f"Export to CSV: {should_export}, Create Tables: {has_output_tables})"
     )
-    query_job = client.query(substituted_sql, project=project_id)
-    results = query_job.result()
+    try:
+        # Pass job_retry=None and explicit timeout so permission errors fail fast instead of retrying for 10-40 mins
+        query_job = client.query(
+            substituted_sql,
+            project=active_project,
+            job_retry=None,
+            timeout=DEFAULT_BQ_QUERY_TIMEOUT,
+        )
+    except Exception as e:
+        raise RuntimeError(format_bigquery_error(e, active_project)) from e
+
+    if callable(on_job_created):
+        try:
+            on_job_created(query_job)
+        except Exception as e:
+            logger.debug(f"on_job_created callback error: {e}")
+
+    try:
+        # Pass job_retry=None and bounded timeout for job completion
+        results = query_job.result(
+            job_retry=None,
+            timeout=DEFAULT_BQ_JOB_RESULT_TIMEOUT,
+        )
+    except Exception as e:
+        raise RuntimeError(format_bigquery_error(e, active_project)) from e
 
     total_row_count = 0
     exported_paths: List[str] = []
@@ -268,12 +352,16 @@ def run_bigquery_script(
     wall_duration_sec = (t_end - t_start).total_seconds()
 
     # BigQuery Execution Telemetry
-    job_started_iso = query_job.started.isoformat() if getattr(query_job, "started", None) else None
-    job_ended_iso = query_job.ended.isoformat() if getattr(query_job, "ended", None) else None
+    started_dt = getattr(query_job, "started", None)
+    job_started_iso = started_dt.isoformat() if isinstance(started_dt, datetime) else None
+    ended_dt = getattr(query_job, "ended", None)
+    job_ended_iso = ended_dt.isoformat() if isinstance(ended_dt, datetime) else None
     bq_duration_sec = 0.0
-    if getattr(query_job, "started", None) and getattr(query_job, "ended", None):
+    if isinstance(started_dt, datetime) and isinstance(ended_dt, datetime):
         try:
-            bq_duration_sec = (query_job.ended - query_job.started).total_seconds()
+            diff = (ended_dt - started_dt).total_seconds()
+            if isinstance(diff, (int, float)):
+                bq_duration_sec = float(diff)
         except Exception:
             pass
 
@@ -424,8 +512,14 @@ def run_bigquery_import_file(
             except Exception:
                 pass
 
+    if project_id and not os.environ.get("GOOGLE_CLOUD_PROJECT"):
+        os.environ["GOOGLE_CLOUD_PROJECT"] = project_id
+
     if client is None:
-        client = bigquery.Client(project=project_id) if project_id else bigquery.Client()
+        try:
+            client = bigquery.Client(project=project_id) if project_id else bigquery.Client()
+        except Exception as e:
+            raise RuntimeError(format_bigquery_error(e, project_id)) from e
 
     bq_schema = None
     if schema_mode == "manual" and manual_schema:
@@ -454,6 +548,60 @@ def run_bigquery_import_file(
         else:
             df.columns = [str(c).strip() for c in df.columns]
 
+        if bq_schema:
+            # Reorder and align columns to match bq_schema
+            existing_cols = {str(c).strip().lower(): c for c in df.columns}
+            aligned_df = pd.DataFrame(index=df.index)
+            for f in bq_schema:
+                col_name = f.name.strip()
+                match_col = col_name if col_name in df.columns else existing_cols.get(col_name.lower())
+                if match_col is not None:
+                    aligned_df[col_name] = df[match_col]
+                else:
+                    aligned_df[col_name] = None
+            df = aligned_df
+
+            # Cast each column to the required BigQuery type for pyarrow / bigquery
+            for field in bq_schema:
+                col = field.name
+                ftype = field.field_type.upper()
+                if ftype == "DATE":
+                    df[col] = pd.to_datetime(df[col], errors="coerce").dt.date
+                elif ftype in ("DATETIME", "TIMESTAMP"):
+                    df[col] = pd.to_datetime(df[col], errors="coerce")
+                elif ftype in ("INTEGER", "INT64"):
+                    df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
+                elif ftype in ("FLOAT", "FLOAT64", "NUMERIC", "BIGNUMERIC"):
+                    df[col] = pd.to_numeric(df[col], errors="coerce").astype("Float64")
+                elif ftype in ("BOOLEAN", "BOOL"):
+                    df[col] = df[col].map({
+                        True: True, False: False,
+                        "True": True, "False": False,
+                        "true": True, "false": False,
+                        1: True, 0: False,
+                        "1": True, "0": False,
+                        "TRUE": True, "FALSE": False
+                    }).astype("boolean")
+                elif ftype in ("STRING", "BYTES"):
+                    s = df[col].copy()
+                    mask = s.isna()
+                    s = s.astype(str)
+                    s[mask] = None
+                    df[col] = s.astype("string")
+        else:
+            # Auto-detect mode: Ensure Excel dates are treated as DATE instead of TIMESTAMP
+            for col in df.columns:
+                if pd.api.types.is_datetime64_any_dtype(df[col]):
+                    non_null = df[col].dropna()
+                    if (
+                        not non_null.empty
+                        and (non_null.dt.hour == 0).all()
+                        and (non_null.dt.minute == 0).all()
+                        and (non_null.dt.second == 0).all()
+                        and (non_null.dt.microsecond == 0).all()
+                    ):
+                        df[col] = df[col].dt.date
+
         job_config = bigquery.LoadJobConfig(
             schema=bq_schema if bq_schema else None,
             autodetect=False if bq_schema else True,
@@ -461,8 +609,23 @@ def run_bigquery_import_file(
         )
 
         logger.info(f"Loading Excel sheet '{sheet}' from {file_p} into BigQuery table {clean_dest}")
-        job = client.load_table_from_dataframe(df, clean_dest, job_config=job_config, project=project_id)
-        job.result()
+        try:
+            job = client.load_table_from_dataframe(
+                df, clean_dest, job_config=job_config, project=project_id, timeout=DEFAULT_BQ_QUERY_TIMEOUT
+            )
+        except Exception as e:
+            raise RuntimeError(format_bigquery_error(e, project_id)) from e
+
+        on_job_created = kwargs.get("on_job_created")
+        if callable(on_job_created):
+            try:
+                on_job_created(job)
+            except Exception as e:
+                logger.debug(f"on_job_created callback error: {e}")
+        try:
+            job.result(timeout=DEFAULT_BQ_JOB_RESULT_TIMEOUT)
+        except Exception as e:
+            raise RuntimeError(format_bigquery_error(e, project_id)) from e
     else:
         # CSV file import
         job_config = bigquery.LoadJobConfig(
@@ -475,8 +638,23 @@ def run_bigquery_import_file(
 
         logger.info(f"Loading CSV {file_p} into BigQuery table {clean_dest} (Headers: {has_headers}, Schema: {schema_mode})")
         with open(file_p, "rb") as source_file:
-            job = client.load_table_from_file(source_file, clean_dest, job_config=job_config, project=project_id)
-            job.result()
+            try:
+                job = client.load_table_from_file(
+                    source_file, clean_dest, job_config=job_config, project=project_id, timeout=DEFAULT_BQ_QUERY_TIMEOUT
+                )
+            except Exception as e:
+                raise RuntimeError(format_bigquery_error(e, project_id)) from e
+
+            on_job_created = kwargs.get("on_job_created")
+            if callable(on_job_created):
+                try:
+                    on_job_created(job)
+                except Exception as e:
+                    logger.debug(f"on_job_created callback error: {e}")
+            try:
+                job.result(timeout=DEFAULT_BQ_JOB_RESULT_TIMEOUT)
+            except Exception as e:
+                raise RuntimeError(format_bigquery_error(e, project_id)) from e
 
     row_count = None
     try:

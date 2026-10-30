@@ -76,7 +76,7 @@ def format_single_node_log(
     if node_type == "query":
         # Data Size and Volume
         lines.append("\n&nbsp;\n")
-        lines.append("### 📊 Data Size & Volume")
+        lines.append("### Data Size & Volume")
         lines.append(f"* **Total Bytes Processed:** {format_bytes(getattr(log, 'total_bytes_processed', None))}")
         lines.append(f"* **Total Bytes Billed:** {format_bytes(getattr(log, 'total_bytes_billed', None))}")
         out_rows = getattr(log, "output_rows", None)
@@ -85,7 +85,7 @@ def format_single_node_log(
 
         # Compute & Cost Efficiency
         lines.append("\n&nbsp;\n")
-        lines.append("### ⚡ Compute & Cost Efficiency")
+        lines.append("### Compute & Cost Efficiency")
         sm = getattr(log, "slot_millis", None)
         slot_str = f"{sm:,} ms" if sm is not None else "N/A"
         lines.append(f"* **Combined Slot Millis (CPU):** {slot_str}")
@@ -122,7 +122,7 @@ def format_single_node_log(
 
     elif node_type == "import_csv":
         lines.append("\n&nbsp;\n")
-        lines.append("### 📥 Import Details")
+        lines.append("### Import Details")
         out_rows = getattr(log, "output_rows", None)
         if out_rows is not None:
             lines.append(f"* **Rows Loaded:** {out_rows:,} rows")
@@ -229,7 +229,7 @@ def format_day_summary_logs(
     failed_nodes = total_nodes - successful_nodes
 
     day_totals = [
-        "## 📈 Day Totals",
+        "## Day Totals",
         f"* **Total Runs:** {total_runs}",
         f"* **Total Nodes Executed:** {total_nodes} ({successful_nodes} succeeded, {failed_nodes} failed)",
         f"* **Full Runtime:** `{format_duration(total_duration)}`",
@@ -245,7 +245,7 @@ def format_day_summary_logs(
     doc.append("\n".join(day_totals))
 
     doc.append("---")
-    doc.append("## 🔄 Process Flow Runs Summary")
+    doc.append("## Process Flow Runs Summary")
     doc.append("&nbsp;")
 
     matching_sessions = [

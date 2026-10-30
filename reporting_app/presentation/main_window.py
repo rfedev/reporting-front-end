@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 
 from reporting_app.controllers.app_controller import AppController
 from reporting_app.controllers.flow_controller import ProcessFlowController
+from reporting_app.controllers.flow_runner import FlowRunner
 from reporting_app.core.bigquery_run import run_bigquery_script
 from reporting_app.core.models import ProcessFlowInfo, QueryInfo, QueryParameter, Report
 from reporting_app.presentation.flow_editor.editor_window import ProcessFlowEditorWindow
@@ -679,9 +680,10 @@ class MainWindow(QMainWindow):
             flow_info=flow_info,
             flow_name=flow_name,
             app_controller=self.controller,
-            parent=self,
+            parent=None,
         )
         self.editor_windows.append(editor)
+        editor.destroyed.connect(lambda *_: self.editor_windows.remove(editor) if editor in self.editor_windows else None)
         editor.show()
 
 
@@ -710,9 +712,10 @@ class MainWindow(QMainWindow):
             flow_info=flow_info,
             flow_name=flow_name,
             app_controller=self.controller,
-            parent=self,
+            parent=None,
         )
         self.editor_windows.append(editor)
+        editor.destroyed.connect(lambda *_: self.editor_windows.remove(editor) if editor in self.editor_windows else None)
         editor.show()
 
     def _on_edit_query(self) -> None:
@@ -848,9 +851,9 @@ class MainWindow(QMainWindow):
                 )
 
     def _on_run_process_flow(self) -> None:
-        """Execute the currently selected process flow."""
+        """Open/focus the Process Flow Editor for the selected flow and execute it with live canvas & tab tracking."""
         active_report = self.controller.active_report
-        flow_name = self.flows_combo.currentText()
+        flow_name = self.flows_combo.currentText().strip()
         if not active_report or not flow_name:
             QMessageBox.information(self, "Select Flow", "Please select a valid process flow to run.")
             return
@@ -860,176 +863,56 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Flow Not Found", f"Process flow '{flow_name}' not found.")
             return
 
-        flow_ctrl = ProcessFlowController(
-            report=active_report,
-            flow_info=flow_info,
-            repo=self.controller.repo,
-        )
-
-        queries_order = flow_ctrl.get_execution_order()
-        if not queries_order:
-            QMessageBox.information(self, "Empty Flow", "There are no queries in this process flow to run.")
-            return
-
-        active_report.ensure_queries_parsed(queries_order)
-        unique_params = flow_ctrl.get_unique_parameters(queries_order)
-        param_values = dict(flow_ctrl.parameter_defaults)
-
-        if unique_params:
-            combined_qinfo = QueryInfo(
-                name=f"Flow: {flow_ctrl.flow_name}",
-                file_path=flow_ctrl.file_path,
-                report_name=active_report.name,
-                parameters=[QueryParameter(name=p, default_value=param_values.get(p, "")) for p in unique_params],
-            )
-            dialog = QueryRunDialog(
-                query_info=combined_qinfo,
-                initial_defaults=param_values,
-                parent=self,
-            )
-            dialog.setWindowTitle(f"Run Process Flow - {flow_ctrl.flow_name}")
-            dialog.run_btn.setText("Run Process Flow")
-
-            if dialog.exec() != QueryRunDialog.Accepted:
-                return
-
-            param_values = dialog.get_parameter_values()
-            flow_ctrl.parameter_defaults.update(param_values)
-
-        outputs_dir = active_report.folder_path / "outputs"
-        outputs_dir.mkdir(parents=True, exist_ok=True)
-        csv_map = flow_ctrl.get_csv_filenames()
-
-        # Determine filename_date from flow parameter settings or defaults
-        filename_date = ""
-        if "Report Date" in param_values and param_values["Report Date"].strip():
-            filename_date = param_values["Report Date"].strip()
-        else:
-            sel_param = flow_ctrl.get_selected_filename_date_param()
-            if sel_param and sel_param in param_values:
-                filename_date = param_values[sel_param]
-            else:
-                for k, v in param_values.items():
-                    if any(token in k.lower() for token in ("date", "dt", "day", "month", "year")):
-                        filename_date = v
-                        break
-
-        results_log = []
-        errors = []
-
-        failed_node_name = None
-
-        # 1. Run CSV Imports if present
-        csv_imports = flow_ctrl.get_csv_imports()
-        for group in csv_imports:
-            imp_items = group.get("items", []) if isinstance(group, dict) and "items" in group else [group]
-            for item in imp_items:
-                f_path = (item.get("file_path") or item.get("csv_path") or "").strip()
-                d_table = item.get("output_table", "").strip()
-                headers = item.get("has_headers", True)
-                sheet_name = item.get("sheet_name")
-                schema_mode = item.get("schema_mode", "auto")
-                manual_schema = item.get("manual_schema")
-                if not f_path or not d_table:
-                    continue
-                if filename_date:
-                    f_path = format_filename_with_date(f_path, filename_date)
-
-                resolved_file = Path(f_path)
-                if not resolved_file.is_absolute() and active_report and active_report.folder_path:
-                    candidate = active_report.folder_path / "inputs" / resolved_file
-                    if candidate.exists() or not resolved_file.exists():
-                        resolved_file = candidate
-
-                self.status_bar.showMessage(f"Importing {resolved_file.name} -> {d_table}...")
-                QApplication.processEvents()
-                try:
-                    from reporting_app.core.bigquery_run import run_bigquery_import_file
-                    imp_res = run_bigquery_import_file(
-                        file_path=resolved_file,
-                        destination_table=d_table,
-                        has_headers=headers,
-                        sheet_name=sheet_name,
-                        schema_mode=schema_mode,
-                        manual_schema=manual_schema,
-                    )
-                    row_cnt = imp_res.get("row_count")
-                    cnt_str = f"{row_cnt:,} rows" if row_cnt is not None else "completed"
-                    results_log.append(f"📥 Imported '{f_path}' into '{d_table}' ({cnt_str})")
-                except Exception as e:
-                    failed_node_name = group.get("node_name", "Import Files") if isinstance(group, dict) else "Import Files"
-                    err_msg = f"Import failed for {d_table}: {e}"
-                    errors.append(err_msg)
-                    results_log.append(f"❌ {err_msg}")
-                    break
-            if errors:
-                break
-
-        if not errors:
-            self.status_bar.showMessage(f"Running process flow ({len(queries_order)} queries)...")
-
-        for idx, qname in enumerate(queries_order, start=1):
-            qinfo = active_report.get_query(qname)
-            if not qinfo or not qinfo.file_path.exists():
-                failed_node_name = qname
-                err = f"Query '{qname}' SQL file not found."
-                errors.append(err)
-                results_log.append(f"[{idx}/{len(queries_order)}] ❌ {qname}: {err}")
-                break
-
-            self.status_bar.showMessage(f"[{idx}/{len(queries_order)}] Running {qname}...")
-            QApplication.processEvents()
-
+        # Find an existing open editor window for this report & flow, or open a new one
+        target_editor = None
+        for ed in list(self.editor_windows):
             try:
-                custom_csv = csv_map.get(qname)
-                if custom_csv and filename_date:
-                    custom_csv = format_filename_with_date(custom_csv, filename_date)
-                res = run_bigquery_script(
-                    sql_script_path=qinfo.file_path,
-                    report_name=active_report.name,
-                    outputs_dir=outputs_dir,
-                    parameters=param_values,
-                    output_filename=custom_csv,
-                )
-                log_parts = []
-                if res.get("has_output_tables"):
-                    log_parts.append(f"Table(s): {', '.join(res.get('output_tables', []))}")
-                if res.get("is_export"):
-                    details = res.get("export_details", [])
-                    if len(details) == 1:
-                        d = details[0]
-                        log_parts.append(f"Exported '{d['filename']}' ({d['row_count']:,} rows)")
-                    elif len(details) > 1:
-                        exp_lines = [f"Exported {len(details)} tables:"]
-                        for d in details:
-                            exp_lines.append(f"* {d['filename']} ({d['row_count']:,} rows)")
-                        log_parts.append("\n".join(exp_lines))
-                    else:
-                        log_parts.append(f"Exported {res.get('row_count', 0):,} rows to {res.get('output_file')}")
-                if not log_parts:
-                    log_parts.append("Executed successfully.")
+                if (
+                    ed.report.name == active_report.name
+                    and ed.flow_controller.flow_name == flow_name
+                ):
+                    target_editor = ed
+                    break
+            except Exception:
+                continue
 
-                results_log.append(f"[{idx}/{len(queries_order)}] 📦 {qname}:\n" + "\n".join(log_parts) if any("\n" in p for p in log_parts) else f"[{idx}/{len(queries_order)}] 📦 {qname}: {' | '.join(log_parts)}")
+        if target_editor is None:
+            target_editor = ProcessFlowEditorWindow(
+                report=active_report,
+                flow_info=flow_info,
+                flow_name=flow_name,
+                app_controller=self.controller,
+                parent=None,
+            )
+            self.editor_windows.append(target_editor)
+            target_editor.destroyed.connect(
+                lambda *_, w=target_editor: self.editor_windows.remove(w) if w in self.editor_windows else None
+            )
+
+        target_editor.show()
+        target_editor.raise_()
+        target_editor.activateWindow()
+        target_editor._on_run_flow()
+
+    def closeEvent(self, event) -> None:
+        """Ensure all child process flow editor windows and background watchers close cleanly on exit."""
+        for editor in list(self.editor_windows):
+            try:
+                if not editor.close():
+                    event.ignore()
+                    return
             except Exception as e:
-                failed_node_name = qname
-                err = f"Execution failed: {e}"
-                errors.append(f"{qname}: {e}")
-                results_log.append(f"[{idx}/{len(queries_order)}] ❌ {qname}: {err}")
-                break
+                logger.debug(f"Error closing editor window on shutdown: {e}")
 
-        if errors:
-            failed_node_header = f"Error in node: '{failed_node_name}'\n\n" if failed_node_name else ""
-            self.status_bar.showMessage(f"Process flow '{flow_ctrl.flow_name}' failed.", 5000)
-            QMessageBox.critical(
-                self,
-                "Process Flow Execution Error",
-                f"{failed_node_header}Process flow stopped due to an error:\n\n" + "\n".join(results_log),
-            )
-        else:
-            self.status_bar.showMessage(f"Process flow '{flow_ctrl.flow_name}' completed.", 5000)
-            QMessageBox.information(
-                self,
-                "Process Flow Completed",
-                f"Successfully executed all {len(queries_order)} query step(s):\n\n" + "\n".join(results_log),
-            )
+        if self.controller and hasattr(self.controller, "watcher"):
+            try:
+                self.controller.watcher.stop()
+            except Exception:
+                pass
+
+        QApplication.processEvents()
+        event.accept()
+        super().closeEvent(event)
+
+
 

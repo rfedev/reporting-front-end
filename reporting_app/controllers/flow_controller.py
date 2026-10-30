@@ -3,7 +3,7 @@
 from collections import defaultdict, deque
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 from PySide6.QtCore import QObject, Signal
 
 from reporting_app.core.models import ProcessFlowInfo, QueryInfo, Report
@@ -34,13 +34,7 @@ class ProcessFlowController(QObject):
         if flow_info:
             self.file_path = flow_info.file_path
         else:
-            # Check queries/ directory first
-            queries_path = report.folder_path / "queries" / f"{self.flow_name}.json"
-            root_path = report.folder_path / f"{self.flow_name}.json"
-            if root_path.exists() and not queries_path.exists():
-                self.file_path = root_path
-            else:
-                self.file_path = queries_path
+            self.file_path = report.folder_path / "queries" / f"{self.flow_name}.json"
 
         self.flow_data: Dict[str, Any] = {}
         self.parameter_defaults: Dict[str, str] = {}
@@ -53,10 +47,12 @@ class ProcessFlowController(QObject):
             self.parameter_defaults = self.flow_data.get("parameter_defaults", {})
         else:
             self.flow_data = {
+                "version": FlowStorage.FLOW_SCHEMA_VERSION,
                 "flow_name": self.flow_name,
                 "report_name": self.report.name,
                 "query_names": [],
                 "parameter_defaults": {},
+                "node_positions": {},
                 "show_full_table_names": False,
                 "csv_filenames": {},
                 "graph_session": {},
@@ -101,9 +97,27 @@ class ProcessFlowController(QObject):
         """Set CSV import group configurations for this flow."""
         self.flow_data["csv_imports"] = imports
 
+    def get_lan_output_folder(self) -> str:
+        """Return optional secondary LAN destination folder for output tables."""
+        return self.flow_data.get("lan_output_folder", "") or ""
+
+    def set_lan_output_folder(self, folder_path: str) -> None:
+        """Set optional secondary LAN destination folder for output tables."""
+        self.flow_data["lan_output_folder"] = folder_path.strip()
+
     def get_graph_session(self) -> Dict[str, Any]:
         """Return the serialized NodeGraph session dictionary."""
         return self.flow_data.get("graph_session", {})
+
+    def get_node_positions(self) -> Dict[str, Tuple[float, float]]:
+        """Return persisted node positions mapping node name -> (x, y)."""
+        raw = self.flow_data.get("node_positions", {})
+        result: Dict[str, Tuple[float, float]] = {}
+        if isinstance(raw, dict):
+            for k, v in raw.items():
+                if isinstance(v, (list, tuple)) and len(v) >= 2:
+                    result[str(k)] = (float(v[0]), float(v[1]))
+        return result
 
     def get_view_state(self) -> Dict[str, Any]:
         """Return persisted canvas view state (zoom, scene_center)."""
@@ -121,6 +135,15 @@ class ProcessFlowController(QObject):
             ]
         if "csv_filenames" in self.flow_data and old_name in self.flow_data["csv_filenames"]:
             self.flow_data["csv_filenames"][new_name] = self.flow_data["csv_filenames"].pop(old_name)
+        if "node_positions" in self.flow_data and isinstance(self.flow_data["node_positions"], dict):
+            pos_map = self.flow_data["node_positions"]
+            if old_name in pos_map:
+                pos_map[new_name] = pos_map.pop(old_name)
+            for suffix in ("[Out]", "[CSV]", "[In]", "[Convergence]"):
+                old_k = f"{old_name} {suffix}"
+                new_k = f"{new_name} {suffix}"
+                if old_k in pos_map:
+                    pos_map[new_k] = pos_map.pop(old_k)
 
     def get_query_names(self) -> List[str]:
         """Return list of query names used in this flow."""
@@ -154,12 +177,16 @@ class ProcessFlowController(QObject):
         exec_nodes: Dict[str, Dict[str, Any]] = {}
         for nid, ndata in nodes_dict.items():
             ntype = ndata.get("type_")
+            pos = ndata.get("pos", [0.0, 0.0])
+            pos_x = float(pos[0]) if len(pos) > 0 else 0.0
+            pos_y = float(pos[1]) if len(pos) > 1 else 0.0
+
             if ntype == "reporting.nodes.QueryNode":
                 qname = ndata.get("custom", {}).get("query_name") or ndata.get("name")
-                exec_nodes[nid] = {"type": "query", "id": nid, "name": qname}
+                exec_nodes[nid] = {"type": "query", "id": nid, "name": qname, "pos": (pos_x, pos_y)}
             elif ntype == "reporting.nodes.ImportCsvNode":
                 iname = ndata.get("name")
-                exec_nodes[nid] = {"type": "import_csv", "id": nid, "name": iname}
+                exec_nodes[nid] = {"type": "import_csv", "id": nid, "name": iname, "pos": (pos_x, pos_y)}
 
         if not exec_nodes:
             return [{"type": "query", "id": q, "name": q} for q in self.get_query_names()]
@@ -179,24 +206,37 @@ class ProcessFlowController(QObject):
                         adj_list[out_id].append(in_id)
                         in_degree[in_id] += 1
 
-        # Kahn's algorithm for topological sort
-        queue = deque([nid for nid, deg in in_degree.items() if deg == 0])
+        # Kahn's algorithm with deterministic tie-breaking (canvas X then Y, then name)
+        def sort_key(node_id: str):
+            info = exec_nodes[node_id]
+            px, py = info.get("pos", (0.0, 0.0))
+            return (px, py, str(info.get("name", "")))
+
+        ready = [nid for nid, deg in in_degree.items() if deg == 0]
+        ready.sort(key=sort_key)
+        queue = deque(ready)
         ordered_ids: List[str] = []
 
         while queue:
             curr = queue.popleft()
             ordered_ids.append(curr)
+            newly_ready = []
             for neighbor in adj_list[curr]:
                 in_degree[neighbor] -= 1
                 if in_degree[neighbor] == 0:
-                    queue.append(neighbor)
+                    newly_ready.append(neighbor)
+            newly_ready.sort(key=sort_key)
+            queue.extend(newly_ready)
 
-        # Include any remaining nodes (in case of cycles or disconnected components)
-        for nid in exec_nodes:
-            if nid not in ordered_ids:
-                ordered_ids.append(nid)
+        # Include any remaining nodes (cycles or disconnected components), sorted by canvas pos
+        remaining = [nid for nid in exec_nodes if nid not in ordered_ids]
+        remaining.sort(key=sort_key)
+        ordered_ids.extend(remaining)
 
-        return [exec_nodes[nid] for nid in ordered_ids]
+        return [
+            {"type": exec_nodes[nid]["type"], "id": exec_nodes[nid]["id"], "name": exec_nodes[nid]["name"]}
+            for nid in ordered_ids
+        ]
 
     def get_execution_order(self, graph_session: Optional[Dict[str, Any]] = None) -> List[str]:
         """Determine topological execution order of queries in the process flow."""
@@ -216,6 +256,7 @@ class ProcessFlowController(QObject):
         parameter_date_options: Optional[Dict[str, str]] = None,
         selected_filename_date_param: Optional[str] = None,
         has_report_date: Optional[bool] = None,
+        lan_output_folder: Optional[str] = None,
     ) -> None:
         """Save process flow to JSON and update database parameter defaults."""
         self.parameter_defaults.update(parameter_defaults)
@@ -237,6 +278,14 @@ class ProcessFlowController(QObject):
             self.flow_data["selected_filename_date_param"] = selected_filename_date_param
         if has_report_date is not None:
             self.flow_data["has_report_date"] = has_report_date
+        if lan_output_folder is not None:
+            self.flow_data["lan_output_folder"] = lan_output_folder.strip()
+
+        extracted_pos = FlowStorage._extract_node_positions(
+            graph_session,
+            existing_positions=self.flow_data.get("node_positions"),
+        )
+        self.flow_data["node_positions"] = extracted_pos
 
         FlowStorage.save(
             file_path=self.file_path,
@@ -253,6 +302,8 @@ class ProcessFlowController(QObject):
             parameter_date_options=self.flow_data.get("parameter_date_options", {}),
             selected_filename_date_param=self.flow_data.get("selected_filename_date_param"),
             has_report_date=self.flow_data.get("has_report_date"),
+            lan_output_folder=self.flow_data.get("lan_output_folder"),
+            node_positions=extracted_pos,
         )
 
         # Update persistence layer defaults if repository is provided

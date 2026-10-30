@@ -67,13 +67,20 @@ class FlowErrorDialog(QDialog):
         )
         layout.addWidget(self.error_text_edit, stretch=1)
 
-        # Optional ADC hint
+        # Optional contextual hints for permissions or credentials
         lower_err = full_text.lower()
-        if any(k in lower_err for k in ("credentials", "auth", "401", "403", "reauthentication", "gcloud")):
+        if any(k in lower_err for k in ("roles/bigquery", "bigquery.jobs.create", "iam permission", "access denied", "403")):
             hint_lbl = QLabel(
-                "Tip: If authentication expired, run 'gcloud auth application-default login' in your terminal."
+                "💡 BigQuery Permission Tip: Ensure your Google Cloud account has 'roles/bigquery.jobUser' on the project to execute queries, and 'roles/bigquery.dataViewer' to access tables."
             )
-            hint_lbl.setStyleSheet("color: #9ca3af; font-size: 11px; font-style: italic;")
+            hint_lbl.setStyleSheet("color: #60a5fa; font-size: 11px; font-weight: 500;")
+            hint_lbl.setWordWrap(True)
+            layout.addWidget(hint_lbl)
+        elif any(k in lower_err for k in ("credentials", "auth", "401", "reauthentication", "gcloud")):
+            hint_lbl = QLabel(
+                "💡 Authentication Tip: If credentials expired or are missing, run 'gcloud auth application-default login' in your terminal."
+            )
+            hint_lbl.setStyleSheet("color: #fbbf24; font-size: 11px; font-style: italic;")
             hint_lbl.setWordWrap(True)
             layout.addWidget(hint_lbl)
 

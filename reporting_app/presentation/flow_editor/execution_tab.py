@@ -590,6 +590,7 @@ class FlowExecutionTab(QWidget):
         self._active_worker.step_started.connect(self._on_worker_step_started)
         self._active_worker.step_completed.connect(self._on_worker_step_completed)
         self._active_worker.flow_finished.connect(self._on_worker_flow_finished)
+        self._active_worker.finished.connect(self._on_worker_thread_terminated)
         self._active_worker.lan_transfer_started.connect(self._on_lan_transfer_started)
         self._active_worker.lan_transfer_progress.connect(self._on_lan_transfer_progress)
         self._active_worker.lan_transfer_completed.connect(self._on_lan_transfer_completed)
@@ -687,6 +688,20 @@ class FlowExecutionTab(QWidget):
 
         self.mark_step_completed(step_idx, total_steps, node_name, st, duration_sec, error_msg)
 
+    def _on_worker_thread_terminated(self) -> None:
+        """Fail-safe handler in case the QThread exits while status is still RUNNING."""
+        if self._run_status == "RUNNING":
+            self._exec_anim_timer.stop()
+            self._current_running_node_name = None
+            if not self._last_run_errors:
+                self._last_run_errors = ["Worker thread terminated unexpectedly."]
+            self.mark_flow_finished(False)
+            self.sync_canvas_nodes(True)
+            self.run_state_changed.emit()
+            self._show_status(f"{self._current_run_context_title} failed unexpectedly.", 5000)
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(0, self.open_error_dialog)
+
     def _on_worker_flow_finished(
         self,
         success: bool,
@@ -708,6 +723,8 @@ class FlowExecutionTab(QWidget):
             self._show_status(f"{self._current_run_context_title} was cancelled.", 5000)
         else:
             self._show_status(f"{self._current_run_context_title} failed.", 5000)
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(0, self.open_error_dialog)
 
     def _show_status(self, message: str, timeout: int = 0) -> None:
         if self.editor_window and hasattr(self.editor_window, "status_bar"):

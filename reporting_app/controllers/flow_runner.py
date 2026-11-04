@@ -30,7 +30,7 @@ class LanTransferWorker(threading.Thread):
         on_progress: Optional[Any] = None,
         on_completed: Optional[Any] = None,
         on_finished: Optional[Any] = None,
-        chunk_size: int = 1024 * 512,
+        chunk_size: int = 1024 * 1024 * 8,  # 8 MB chunks for optimal LAN transfer performance
     ):
         super().__init__(daemon=True, name="LanTransferWorker")
         self.lan_folder = Path(lan_folder)

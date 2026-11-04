@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import QEvent, QFileSystemWatcher, QObject, QPoint, QPointF, QRectF, QTimer, QUrl, Qt
-from PySide6.QtGui import QAction, QCursor, QDesktopServices, QKeySequence, QShortcut, QShowEvent
+from PySide6.QtGui import QAction, QColor, QCursor, QDesktopServices, QKeySequence, QShortcut, QShowEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -25,11 +25,14 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QProgressDialog,
+    QProxyStyle,
     QPushButton,
     QScrollArea,
     QSizePolicy,
     QSplitter,
     QStatusBar,
+    QStyle,
+    QStyleOptionMenuItem,
     QTextEdit,
     QToolBar,
     QToolButton,
@@ -836,15 +839,38 @@ class ProcessFlowEditorWindow(QMainWindow):
         self.appearance_btn.setPopupMode(QToolButton.InstantPopup)
         appearance_menu = QMenu(self.appearance_btn)
 
-        action_layout_h = appearance_menu.addAction("Auto Layout (Horizontal)")
+        class LowercaseGreyShortcutStyle(QProxyStyle):
+            def drawControl(self, element, opt, p, widget=None):
+                if element == QStyle.CE_MenuItem and isinstance(opt, QStyleOptionMenuItem):
+                    opt_copy = QStyleOptionMenuItem(opt)
+                    # Let the menu draw background and base text without the native shortcut text
+                    shortcut_str = opt.text.split("\t")[-1] if "\t" in opt.text else ""
+                    if shortcut_str:
+                        opt_copy.text = opt.text.split("\t")[0]
+                    super().drawControl(element, opt_copy, p, widget)
+
+                    if shortcut_str:
+                        p.save()
+                        p.setFont(opt.font)
+                        p.setPen(QColor("#9ca3af") if not (opt.state & QStyle.State_Selected) else QColor("#d1d5db"))
+                        # Align to the right edge with standard right padding (12px)
+                        text_rect = opt.rect.adjusted(0, 0, -12, 0)
+                        p.drawText(text_rect, Qt.AlignRight | Qt.AlignVCenter | Qt.TextSingleLine, shortcut_str.lower())
+                        p.restore()
+                        return
+                super().drawControl(element, opt, p, widget)
+
+        appearance_menu.setStyle(LowercaseGreyShortcutStyle())
+
+        action_layout_h = appearance_menu.addAction("Auto Layout (Horizontal)\th")
         action_layout_h.triggered.connect(lambda: self._auto_layout("horizontal"))
 
-        action_layout_v = appearance_menu.addAction("Auto Layout (Vertical)")
+        action_layout_v = appearance_menu.addAction("Auto Layout (Vertical)\tv")
         action_layout_v.triggered.connect(lambda: self._auto_layout("vertical"))
 
         appearance_menu.addSeparator()
 
-        action_fit = appearance_menu.addAction("Fit Graph")
+        action_fit = appearance_menu.addAction("Fit Graph\tf")
         action_fit.triggered.connect(self._fit_graph_to_canvas)
 
         appearance_menu.addSeparator()

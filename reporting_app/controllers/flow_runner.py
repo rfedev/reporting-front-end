@@ -477,6 +477,7 @@ class FlowWorker(QThread):
                         break
     
                     self.log_message.emit(f"[{idx}/{total_steps}] ⚙️ Running query {qname}...")
+                    logger.info(f"[{idx}/{total_steps}] >>> Starting step '{qname}' (file: {qpath})")
     
                     try:
                         custom_csv = self.csv_map.get(qname)

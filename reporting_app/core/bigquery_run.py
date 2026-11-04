@@ -204,6 +204,7 @@ def run_bigquery_script(
         f"Submitting BigQuery job for {query_name} (Project: {active_project}, "
         f"Export to CSV: {should_export}, Create Tables: {has_output_tables})"
     )
+    t_submit_start = datetime.now(timezone.utc)
     try:
         # Pass job_retry=None and explicit timeout so permission errors fail fast instead of retrying for 10-40 mins
         query_job = client.query(
@@ -215,12 +216,19 @@ def run_bigquery_script(
     except Exception as e:
         raise RuntimeError(format_bigquery_error(e, active_project)) from e
 
+    t_submit_end = datetime.now(timezone.utc)
+    submit_duration = (t_submit_end - t_submit_start).total_seconds()
+    job_id = getattr(query_job, "job_id", "unknown")
+    logger.info(f"[{query_name}] BigQuery Job created: {job_id} (API submission took {submit_duration:.2f}s)")
+
     if callable(on_job_created):
         try:
             on_job_created(query_job)
         except Exception as e:
             logger.debug(f"on_job_created callback error: {e}")
 
+    logger.info(f"[{query_name}] Waiting for BigQuery job {job_id} to complete...")
+    t_wait_start = datetime.now(timezone.utc)
     try:
         # Pass job_retry=None and bounded timeout for job completion
         results = query_job.result(
@@ -230,11 +238,16 @@ def run_bigquery_script(
     except Exception as e:
         raise RuntimeError(format_bigquery_error(e, active_project)) from e
 
+    t_wait_end = datetime.now(timezone.utc)
+    job_wait_duration = (t_wait_end - t_wait_start).total_seconds()
+    logger.info(f"[{query_name}] BigQuery server execution finished in {job_wait_duration:.2f}s")
+
     total_row_count = 0
     exported_paths: List[str] = []
     export_details: List[Dict[str, Any]] = []
 
     def export_row_iterator_to_file(row_iter: Any, out_file: Path) -> int:
+        t_export_start = datetime.now(timezone.utc)
         written_count = 0
         total_rows_meta = getattr(row_iter, "total_rows", None)
         auto_stream = (isinstance(total_rows_meta, (int, float)) and total_rows_meta > 500_000)
@@ -247,6 +260,7 @@ def run_bigquery_script(
             )
 
         if use_stream:
+            logger.info(f"[{query_name}] Streaming rows page-by-page to {out_file.name}...")
             with open(out_file, "w", newline="", encoding="utf-8") as csvfile:
                 writer = csv.writer(csvfile)
                 header_written = False
@@ -258,6 +272,7 @@ def run_bigquery_script(
                         writer.writerow(list(row.values()))
                         written_count += 1
         else:
+            logger.info(f"[{query_name}] Downloading result set to DataFrame for {out_file.name}...")
             try:
                 df = row_iter.to_dataframe(create_bqstorage_client=False)
                 df.to_csv(out_file, index=False)
@@ -274,6 +289,9 @@ def run_bigquery_script(
                                 header_written = True
                             writer.writerow(list(row.values()))
                             written_count += 1
+        t_export_end = datetime.now(timezone.utc)
+        export_dur = (t_export_end - t_export_start).total_seconds()
+        logger.info(f"[{query_name}] CSV export completed: {written_count:,} rows written to {out_file.name} in {export_dur:.2f}s")
         return written_count
 
     # Check child jobs for multi-statement scripts or telemetry
@@ -421,6 +439,15 @@ def run_bigquery_script(
             )
             if sm > 0:
                 slot_millis = sm
+
+    bytes_proc_str = f"{total_bytes_processed / (1024**2):.1f} MB" if total_bytes_processed is not None else "N/A"
+    bytes_billed_str = f"{total_bytes_billed / (1024**2):.1f} MB" if total_bytes_billed is not None else "N/A"
+    slot_sec_str = f"{slot_millis / 1000.0:.2f}s" if slot_millis is not None else "N/A"
+    cache_str = "YES" if cache_hit else "NO"
+    logger.info(
+        f"[{query_name}] Summary: total_wall={wall_duration_sec:.2f}s | bq_exec={bq_duration_sec:.2f}s | "
+        f"cached={cache_str} | processed={bytes_proc_str} | billed={bytes_billed_str} | slot_time={slot_sec_str}"
+    )
 
     return {
         "query_name": query_name,

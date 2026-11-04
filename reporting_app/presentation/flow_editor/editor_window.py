@@ -2506,10 +2506,12 @@ class ProcessFlowEditorWindow(QMainWindow):
             except Exception as e:
                 logger.debug(f"Auto-save prior to running flow encountered error: {e}")
 
-        # Consolidate parameters from parameter overlay directly
+        # Consolidate parameters from parameter overlay directly with fresh date recalculation
         param_values = dict(self.flow_controller.parameter_defaults)
         filename_date = ""
         if hasattr(self, "param_overlay"):
+            if hasattr(self.param_overlay, "refresh_calculated_dates"):
+                self.param_overlay.refresh_calculated_dates()
             overlay_vals = self.param_overlay.get_parameter_values()
             param_values.update(overlay_vals)
             self.flow_controller.parameter_defaults.update(param_values)

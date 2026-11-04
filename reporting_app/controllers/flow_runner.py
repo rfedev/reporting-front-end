@@ -309,7 +309,8 @@ class FlowWorker(QThread):
                         if not f_path or not d_table:
                             continue
     
-                        effective_date = calculate_import_file_date(date_option, flow_date=self.filename_date)
+                        from datetime import date
+                        effective_date = calculate_import_file_date(date_option, flow_date=self.filename_date, ref_date=date.today())
                         if effective_date:
                             f_path = format_filename_with_date(f_path, effective_date)
     

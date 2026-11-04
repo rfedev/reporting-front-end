@@ -45,7 +45,8 @@ class DatePickerPopup(QDialog):
         return qdate.toString("yyyy-MM-dd")
 
 
-from reporting_app.utils.date_calc import DATE_OPTIONS, calculate_date_for_option, is_date_param
+from reporting_app.presentation.widgets.date_preset_picker import DatePresetPicker
+from reporting_app.utils.date_calc import is_date_param
 
 
 class QueryRunDialog(QDialog):
@@ -98,17 +99,11 @@ class QueryRunDialog(QDialog):
                 default_val = self.initial_defaults.get(pname, param.default_value)
 
                 if is_date_param(pname):
-                    combo = QComboBox(self)
-                    for opt in DATE_OPTIONS:
-                        combo.addItem(opt)
+                    combo = DatePresetPicker(initial_preset="Pick Date", parent=self)
 
-                    # Remember last selected option or default to "pick date"
-                    last_opt = self._last_selected_date_options.get(pname, "pick date")
-                    idx = combo.findText(last_opt)
-                    if idx >= 0:
-                        combo.setCurrentIndex(idx)
-                    else:
-                        combo.setCurrentIndex(0)
+                    # Remember last selected option or default to "Pick Date"
+                    last_opt = self._last_selected_date_options.get(pname, "Pick Date")
+                    combo.set_preset(last_opt)
 
                     # Hidden or read-only text edit to hold the resulting date
                     edit = QLineEdit(default_val)
@@ -124,41 +119,45 @@ class QueryRunDialog(QDialog):
                     cur_qdate = QDate.fromString(default_val, "yyyy-MM-dd")
                     if cur_qdate.isValid():
                         date_picker.setDate(cur_qdate)
+                        combo.set_picked_date(cur_qdate.toString("yyyy-MM-dd"))
                     else:
                         date_picker.setDate(QDate.currentDate())
+                        combo.set_picked_date(QDate.currentDate().toString("yyyy-MM-dd"))
                     self.date_pickers[pname] = date_picker
 
                     def make_combo_handler(p=pname, c=combo, dp=date_picker, ed=edit):
                         def on_option_changed(text):
                             self._last_selected_date_options[p] = text
-                            if text == "pick date":
+                            if text.lower() == "pick date":
                                 dp.setVisible(True)
                                 ed.setText(dp.date().toString("yyyy-MM-dd"))
                             else:
                                 dp.setVisible(False)
-                                calculated = calculate_date_for_option(text)
-                                ed.setText(calculated)
+                                ed.setText(c.evaluate_current_date())
                         return on_option_changed
 
-                    def make_date_handler(ed=edit):
+                    def make_date_handler(p=pname, c=combo, ed=edit):
                         def on_date_changed(new_date):
-                            ed.setText(new_date.toString("yyyy-MM-dd"))
+                            val = new_date.toString("yyyy-MM-dd")
+                            c.set_picked_date(val)
+                            if c.get_preset().lower() == "pick date":
+                                ed.setText(val)
                         return on_date_changed
 
-                    combo.currentTextChanged.connect(make_combo_handler())
+                    combo.preset_changed.connect(make_combo_handler())
                     date_picker.dateChanged.connect(make_date_handler())
 
                     row_layout.addWidget(combo)
                     row_layout.addWidget(date_picker)
 
                     # Initial trigger
-                    cur_opt = combo.currentText()
-                    if cur_opt == "pick date":
+                    cur_opt = combo.get_preset()
+                    if cur_opt.lower() == "pick date":
                         date_picker.setVisible(True)
                         edit.setText(date_picker.date().toString("yyyy-MM-dd"))
                     else:
                         date_picker.setVisible(False)
-                        edit.setText(calculate_date_for_option(cur_opt))
+                        edit.setText(combo.evaluate_current_date())
 
                     form_layout.addRow(f"{{{pname}}}:", row_layout)
                 else:
@@ -187,5 +186,13 @@ class QueryRunDialog(QDialog):
         main_layout.addLayout(btn_layout)
 
     def get_parameter_values(self) -> Dict[str, str]:
-        """Return user entered key/value pairs for all parameters."""
-        return {pname: edit.text().strip() for pname, edit in self.param_edits.items()}
+        """Return user entered key/value pairs for all parameters, recalculating dynamic dates."""
+        res = {}
+        for pname, edit in self.param_edits.items():
+            if pname in self.date_combos:
+                combo = self.date_combos[pname]
+                if combo.get_preset().lower() != "pick date":
+                    eval_val = combo.evaluate_current_date()
+                    edit.setText(eval_val)
+            res[pname] = edit.text().strip()
+        return res

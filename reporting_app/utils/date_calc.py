@@ -1,33 +1,47 @@
 """Date helper functions for dynamic date parameters in queries and process flows."""
 
+import calendar
 from datetime import date, timedelta
-from typing import Optional
+from typing import Optional, List, Tuple
 
 
-DATE_OPTIONS = [
-    "pick date",
-    "prev week",
-    "prev month",
-    "prev quarter",
-    "prev year",
-    "prev half year",
-]
+# Days of week names for week submenus
+DAYS_OF_WEEK = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+DAY_INDEX_MAP = {
+    "mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6,
+    "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+    "friday": 4, "saturday": 5, "sunday": 6
+}
 
+# Month items
+MONTH_ITEMS = ["1st of Month", "1st Workday", "Last Workday", "Month End"]
+
+# Quarter items
+QUARTER_ITEMS = ["1st of Qtr", "1st Workday", "Last Workday", "Quarter End"]
+
+# Backward-compatible constant aliases
 IMPORT_DATE_OPTIONS = [
     "Flow Date",
     "None",
-    "Prev Week • Mon",
-    "Prev Week • Last Workday",
-    "Prev Week • Sun",
-    "Prev Month • 1st",
-    "Prev Month • 1st Workday",
-    "Prev Month • Last Workday",
-    "Prev Month • End",
-    "Prev Qtr • 1st",
-    "Prev Qtr • 1st Workday",
-    "Prev Qtr • Last Workday",
-    "Prev Qtr • End",
+    "Current • Week • Mon",
+    "Current • Week • Sun",
+    "Current • Month • 1st of Month",
+    "Current • Month • 1st Workday",
+    "Current • Month • Last Workday",
+    "Current • Month • Month End",
+    "Previous • Week • Mon",
+    "Previous • Week • Sun",
+    "Previous • Month • 1st of Month",
+    "Previous • Month • 1st Workday",
+    "Previous • Month • Last Workday",
+    "Previous • Month • Month End",
+    "Previous • Quarter • 1st of Qtr",
+    "Previous • Quarter • 1st Workday",
+    "Previous • Quarter • Last Workday",
+    "Previous • Quarter • Quarter End",
 ]
+
+DATE_OPTIONS = ["Pick Date", "Current • Month • Month End", "Previous • Month • Month End"]
 
 
 def _first_workday(d: date) -> date:
@@ -48,131 +62,141 @@ def _last_workday(d: date) -> date:
     return d
 
 
+def evaluate_date_preset(
+    preset: Optional[str],
+    ref_date: Optional[date] = None,
+    flow_date: Optional[str] = None,
+) -> str:
+    """Resolve a YYYY-MM-DD date string based on the hierarchical date preset.
+
+    Supported hierarchies:
+    - "Pick Date" -> returns today's date (or ref_date)
+    - "Flow Date" -> returns flow_date
+    - "None" -> returns ""
+    - "Current • Week • <Mon..Sun>"
+    - "Previous • Week • <Mon..Sun>"
+    - "Current • Month • <1st of Month | 1st Workday | Last Workday | Month End>"
+    - "Previous • Month • <1st of Month | 1st Workday | Last Workday | Month End>"
+    - "Current • Quarter • <1st of Qtr | 1st Workday | Last Workday | Quarter End>"
+    - "Previous • Quarter • <1st of Qtr | 1st Workday | Last Workday | Quarter End>"
+    """
+    if not preset:
+        return ""
+
+    raw_opt = preset.strip()
+    opt_lower = raw_opt.lower()
+
+    if opt_lower == "none":
+        return ""
+
+    if opt_lower == "flow date":
+        return (flow_date or "").strip()
+
+    if opt_lower in ("pick date", "pick_date"):
+        return (ref_date or date.today()).strftime("%Y-%m-%d")
+
+    if ref_date is None:
+        ref_date = date.today()
+
+    # Split hierarchical parts separated by "•", "->", or ":"
+    clean = raw_opt.replace("->", "•").replace(":", "•")
+    parts = [p.strip() for p in clean.split("•")]
+
+    if len(parts) >= 3:
+        period_type = parts[0].lower()  # "current" or "previous" / "prev"
+        cadence = parts[1].lower()      # "week", "month", or "quarter" / "qtr"
+        item = parts[2].lower()         # specific cadence sub-item
+
+        is_prev = period_type in ("previous", "prev")
+
+        # --- WEEK CADENCE ---
+        if cadence == "week":
+            # Monday of current week (ISO Monday is 0)
+            curr_week_mon = ref_date - timedelta(days=ref_date.weekday())
+            base_mon = curr_week_mon - timedelta(days=7) if is_prev else curr_week_mon
+
+            # Check if item matches a day name
+            target_idx = None
+            for d_name, idx in DAY_INDEX_MAP.items():
+                if item == d_name or item.startswith(d_name):
+                    target_idx = idx
+                    break
+
+            if target_idx is not None:
+                return (base_mon + timedelta(days=target_idx)).strftime("%Y-%m-%d")
+            if "last workday" in item:
+                return (base_mon + timedelta(days=4)).strftime("%Y-%m-%d")
+
+        # --- MONTH CADENCE ---
+        elif cadence == "month":
+            if is_prev:
+                y = ref_date.year
+                m = ref_date.month - 1
+                if m == 0:
+                    m = 12
+                    y -= 1
+            else:
+                y = ref_date.year
+                m = ref_date.month
+
+            last_day = calendar.monthrange(y, m)[1]
+            m_start = date(y, m, 1)
+            m_end = date(y, m, last_day)
+
+            if "1st workday" in item:
+                return _first_workday(m_start).strftime("%Y-%m-%d")
+            if "1st" in item:
+                return m_start.strftime("%Y-%m-%d")
+            if "last workday" in item:
+                return _last_workday(m_end).strftime("%Y-%m-%d")
+            if "end" in item or "last" in item:
+                return m_end.strftime("%Y-%m-%d")
+
+        # --- QUARTER CADENCE ---
+        elif cadence in ("quarter", "qtr"):
+            curr_q = (ref_date.month - 1) // 3 + 1
+            if is_prev:
+                if curr_q == 1:
+                    target_q = 4
+                    target_y = ref_date.year - 1
+                else:
+                    target_q = curr_q - 1
+                    target_y = ref_date.year
+            else:
+                target_q = curr_q
+                target_y = ref_date.year
+
+            q_start_month = (target_q - 1) * 3 + 1
+            q_end_month = target_q * 3
+            q_last_day = calendar.monthrange(target_y, q_end_month)[1]
+            q_start = date(target_y, q_start_month, 1)
+            q_end = date(target_y, q_end_month, q_last_day)
+
+            if "1st workday" in item:
+                return _first_workday(q_start).strftime("%Y-%m-%d")
+            if "1st" in item:
+                return q_start.strftime("%Y-%m-%d")
+            if "last workday" in item:
+                return _last_workday(q_end).strftime("%Y-%m-%d")
+            if "end" in item or "last" in item:
+                return q_end.strftime("%Y-%m-%d")
+
+    # If unrecognized, cleanly default to Pick Date (ref_date or today)
+    return (ref_date or date.today()).strftime("%Y-%m-%d")
+
+
 def calculate_import_file_date(
     date_option: Optional[str],
     flow_date: Optional[str] = None,
     ref_date: Optional[date] = None,
 ) -> str:
-    """Resolve the YYYY-MM-DD date string for an imported file based on its per-file date option.
-
-    Relative options ('Prev Week • ...', 'Prev Month • ...', 'Prev Qtr • ...') are calculated
-    relative to ref_date (defaults to today).
-    """
-    if date_option is not None and str(date_option).strip().lower() == "none":
-        return ""
-
-    opt = (date_option or "Flow Date").strip()
-    if not opt or opt.lower() == "flow date":
-        return (flow_date or "").strip()
-
-    if ref_date is None:
-        ref_date = date.today()
-
-    import calendar
-
-    # Previous Week options (ISO week: Monday = 0, Sunday = 6)
-    prev_week_mon = ref_date - timedelta(days=ref_date.weekday() + 7)
-    if opt == "Prev Week • Mon":
-        return prev_week_mon.strftime("%Y-%m-%d")
-    if opt == "Prev Week • Last Workday":
-        return (prev_week_mon + timedelta(days=4)).strftime("%Y-%m-%d")
-    if opt == "Prev Week • Sun":
-        return (prev_week_mon + timedelta(days=6)).strftime("%Y-%m-%d")
-
-    # Previous Month options
-    prev_m_year = ref_date.year
-    prev_m_month = ref_date.month - 1
-    if prev_m_month == 0:
-        prev_m_month = 12
-        prev_m_year -= 1
-    prev_m_last_day = calendar.monthrange(prev_m_year, prev_m_month)[1]
-    prev_m_start = date(prev_m_year, prev_m_month, 1)
-    prev_m_end = date(prev_m_year, prev_m_month, prev_m_last_day)
-
-    if opt == "Prev Month • 1st":
-        return prev_m_start.strftime("%Y-%m-%d")
-    if opt == "Prev Month • 1st Workday":
-        return _first_workday(prev_m_start).strftime("%Y-%m-%d")
-    if opt == "Prev Month • Last Workday":
-        return _last_workday(prev_m_end).strftime("%Y-%m-%d")
-    if opt == "Prev Month • End":
-        return prev_m_end.strftime("%Y-%m-%d")
-
-    # Previous Quarter options
-    curr_q = (ref_date.month - 1) // 3 + 1
-    if curr_q == 1:
-        prev_q = 4
-        prev_q_year = ref_date.year - 1
-    else:
-        prev_q = curr_q - 1
-        prev_q_year = ref_date.year
-
-    q_start_month = (prev_q - 1) * 3 + 1
-    q_end_month = prev_q * 3
-    q_end_last_day = calendar.monthrange(prev_q_year, q_end_month)[1]
-    prev_q_start = date(prev_q_year, q_start_month, 1)
-    prev_q_end = date(prev_q_year, q_end_month, q_end_last_day)
-
-    if opt == "Prev Qtr • 1st":
-        return prev_q_start.strftime("%Y-%m-%d")
-    if opt == "Prev Qtr • 1st Workday":
-        return _first_workday(prev_q_start).strftime("%Y-%m-%d")
-    if opt == "Prev Qtr • Last Workday":
-        return _last_workday(prev_q_end).strftime("%Y-%m-%d")
-    if opt == "Prev Qtr • End":
-        return prev_q_end.strftime("%Y-%m-%d")
-
-    return (flow_date or "").strip()
+    """Wrapper for calculate_import_file_date using evaluate_date_preset."""
+    return evaluate_date_preset(date_option, ref_date=ref_date, flow_date=flow_date)
 
 
 def calculate_date_for_option(option: str, ref_date: Optional[date] = None) -> str:
-    """Calculate date string in YYYY-MM-DD format based on selected date option."""
-    if ref_date is None:
-        ref_date = date.today()
-
-    opt = option.lower().strip()
-
-    if opt == "prev week":
-        res = ref_date - timedelta(days=7)
-    elif opt == "prev month":
-        year = ref_date.year
-        month = ref_date.month - 1
-        if month == 0:
-            month = 12
-            year -= 1
-        import calendar
-        max_day = calendar.monthrange(year, month)[1]
-        day = min(ref_date.day, max_day)
-        res = date(year, month, day)
-    elif opt == "prev quarter":
-        year = ref_date.year
-        month = ref_date.month - 3
-        while month <= 0:
-            month += 12
-            year -= 1
-        import calendar
-        max_day = calendar.monthrange(year, month)[1]
-        day = min(ref_date.day, max_day)
-        res = date(year, month, day)
-    elif opt == "prev half year":
-        year = ref_date.year
-        month = ref_date.month - 6
-        while month <= 0:
-            month += 12
-            year -= 1
-        import calendar
-        max_day = calendar.monthrange(year, month)[1]
-        day = min(ref_date.day, max_day)
-        res = date(year, month, day)
-    elif opt == "prev year":
-        try:
-            res = ref_date.replace(year=ref_date.year - 1)
-        except ValueError:
-            res = date(ref_date.year - 1, 2, 28)
-    else:
-        res = ref_date
-
-    return res.strftime("%Y-%m-%d")
+    """Wrapper for calculate_date_for_option using evaluate_date_preset."""
+    return evaluate_date_preset(option, ref_date=ref_date)
 
 
 def is_date_param(param_name: str) -> bool:

@@ -16,7 +16,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from reporting_app.utils.date_calc import DATE_OPTIONS, calculate_date_for_option, is_date_param
+from reporting_app.utils.date_calc import is_date_param
+from reporting_app.presentation.widgets.date_preset_picker import DatePresetPicker
 
 REPORT_DATE_PARAM = "Report Date"
 
@@ -57,6 +58,21 @@ class CanvasParameterOverlay(QFrame):
                 font-size: 12px;
                 text-align: left;
                 padding: 2px;
+            }
+            QPushButton#date_preset_picker {
+                text-align: left;
+                padding-left: 10px;
+                padding-right: 20px;
+                padding-top: 3px;
+                padding-bottom: 3px;
+                border: 1px solid #4a5568;
+                border-radius: 3px;
+                background-color: #1a202c;
+                color: #f7fafc;
+                font-size: 11px;
+            }
+            QPushButton#date_preset_picker:hover {
+                background-color: #2d3748;
             }
             QPushButton#toggle_btn:hover {
                 color: #ffffff;
@@ -205,8 +221,9 @@ class CanvasParameterOverlay(QFrame):
             if txt:
                 self._param_values[pname] = txt
         for pname, combo in self._date_combos.items():
-            self._last_selected_date_options[pname] = combo.currentText()
-            if combo.currentText() == "pick date" and pname in self._date_pickers:
+            preset_val = combo.get_preset() if hasattr(combo, "get_preset") else combo.currentText()
+            self._last_selected_date_options[pname] = preset_val
+            if preset_val.lower() == "pick date" and pname in self._date_pickers:
                 self._param_values[pname] = self._date_pickers[pname].date().toString("yyyy-MM-dd")
 
         if current_defaults:
@@ -287,14 +304,11 @@ class CanvasParameterOverlay(QFrame):
                 row_layout.setContentsMargins(0, 0, 0, 0)
                 row_layout.setSpacing(4)
 
-                combo = QComboBox(row_widget)
-                combo.setMinimumWidth(105)
-                for opt in DATE_OPTIONS:
-                    combo.addItem(opt)
+                combo = DatePresetPicker(initial_preset="Pick Date", parent=row_widget)
+                combo.setMinimumWidth(110)
 
-                saved_opt = self._last_selected_date_options.get(pname, "today" if is_report_date else "pick date")
-                idx = combo.findText(saved_opt)
-                combo.setCurrentIndex(idx if idx >= 0 else 0)
+                saved_opt = self._last_selected_date_options.get(pname, "Pick Date")
+                combo.set_preset(saved_opt)
 
                 date_picker = QDateEdit(row_widget)
                 date_picker.setMinimumWidth(105)
@@ -302,7 +316,9 @@ class CanvasParameterOverlay(QFrame):
                 date_picker.setDisplayFormat("yyyy-MM-dd")
 
                 parsed_date = QDate.fromString(init_val, "yyyy-MM-dd")
-                date_picker.setDate(parsed_date if parsed_date.isValid() else QDate.currentDate())
+                cur_qdate = parsed_date if parsed_date.isValid() else QDate.currentDate()
+                date_picker.setDate(cur_qdate)
+                combo.set_picked_date(cur_qdate.toString("yyyy-MM-dd"))
 
                 self._date_combos[pname] = combo
                 self._date_pickers[pname] = date_picker
@@ -310,12 +326,12 @@ class CanvasParameterOverlay(QFrame):
                 def make_combo_handler(p=pname, c=combo, dp=date_picker):
                     def on_opt_changed(text):
                         self._last_selected_date_options[p] = text
-                        if text == "pick date":
+                        if text.lower() == "pick date":
                             dp.setVisible(True)
                             val = dp.date().toString("yyyy-MM-dd")
                         else:
                             dp.setVisible(False)
-                            val = calculate_date_for_option(text)
+                            val = c.evaluate_current_date()
                         self._param_values[p] = val
                         self._update_overlay_size()
                         self.parameter_changed.emit(p, val)
@@ -323,16 +339,18 @@ class CanvasParameterOverlay(QFrame):
                             self.filename_date_changed.emit(val)
                     return on_opt_changed
 
-                def make_dp_handler(p=pname):
+                def make_dp_handler(p=pname, c=combo):
                     def on_date_changed(new_date):
                         val = new_date.toString("yyyy-MM-dd")
-                        self._param_values[p] = val
-                        self.parameter_changed.emit(p, val)
-                        if self._selected_filename_date_param == p:
-                            self.filename_date_changed.emit(val)
+                        c.set_picked_date(val)
+                        if c.get_preset().lower() == "pick date":
+                            self._param_values[p] = val
+                            self.parameter_changed.emit(p, val)
+                            if self._selected_filename_date_param == p:
+                                self.filename_date_changed.emit(val)
                     return on_date_changed
 
-                combo.currentTextChanged.connect(make_combo_handler())
+                combo.preset_changed.connect(make_combo_handler())
                 date_picker.dateChanged.connect(make_dp_handler())
 
                 row_layout.addWidget(combo)
@@ -375,13 +393,13 @@ class CanvasParameterOverlay(QFrame):
                     chk.toggled.connect(make_chk_handler())
                     row_layout.addWidget(chk)
 
-                cur_opt = combo.currentText()
-                if cur_opt == "pick date":
+                cur_opt = combo.get_preset()
+                if cur_opt.lower() == "pick date":
                     date_picker.setVisible(True)
                     val = date_picker.date().toString("yyyy-MM-dd")
                 else:
                     date_picker.setVisible(False)
-                    val = calculate_date_for_option(cur_opt)
+                    val = combo.evaluate_current_date()
                 self._param_values[pname] = val
 
                 self.form_layout.addRow(lbl, row_widget)
@@ -458,6 +476,26 @@ class CanvasParameterOverlay(QFrame):
     def has_report_date(self) -> bool:
         """Return True if Report Date parameter is active."""
         return self._has_report_date
+
+    def refresh_calculated_dates(self) -> Dict[str, str]:
+        """Recalculate dynamic preset date parameters prior to execution and update values."""
+        updated: Dict[str, str] = {}
+        for pname, combo in self._date_combos.items():
+            preset = combo.get_preset()
+            if preset.lower() != "pick date":
+                new_val = combo.evaluate_current_date()
+                self._param_values[pname] = new_val
+                updated[pname] = new_val
+                self.parameter_changed.emit(pname, new_val)
+                if self._selected_filename_date_param == pname:
+                    self.filename_date_changed.emit(new_val)
+            else:
+                dp = self._date_pickers.get(pname)
+                if dp:
+                    val = dp.date().toString("yyyy-MM-dd")
+                    self._param_values[pname] = val
+                    updated[pname] = val
+        return updated
 
     def get_parameter_values(self) -> Dict[str, str]:
         """Return currently entered values for all parameters."""

@@ -23,7 +23,8 @@ from PySide6.QtWidgets import (
 )
 
 from reporting_app.presentation.flow_editor.schema_dialog import SchemaEditorDialog
-from reporting_app.utils.date_calc import IMPORT_DATE_OPTIONS, calculate_import_file_date
+from reporting_app.presentation.widgets.date_preset_picker import DatePresetPicker
+from reporting_app.utils.date_calc import calculate_import_file_date
 
 
 class SelectOutputTablesDialog(QDialog):
@@ -269,20 +270,13 @@ class ImportFilesDialog(QDialog):
         headers_cb.setChecked(has_headers)
         r1.addWidget(headers_cb)
 
-        date_combo = QComboBox(self.container)
-        date_combo.setFixedWidth(185)
-        for i, opt in enumerate(IMPORT_DATE_OPTIONS):
-            date_combo.addItem(opt)
-            if opt == "Flow Date":
-                date_combo.setItemData(i, "Use the date set in the process flow", Qt.ToolTipRole)
-            elif opt == "None":
-                date_combo.setItemData(i, "Do not translate %date% patterns for this file", Qt.ToolTipRole)
-            else:
-                resolved = calculate_import_file_date(opt)
-                date_combo.setItemData(i, f"{opt} ({resolved})", Qt.ToolTipRole)
-
-        opt_idx = date_combo.findText(date_option)
-        date_combo.setCurrentIndex(opt_idx if opt_idx >= 0 else 0)
+        date_combo = DatePresetPicker(
+            initial_preset=date_option or "Flow Date",
+            include_flow_date=True,
+            include_none=True,
+            parent=self.container,
+        )
+        date_combo.setFixedWidth(200)
 
         def update_date_combo_tooltip(selected_text: str):
             if selected_text == "Flow Date":
@@ -293,8 +287,8 @@ class ImportFilesDialog(QDialog):
                 resolved = calculate_import_file_date(selected_text)
                 date_combo.setToolTip(f"Date for %...% translation: {selected_text} -> {resolved}")
 
-        update_date_combo_tooltip(date_combo.currentText())
-        date_combo.currentTextChanged.connect(update_date_combo_tooltip)
+        update_date_combo_tooltip(date_combo.get_preset())
+        date_combo.preset_changed.connect(update_date_combo_tooltip)
         r1.addWidget(date_combo)
 
         del_btn = QPushButton("🗑")
@@ -497,7 +491,13 @@ class ImportFilesDialog(QDialog):
             f_path = r["path_combo"].currentText().strip()
             table = r["table_edit"].text().strip()
             headers = r["headers_cb"].isChecked()
-            date_opt = r["date_combo"].currentText().strip() if r.get("date_combo") else "Flow Date"
+            combo_widget = r.get("date_combo")
+            if hasattr(combo_widget, "get_preset"):
+                date_opt = combo_widget.get_preset().strip()
+            elif hasattr(combo_widget, "currentText"):
+                date_opt = combo_widget.currentText().strip()
+            else:
+                date_opt = "Flow Date"
             sh = r["sheet_combo"].currentText().strip() if r.get("sheet_combo") else ""
             if not r["sheet_combo"].isEnabled() or sh.startswith("(") or not sh:
                 sh = None

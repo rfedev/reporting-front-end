@@ -1,0 +1,86 @@
+================================================================================
+PyInstaller Build Recommendations & Optimization Notes
+================================================================================
+
+1. Why the Executable / Package is Over 100MB
+--------------------------------------------------------------------------------
+By default, PyInstaller bundles the entire PySide6 framework along with
+optional/unused third-party packages. Specifically:
+- PySide6 includes Qt3D, QtQuick, QML, QtWebEngine, QtBluetooth, QtMultimedia,
+  QtCharts, etc., which uncompressed account for >600MB.
+- Testing, documentation, and unused scientific sub-packages (e.g. matplotlib,
+  scipy, tkinter, unittest) are often automatically detected and bundled.
+
+
+2. Is 'pyarrow' Being Used in the App?
+--------------------------------------------------------------------------------
+YES (indirectly, as a required dependency for Excel uploads to BigQuery):
+- The app imports Excel spreadsheets via pandas (`pd.read_excel`) and then uploads
+  them to BigQuery using:
+      client.load_table_from_dataframe(df, ...)
+  in `reporting_app/core/bigquery_run.py` (line 613).
+- Google Cloud's BigQuery Python client internally relies on `pyarrow` to convert
+  the pandas DataFrame into Arrow/Parquet buffers for the load job.
+- Therefore, DO NOT exclude `pyarrow` if Excel file imports are enabled, as
+  `load_table_from_dataframe` will fail with an ImportError without it.
+
+
+3. Recommended PyInstaller Command
+--------------------------------------------------------------------------------
+To drastically reduce the bundle size while preserving all necessary functionality:
+
+pyinstaller --noconfirm --onedir --windowed \
+  --name "ReportingApp" \
+  --exclude-module PySide6.Qt3DCore \
+  --exclude-module PySide6.Qt3DAnimation \
+  --exclude-module PySide6.Qt3DExtras \
+  --exclude-module PySide6.Qt3DInput \
+  --exclude-module PySide6.Qt3DLogic \
+  --exclude-module PySide6.Qt3DRender \
+  --exclude-module PySide6.QtQuick \
+  --exclude-module PySide6.QtQuickWidgets \
+  --exclude-module PySide6.QtQml \
+  --exclude-module PySide6.QtWebEngine \
+  --exclude-module PySide6.QtWebEngineWidgets \
+  --exclude-module PySide6.QtWebEngineCore \
+  --exclude-module PySide6.QtBluetooth \
+  --exclude-module PySide6.QtCharts \
+  --exclude-module PySide6.QtDataVisualization \
+  --exclude-module PySide6.QtMultimedia \
+  --exclude-module PySide6.QtMultimediaWidgets \
+  --exclude-module PySide6.QtSensors \
+  --exclude-module PySide6.QtSerialPort \
+  --exclude-module PySide6.QtSpatialAudio \
+  --exclude-module PySide6.QtTest \
+  --exclude-module PySide6.QtPdf \
+  --exclude-module PySide6.QtPdfWidgets \
+  --exclude-module PySide6.QtPositioning \
+  --exclude-module PySide6.QtLocation \
+  --exclude-module PySide6.QtNfc \
+  --exclude-module PySide6.QtScxml \
+  --exclude-module PySide6.QtRemoteObjects \
+  --exclude-module matplotlib \
+  --exclude-module scipy \
+  --exclude-module tkinter \
+  --exclude-module unittest \
+  --exclude-module test \
+  --add-data "reporting_app:reporting_app" \
+  run.py
+
+* Note: For Windows, the separator in `--add-data` is a semicolon (;):
+  --add-data "reporting_app;reporting_app"
+* To generate a single `.exe` file instead of a folder, replace `--onedir`
+  with `--onefile`.
+
+
+4. Key Tips for Performance & Size Reduction
+--------------------------------------------------------------------------------
+1. Prefer `--onedir` over `--onefile` on Work Laptops:
+   A 100MB+ `--onefile` executable unpacks all binaries and libraries into a
+   temporary `%TEMP%/_MEIxxxx` directory every time it launches. On work laptops
+   with antivirus/EDR (CrowdStrike, Defender, SentinelOne), scanning this unpack
+   operation introduces a 5-15 second startup freeze. `--onedir` launches instantly.
+
+2. Enable UPX Compression:
+   Install UPX (https://upx.github.io/) and add `--upx-dir="/path/to/upx"`.
+   PyInstaller will automatically compress DLLs and shared libraries.

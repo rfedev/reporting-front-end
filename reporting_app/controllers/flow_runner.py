@@ -680,7 +680,7 @@ class FlowWorker(QThread):
             if self._lan_worker:
                 if self._is_cancelled or not success:
                     self._lan_worker.cancel()
-                elif getattr(self._lan_worker, "_total_tasks", 0) > 0:
+                elif getattr(self._lan_worker, "_total_enqueued", 0) > 0:
                     self.log_message.emit("Waiting for background LAN transfer(s) to complete...")
                     self._lan_worker.finish_and_wait()
                     if self._lan_worker._errors:

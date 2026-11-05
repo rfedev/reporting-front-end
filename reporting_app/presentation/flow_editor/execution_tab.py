@@ -750,8 +750,11 @@ class FlowExecutionTab(QWidget):
         self, file_idx: int, total_files: int, filename: str, success: bool, error_msg: str
     ) -> None:
         if not success:
-            self.lan_label.setText(f"LAN: Failed {filename}")
-            self.lan_label.setToolTip(error_msg)
+            fail_text = f"LAN: Failed {filename}"
+            if error_msg:
+                fail_text += f" ({error_msg})"
+            self.lan_label.setText(fail_text)
+            self.lan_label.setToolTip(error_msg or "Failed to copy file to LAN")
             self.lan_pct_label.setText("")
         else:
             self.lan_label.setText(f"LAN: Transferred {filename} ({file_idx}/{total_files})")
@@ -764,7 +767,10 @@ class FlowExecutionTab(QWidget):
             self.lan_progress_widget.setVisible(True)
             self.lan_progress_widget.setStyleSheet("QFrame { background: transparent; border: none; }")
             self.lan_icon.set_status("SUCCESS" if all_success else "FAILED")
-            self.lan_label.setText(f"LAN: {total_copied}/{total_files} file(s) copied")
+            label_text = f"LAN: {total_copied}/{total_files} file(s) copied"
+            if not all_success:
+                label_text = f"LAN: {total_copied}/{total_files} copied (error)"
+            self.lan_label.setText(label_text)
             self.lan_pct_label.setText("")
             self.lan_label.setToolTip(summary)
             if hasattr(self, "lan_open_btn"):

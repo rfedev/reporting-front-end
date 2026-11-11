@@ -54,14 +54,44 @@ def get_authenticated_user_account() -> str:
     except Exception:
         pass
 
-    # 3. Try reading gcloud active account
+    # 3. Try reading gcloud active account from config file or subprocess (without showing terminal window)
+    try:
+        import configparser
+        base = Path.home() / ".config" / "gcloud"
+        active_cfg = "default"
+        active_path = base / "active_config"
+        if active_path.exists():
+            c = active_path.read_text(encoding="utf-8").strip()
+            if c:
+                active_cfg = c
+        cfg_file = base / "configurations" / f"config_{active_cfg}"
+        if cfg_file.exists():
+            cp = configparser.ConfigParser()
+            cp.read(cfg_file, encoding="utf-8")
+            if cp.has_section("core") and cp.has_option("core", "account"):
+                acc = cp.get("core", "account").strip()
+                if acc:
+                    return acc
+    except Exception:
+        pass
+
     try:
         import subprocess
+        creationflags = 0
+        startupinfo = None
+        if os.name == "nt":
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 0  # SW_HIDE
+
         proc = subprocess.run(
             ["gcloud", "config", "get-value", "account"],
             capture_output=True,
             text=True,
             timeout=1.5,
+            creationflags=creationflags,
+            startupinfo=startupinfo,
         )
         if proc.returncode == 0 and proc.stdout.strip() and "(unset)" not in proc.stdout:
             return proc.stdout.strip()

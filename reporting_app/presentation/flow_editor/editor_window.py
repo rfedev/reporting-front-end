@@ -937,6 +937,11 @@ class ProcessFlowEditorWindow(QMainWindow):
         self.logs_btn.clicked.connect(lambda: self._on_open_logs())
         toolbar.addWidget(self.logs_btn)
 
+        self.open_folder_btn = QPushButton("📁")
+        self.open_folder_btn.setToolTip("Open Report Folder in File Browser")
+        self.open_folder_btn.clicked.connect(self._on_open_report_folder)
+        toolbar.addWidget(self.open_folder_btn)
+
         # Spacer to push Appearance menu and toggle right button to far right
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -2889,6 +2894,30 @@ class ProcessFlowEditorWindow(QMainWindow):
             parent=self,
         )
         dlg.exec()
+
+    def _on_open_report_folder(self) -> None:
+        """Open the active report folder in the native file browser."""
+        if not self.report or not self.report.folder_path or not self.report.folder_path.exists():
+            QMessageBox.information(self, "No Report Folder", "The report folder does not exist.")
+            return
+
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        folder_url = QUrl.fromLocalFile(str(self.report.folder_path.resolve()))
+        opened = QDesktopServices.openUrl(folder_url)
+        if not opened:
+            import os, platform, subprocess
+            sys_name = platform.system()
+            path_str = str(self.report.folder_path.resolve())
+            try:
+                if sys_name == "Windows":
+                    os.startfile(path_str)
+                elif sys_name == "Darwin":
+                    subprocess.Popen(["open", path_str])
+                else:
+                    subprocess.Popen(["xdg-open", path_str])
+            except Exception as e:
+                logger.error(f"Failed to open report folder: {e}")
 
     # Left panel query management callbacks
     def _on_query_added(self, query_name: str) -> None:

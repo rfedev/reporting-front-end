@@ -938,6 +938,8 @@ class ProcessFlowEditorWindow(QMainWindow):
         toolbar.addWidget(self.logs_btn)
 
         self.open_folder_btn = QPushButton("📁")
+        self.open_folder_btn.setFixedSize(25, 25)
+        self.open_folder_btn.setStyleSheet("QPushButton { font-size: 16px; padding: 0px; margin: 0px; }")
         self.open_folder_btn.setToolTip("Open Report Folder in File Browser")
         self.open_folder_btn.clicked.connect(self._on_open_report_folder)
         toolbar.addWidget(self.open_folder_btn)

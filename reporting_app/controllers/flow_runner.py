@@ -234,6 +234,7 @@ class FlowWorker(QThread):
                     "node_name": rem_name,
                     "node_type": rem_type,
                     "step_number": rem_idx,
+                    "row_count": None,
                     "node_status": "SKIPPED",
                     "node_start_time": None,
                     "node_end_time": None,
@@ -397,6 +398,7 @@ class FlowWorker(QThread):
                             "node_name": sname,
                             "node_type": "import_csv",
                             "step_number": idx,
+                            "row_count": None,
                             "node_status": "FAILED",
                             "node_start_time": step_start_time,
                             "node_end_time": t1.isoformat(),
@@ -406,20 +408,21 @@ class FlowWorker(QThread):
                         self.step_completed.emit(idx, total_steps, sname, "FAILED", step_dur, step_err_msg)
                         self._emit_skipped_from(idx + 1, total_steps, step_records)
                         break
-    
+
+                    total_rows = sum(r.get("row_count") or 0 for r in imp_records) if imp_records else None
                     step_records.append({
                         "node_name": sname,
                         "node_type": "import_csv",
                         "step_number": idx,
+                        "row_count": total_rows,
                         "node_status": "SUCCESS",
                         "node_start_time": step_start_time,
                         "node_end_time": t1.isoformat(),
                         "node_duration_seconds": step_dur,
                         "error_message": "",
                     })
-    
+
                     if self.repo and imp_records:
-                        total_rows = sum(r.get("row_count") or 0 for r in imp_records)
                         self.repo.record_execution_log({
                             "run_id": run_id,
                             "flow_start_time": flow_start_time,
@@ -452,6 +455,7 @@ class FlowWorker(QThread):
                             "node_name": qname,
                             "node_type": "query",
                             "step_number": idx,
+                            "row_count": None,
                             "node_status": "FAILED",
                             "node_start_time": step_start_time,
                             "node_end_time": t1.isoformat(),
@@ -507,6 +511,7 @@ class FlowWorker(QThread):
                                 "node_name": qname,
                                 "node_type": "query",
                                 "step_number": idx,
+                                "row_count": None,
                                 "node_status": "FAILED",
                                 "node_start_time": step_start_time,
                                 "node_end_time": t1.isoformat(),
@@ -557,6 +562,7 @@ class FlowWorker(QThread):
                             "node_name": qname,
                             "node_type": "query",
                             "step_number": idx,
+                            "row_count": res.get("row_count"),
                             "node_status": "SUCCESS",
                             "node_start_time": step_start_time,
                             "node_end_time": t1.isoformat(),
@@ -608,6 +614,7 @@ class FlowWorker(QThread):
                             "node_name": qname,
                             "node_type": "query",
                             "step_number": idx,
+                            "row_count": None,
                             "node_status": "FAILED",
                             "node_start_time": step_start_time,
                             "node_end_time": t1.isoformat(),

@@ -52,19 +52,46 @@ from reporting_app.core.models import ProcessFlowInfo, QueryInfo, QueryParameter
 from reporting_app.core.sql_parser import sync_query_csv_comments, update_query_csv_comment
 from reporting_app.presentation.flow_editor.graph_builder import ProcessFlowGraphBuilder
 from reporting_app.utils.date_calc import format_filename_with_date
-from reporting_app.presentation.flow_editor.nodes import (
-    CircularInfoButtonItem,
-    CustomNodeTextItem,
-    DEFAULT_GROUP_COLOR,
-    GROUP_DARK_COLORS,
-    GroupBoxNode,
-    GroupColorButtonItem,
-    GroupPlayButtonItem,
-    ImportCsvNode,
-    ImportFilesNode,
-    QueryNode,
-    TableBoxNode,
-)
+try:
+    from reporting_app.presentation.flow_editor.nodes import (
+        CircularInfoButtonItem,
+        CustomNodeTextItem,
+        DEFAULT_GROUP_COLOR,
+        GROUP_DARK_COLORS,
+        GroupBoxNode,
+        GroupColorButtonItem,
+        GroupPlayButtonItem,
+        ImportCsvNode,
+        ImportFilesNode,
+        NoteBodyTextItem,
+        NoteNode,
+        NoteNodeItem,
+        QueryNode,
+        TableBoxNode,
+    )
+except ImportError:
+    from reporting_app.presentation.flow_editor.nodes import (
+        CircularInfoButtonItem,
+        CustomNodeTextItem,
+        DEFAULT_GROUP_COLOR,
+        GROUP_DARK_COLORS,
+        GroupBoxNode,
+        GroupColorButtonItem,
+        GroupPlayButtonItem,
+        ImportCsvNode,
+        ImportFilesNode,
+        QueryNode,
+        TableBoxNode,
+    )
+    class NoteNode(BaseNode):
+        __identifier__ = "reporting.nodes"
+        NODE_NAME = "NoteNode"
+
+    class NoteNodeItem(NodeItem):
+        pass
+
+    class NoteBodyTextItem(QtWidgets.QGraphicsTextItem):
+        pass
 from reporting_app.presentation.flow_editor.schema_dialog import SchemaEditorDialog
 from reporting_app.presentation.flow_editor.parameter_overlay import CanvasParameterOverlay
 from reporting_app.presentation.flow_editor.query_tree_widget import QueryManagementPanel
@@ -147,6 +174,7 @@ class ProcessFlowEditorWindow(QMainWindow):
         self.graph.register_node(TableBoxNode)
         self.graph.register_node(ImportCsvNode)
         self.graph.register_node(GroupBoxNode)
+        self.graph.register_node(NoteNode)
 
         # Wire node double click
         self.graph.node_double_clicked.connect(self._on_node_double_clicked)
@@ -181,8 +209,11 @@ class ProcessFlowEditorWindow(QMainWindow):
                 return
             if not target_node or not new_name:
                 return
+            if isinstance(target_node, TableBoxNode) or getattr(target_node, "type_", "") == "reporting.nodes.TableBoxNode":
+                return
             is_group = isinstance(target_node, GroupBoxNode) or getattr(target_node, "type_", "") == "reporting.nodes.GroupBoxNode"
-            old_name = target_node.name() if is_group else (target_node.get_property("query_name") or target_node.name())
+            is_note = isinstance(target_node, NoteNode) or getattr(target_node, "type_", "") == "reporting.nodes.NoteNode"
+            old_name = target_node.name() if (is_group or is_note) else (target_node.get_property("query_name") or target_node.name())
             new_name = new_name.strip()
             if not new_name or new_name == old_name:
                 return
@@ -195,6 +226,14 @@ class ProcessFlowEditorWindow(QMainWindow):
                 target_node.model.name = new_name
                 if hasattr(target_node, "view") and target_node.view:
                     target_node.view.name = new_name
+                self._mark_dirty_and_schedule_save()
+            elif is_note:
+                target_node.model.name = new_name
+                if hasattr(target_node, "view") and target_node.view:
+                    target_node.view.name = new_name
+                    if hasattr(target_node.view, "_calc_size_and_draw"):
+                        target_node.view._calc_size_and_draw()
+                self._node_positions[new_name] = (float(target_node.pos()[0]), float(target_node.pos()[1]))
                 self._mark_dirty_and_schedule_save()
 
         def on_graph_property_changed(node, prop_name, value):
@@ -239,6 +278,22 @@ class ProcessFlowEditorWindow(QMainWindow):
             viewer._group_color_emitter = _GroupColorSignalEmitter()
             viewer.group_color_changed = viewer._group_color_emitter.group_color_changed
         viewer.group_color_changed.connect(self._on_group_color_changed)
+
+        # Wire note text change to update NoteNode model and trigger auto-save
+        if not hasattr(viewer, "node_note_text_changed"):
+            class _NoteTextSignalEmitter(QtCore.QObject):
+                node_note_text_changed = QtCore.Signal(str, str)
+            viewer._note_text_emitter = _NoteTextSignalEmitter()
+            viewer.node_note_text_changed = viewer._note_text_emitter.node_note_text_changed
+        viewer.node_note_text_changed.connect(self._on_note_text_changed)
+
+        # Wire note collapse toggle to update NoteNode model and trigger auto-save
+        if not hasattr(viewer, "node_note_collapsed_changed"):
+            class _NoteCollapsedSignalEmitter(QtCore.QObject):
+                node_note_collapsed_changed = QtCore.Signal(str, bool)
+            viewer._note_collapsed_emitter = _NoteCollapsedSignalEmitter()
+            viewer.node_note_collapsed_changed = viewer._note_collapsed_emitter.node_note_collapsed_changed
+        viewer.node_note_collapsed_changed.connect(self._on_note_collapsed_changed)
 
     def _setup_canvas_pan_and_select(self) -> None:
         """Configure left-click empty space panning, smooth resize, and Ctrl+drag multi-select on NodeViewer."""
@@ -297,6 +352,7 @@ class ProcessFlowEditorWindow(QMainWindow):
                                 GroupColorButtonItem,
                                 CustomNodeTextItem,
                                 CircularInfoButtonItem,
+                                NoteBodyTextItem,
                             ),
                         )
                     ),
@@ -535,6 +591,22 @@ class ProcessFlowEditorWindow(QMainWindow):
                         cur = cur.parentItem() if hasattr(cur, "parentItem") else None
         return None
 
+    def _find_note_node_near(self, scene_pos: QtCore.QPointF) -> Optional[NoteNode]:
+        """Find a NoteNode directly under the given scene point."""
+        viewer = self.graph.viewer()
+        items = viewer.scene().items(scene_pos) if viewer.scene() else []
+        for item in items:
+            for node in self.graph.all_nodes():
+                if isinstance(node, NoteNode) or getattr(node, "type_", "") == "reporting.nodes.NoteNode":
+                    if getattr(node, "view", None) == item:
+                        return node
+                    cur = item
+                    while cur:
+                        if cur == getattr(node, "view", None):
+                            return node
+                        cur = cur.parentItem() if hasattr(cur, "parentItem") else None
+        return None
+
     @staticmethod
     def _create_color_swatch_icon(r: int, g: int, b: int, selected: bool = False) -> QtGui.QIcon:
         """Create a circular swatch QIcon for a dark-mode group color."""
@@ -641,6 +713,7 @@ class ProcessFlowEditorWindow(QMainWindow):
         viewer = self.graph.viewer()
         target_node = self._find_executable_node_near(scene_pos)
         target_group = self._find_group_node_near(scene_pos) if not target_node else None
+        target_note = self._find_note_node_near(scene_pos) if not target_node else None
         selected_nodes = self._get_selected_query_nodes()
         selected_pipes = self._get_selected_pipes()
 
@@ -684,7 +757,38 @@ class ProcessFlowEditorWindow(QMainWindow):
             open_log_act.triggered.connect(lambda: self._on_open_logs(filter_node=node_name))
 
         else:
-            if target_group is not None:
+            if target_note is not None:
+                if target_note not in self.graph.selected_nodes():
+                    self.graph.clear_selection()
+                    target_note.set_selected(True)
+                    self._update_run_button_state()
+
+                add_menu_item(
+                    "Edit Note",
+                    "e",
+                    lambda: target_note.view.start_note_editing()
+                    if hasattr(target_note, "view") and hasattr(target_note.view, "start_note_editing")
+                    else None,
+                )
+
+                is_collapsed = bool(target_note.get_property("collapsed"))
+                collapse_label = "Expand Note" if is_collapsed else "Collapse Note"
+                collapse_act = menu.addAction(collapse_label)
+                collapse_act.triggered.connect(
+                    lambda: target_note.view.toggle_collapse()
+                    if hasattr(target_note, "view") and hasattr(target_note.view, "toggle_collapse")
+                    else None
+                )
+
+                del_note_act = menu.addAction("Delete Note")
+                del_note_act.setShortcut(QKeySequence("Delete"))
+                del_note_act.setShortcutVisibleInContextMenu(True)
+                del_note_act.triggered.connect(
+                    lambda: (self.graph.delete_nodes([target_note]), self._mark_dirty_and_schedule_save())
+                )
+                menu.addSeparator()
+
+            if target_group is not None and target_note is None:
                 run_grp_act = menu.addAction(f"Run Group '{target_group.name()}'")
                 run_grp_act.triggered.connect(lambda: self.run_group_nodes(target_group))
 
@@ -700,7 +804,7 @@ class ProcessFlowEditorWindow(QMainWindow):
                         lambda checked=False, grp=target_group, rgb=(cr, cg, cb): self._apply_color_to_group(grp, rgb)
                     )
 
-                del_grp_act = menu.addAction("Delete Group")
+                del_grp_act = menu.addAction("Remove Group Box")
                 del_grp_act.triggered.connect(lambda: self._delete_group_node(target_group))
                 menu.addSeparator()
 
@@ -715,6 +819,7 @@ class ProcessFlowEditorWindow(QMainWindow):
             add_menu_item("Create Query", "q", lambda: self._on_create_query_at_pos(scene_pos))
             add_menu_item("Import Files", "i", lambda: self._on_add_import_csv(pos=(scene_pos.x(), scene_pos.y())))
             add_menu_item("Create Group", "g", lambda: self._on_add_group_box(pos=(scene_pos.x(), scene_pos.y())))
+            add_menu_item("Create Note", "n", lambda: self._on_add_note(pos=(scene_pos.x(), scene_pos.y())))
 
             menu.addSeparator()
             add_menu_item("Auto Layout H", "h", lambda: self._auto_layout("horizontal"))
@@ -811,6 +916,11 @@ class ProcessFlowEditorWindow(QMainWindow):
         self.add_group_btn.setToolTip("Add a Group Box around selected nodes or on the canvas (G)")
         self.add_group_btn.clicked.connect(lambda: self._on_add_group_box())
         toolbar.addWidget(self.add_group_btn)
+
+        self.add_note_btn = QPushButton("📝 Add Note")
+        self.add_note_btn.setToolTip("Add a text note to the canvas (N)")
+        self.add_note_btn.clicked.connect(lambda: self._on_add_note())
+        toolbar.addWidget(self.add_note_btn)
 
         toolbar.addSeparator()
 
@@ -1237,15 +1347,18 @@ class ProcessFlowEditorWindow(QMainWindow):
                     self.graph.deserialize_session(session_data)
                     # Re-apply text, display mode, and query parameters to restored nodes
                     for node in self.graph.all_nodes():
-                        if isinstance(node, TableBoxNode) or node.type_ == "reporting.nodes.TableBoxNode":
+                        if isinstance(node, TableBoxNode) or getattr(node, "type_", "") == "reporting.nodes.TableBoxNode":
                             btype = node.get_property("box_type") or "Table Box"
-                            node.view.set_custom_title(btype)
+                            if hasattr(node, "view") and hasattr(node.view, "set_custom_title"):
+                                node.view.set_custom_title(btype)
                             if btype == "Output CSV":
                                 qname = node.get_property("query_owner") or node.name().replace(" [CSV]", "").strip()
                                 qinfo = self.report.get_query(qname)
                                 if qinfo and qinfo.output_csv_tables:
                                     node.setup_as_csv_output(qinfo.output_csv_tables)
                             node.set_display_mode(self.show_full_table_names)
+                            if not node.get_property("box_key"):
+                                node.set_property("box_key", node.name())
                         elif isinstance(node, QueryNode) or getattr(node, "type_", "") == "reporting.nodes.QueryNode":
                             qname = node.get_property("query_name") or node.name()
                             qinfo = self.report.get_query(qname)
@@ -1254,6 +1367,13 @@ class ProcessFlowEditorWindow(QMainWindow):
                         elif isinstance(node, GroupBoxNode) or getattr(node, "type_", "") == "reporting.nodes.GroupBoxNode":
                             if hasattr(node, "view") and hasattr(node.view, "_sync_header_items"):
                                 node.view._sync_header_items()
+                        elif isinstance(node, NoteNode) or getattr(node, "type_", "") == "reporting.nodes.NoteNode":
+                            note_text = node.get_property("note_text") or ""
+                            if hasattr(node, "view") and hasattr(node.view, "set_note_text"):
+                                node.view.set_note_text(note_text)
+                            collapsed = bool(node.get_property("collapsed"))
+                            if hasattr(node, "view") and hasattr(node.view, "set_collapsed"):
+                                node.view.set_collapsed(collapsed, emit_signal=False)
                     # Re-apply custom noodle colors to all pipes in the restored scene
                     for item in self.graph.viewer().scene().items():
                         if isinstance(item, PipeItem):
@@ -1345,6 +1465,62 @@ class ProcessFlowEditorWindow(QMainWindow):
         self._mark_dirty_and_schedule_save()
         return gnode
 
+    def _on_add_note(
+        self,
+        pos: Optional[Tuple[float, float]] = None,
+        name: str = "Note",
+        text: str = "",
+    ) -> NoteNode:
+        """Add a text note to the canvas."""
+        existing_names = {
+            n.name() for n in self.graph.all_nodes()
+            if isinstance(n, NoteNode) or getattr(n, "type_", "") == "reporting.nodes.NoteNode"
+        }
+        clean_name = name
+        if clean_name in existing_names:
+            idx = 2
+            while f"{name} {idx}" in existing_names:
+                idx += 1
+            clean_name = f"{name} {idx}"
+
+        if not isinstance(pos, (list, tuple)) or len(pos) < 2:
+            try:
+                viewer = self.graph.viewer()
+                vp = viewer.viewport()
+                vp_w = vp.width() if vp else viewer.width()
+                vp_h = vp.height() if vp else viewer.height()
+                center_viewport = QPoint(vp_w // 2, vp_h // 2)
+                scene_pt = viewer.mapToScene(center_viewport)
+                node_pos = [float(scene_pt.x()) - 100.0, float(scene_pt.y()) - 70.0]
+            except Exception:
+                node_pos = [0.0, 0.0]
+        else:
+            node_pos = [float(pos[0]), float(pos[1])]
+
+        nnode: NoteNode = self.graph.create_node(
+            "reporting.nodes.NoteNode",
+            name=clean_name,
+            pos=node_pos,
+            selected=False,
+        )
+        if text:
+            try:
+                nnode.set_property("note_text", text, push_undo=False)
+            except Exception:
+                nnode.set_property("note_text", text)
+            if hasattr(nnode, "view") and hasattr(nnode.view, "set_note_text"):
+                nnode.view.set_note_text(text)
+
+        self._node_positions[nnode.name()] = (float(node_pos[0]), float(node_pos[1]))
+
+        self.graph.clear_selection()
+        if self.graph.viewer().scene():
+            self.graph.viewer().scene().clearSelection()
+        nnode.set_selected(True)
+        self._update_run_button_state()
+        self._mark_dirty_and_schedule_save()
+        return nnode
+
     def _apply_color_to_group(self, group_node: BaseNode, rgb: Tuple[int, int, int]) -> None:
         """Apply an RGB dark-mode colour to a GroupBoxNode and schedule save."""
         if not group_node:
@@ -1364,6 +1540,34 @@ class ProcessFlowEditorWindow(QMainWindow):
                 break
         if target_group is not None:
             self._apply_color_to_group(target_group, (int(rgb_list[0]), int(rgb_list[1]), int(rgb_list[2])))
+
+    def _on_note_text_changed(self, node_id: str, new_text: str) -> None:
+        """Handle note body text edit signal from NoteNodeItem."""
+        target_node = None
+        for n in self.graph.all_nodes():
+            if n.id == node_id or getattr(getattr(n, "view", None), "id", None) == node_id:
+                target_node = n
+                break
+        if target_node is not None:
+            try:
+                target_node.set_property("note_text", new_text, push_undo=False)
+            except Exception:
+                target_node.model.set_property("note_text", new_text)
+            self._mark_dirty_and_schedule_save()
+
+    def _on_note_collapsed_changed(self, node_id: str, collapsed: bool) -> None:
+        """Handle note collapse toggle signal from NoteNodeItem."""
+        target_node = None
+        for n in self.graph.all_nodes():
+            if n.id == node_id or getattr(getattr(n, "view", None), "id", None) == node_id:
+                target_node = n
+                break
+        if target_node is not None:
+            try:
+                target_node.set_property("collapsed", bool(collapsed), push_undo=False)
+            except Exception:
+                target_node.model.set_property("collapsed", bool(collapsed))
+            self._mark_dirty_and_schedule_save()
 
     def _delete_group_node(self, group_node: BaseNode) -> None:
         """Delete a single GroupBoxNode without affecting contained nodes."""
@@ -1681,19 +1885,22 @@ class ProcessFlowEditorWindow(QMainWindow):
             self._suppress_dirty = False
 
     def _on_node_double_clicked(self, node) -> None:
-        """Handle double click on query node to open in OS default application, or CSV box to edit names."""
-        if isinstance(node, QueryNode) or node.type_ == "reporting.nodes.QueryNode":
+        """Handle double click on query node to open in OS default application, CSV box to edit names, or note to edit text."""
+        if isinstance(node, QueryNode) or getattr(node, "type_", "") == "reporting.nodes.QueryNode":
             query_path = node.get_property("query_path")
             if query_path and Path(query_path).exists():
                 QDesktopServices.openUrl(QUrl.fromLocalFile(query_path))
             else:
                 self._open_query_file(node.name())
-        elif isinstance(node, ImportCsvNode) or node.type_ == "reporting.nodes.ImportCsvNode":
+        elif isinstance(node, ImportCsvNode) or getattr(node, "type_", "") == "reporting.nodes.ImportCsvNode":
             self._show_import_csv_dialog(node)
-        elif isinstance(node, TableBoxNode) or node.type_ == "reporting.nodes.TableBoxNode":
+        elif isinstance(node, TableBoxNode) or getattr(node, "type_", "") == "reporting.nodes.TableBoxNode":
             btype = node.get_property("box_type") or getattr(getattr(node, "view", None), "table_box_type", "")
             if btype == "Output CSV":
                 self._show_csv_rename_dialog(node)
+        elif isinstance(node, NoteNode) or getattr(node, "type_", "") == "reporting.nodes.NoteNode":
+            if hasattr(node, "view") and hasattr(node.view, "start_note_editing"):
+                node.view.start_note_editing()
 
     def _show_csv_rename_dialog(self, target_node: Optional[TableBoxNode] = None) -> None:
         """Show a dialog with text inputs for output CSVs (scoped to target_node if provided, or all active CSV nodes)."""
@@ -1866,12 +2073,16 @@ class ProcessFlowEditorWindow(QMainWindow):
                     logger.warning(f"Failed to open with xdg-open: {e}")
 
     def _on_copy_selected(self) -> None:
-        """Copy all selected query and CSV import nodes."""
+        """Copy all selected query, CSV import, and note nodes."""
         selected_nodes = self.graph.selected_nodes()
         nodes_to_copy = [
             n for n in selected_nodes
-            if isinstance(n, (QueryNode, ImportCsvNode))
-            or getattr(n, "type_", "") in ("reporting.nodes.QueryNode", "reporting.nodes.ImportCsvNode")
+            if isinstance(n, (QueryNode, ImportCsvNode, NoteNode))
+            or getattr(n, "type_", "") in (
+                "reporting.nodes.QueryNode",
+                "reporting.nodes.ImportCsvNode",
+                "reporting.nodes.NoteNode",
+            )
         ]
         if not nodes_to_copy:
             return
@@ -1879,16 +2090,24 @@ class ProcessFlowEditorWindow(QMainWindow):
         copied_items: List[Dict[str, Any]] = []
         for n in nodes_to_copy:
             is_query = isinstance(n, QueryNode) or getattr(n, "type_", "") == "reporting.nodes.QueryNode"
+            is_note = isinstance(n, NoteNode) or getattr(n, "type_", "") == "reporting.nodes.NoteNode"
+            pos = n.pos()
             if is_query:
                 qname = n.get_property("query_name") or n.name()
-                pos = n.pos()
                 copied_items.append({
                     "type": "query",
                     "name": qname,
                     "pos": (pos[0], pos[1]),
                 })
+            elif is_note:
+                copied_items.append({
+                    "type": "note",
+                    "name": n.name(),
+                    "note_text": n.get_property("note_text") or "",
+                    "collapsed": bool(n.get_property("collapsed")),
+                    "pos": (pos[0], pos[1]),
+                })
             else:
-                pos = n.pos()
                 copied_items.append({
                     "type": "import_csv",
                     "name": n.name(),
@@ -1901,7 +2120,7 @@ class ProcessFlowEditorWindow(QMainWindow):
         self.status_bar.showMessage(f"Copied {count} node(s) to clipboard.", 3000)
 
     def _on_paste(self) -> None:
-        """Paste all copied query and CSV import nodes from clipboard."""
+        """Paste all copied query, CSV import, and note nodes from clipboard."""
         if not getattr(self, "_clipboard_nodes", None) or not self.report:
             return
 
@@ -1997,14 +2216,54 @@ class ProcessFlowEditorWindow(QMainWindow):
                 if live_inode:
                     new_nodes.append(live_inode)
 
+            elif item["type"] == "note":
+                existing_names = {
+                    n.name() for n in self.graph.all_nodes()
+                    if isinstance(n, NoteNode) or getattr(n, "type_", "") == "reporting.nodes.NoteNode"
+                }
+                base_name = item.get("name", "Note")
+                candidate = base_name
+                idx = 2
+                while candidate in existing_names:
+                    candidate = f"{base_name} {idx}"
+                    idx += 1
+
+                nnode: NoteNode = self.graph.create_node(
+                    "reporting.nodes.NoteNode",
+                    name=candidate,
+                    pos=[new_pos[0], new_pos[1]],
+                    selected=False,
+                )
+                note_text = item.get("note_text", "")
+                if note_text:
+                    try:
+                        nnode.set_property("note_text", note_text, push_undo=False)
+                    except Exception:
+                        nnode.set_property("note_text", note_text)
+                    if hasattr(nnode, "view") and hasattr(nnode.view, "set_note_text"):
+                        nnode.view.set_note_text(note_text)
+                collapsed = bool(item.get("collapsed", False))
+                if collapsed:
+                    try:
+                        nnode.set_property("collapsed", True, push_undo=False)
+                    except Exception:
+                        nnode.set_property("collapsed", True)
+                    if hasattr(nnode, "view") and hasattr(nnode.view, "set_collapsed"):
+                        nnode.view.set_collapsed(True, emit_signal=False)
+
+                self._node_positions[candidate] = (new_pos[0], new_pos[1])
+                new_nodes.append(nnode)
+
         if new_nodes:
             self.graph.clear_selection()
             for n in new_nodes:
                 n.set_selected(True)
+            self._update_run_button_state()
+            self._mark_dirty_and_schedule_save()
             self.status_bar.showMessage(f"Pasted {len(new_nodes)} node(s).", 3000)
 
     def _on_delete_selected(self) -> None:
-        """Delete currently selected query, CSV import, or group box nodes and resynchronize topology if needed.
+        """Delete currently selected query, CSV import, group box, or note nodes and resynchronize topology if needed.
 
         Tables are automatically managed and cannot be directly deleted.
         """
@@ -2018,7 +2277,11 @@ class ProcessFlowEditorWindow(QMainWindow):
             n for n in selected_nodes
             if isinstance(n, GroupBoxNode) or getattr(n, "type_", "") == "reporting.nodes.GroupBoxNode"
         ]
-        deletable_nodes = deletable_exec_nodes + deletable_group_nodes
+        deletable_note_nodes = [
+            n for n in selected_nodes
+            if isinstance(n, NoteNode) or getattr(n, "type_", "") == "reporting.nodes.NoteNode"
+        ]
+        deletable_nodes = deletable_exec_nodes + deletable_group_nodes + deletable_note_nodes
         if deletable_nodes:
             # If any ImportCsvNode is deleted, update saved csv_imports
             deleted_import_names = {
@@ -2033,6 +2296,9 @@ class ProcessFlowEditorWindow(QMainWindow):
                 ]
                 self.flow_controller.set_csv_imports(remaining_imports)
 
+            for n in deletable_note_nodes + deletable_group_nodes:
+                self._node_positions.pop(n.name(), None)
+
             self.graph.delete_nodes(deletable_nodes)
             if deletable_exec_nodes:
                 self._sync_graph_topology()
@@ -2044,19 +2310,21 @@ class ProcessFlowEditorWindow(QMainWindow):
                 self._delete_selected_blue_pipes()
             elif selected_nodes:
                 self.status_bar.showMessage(
-                    "Table boxes are managed automatically; only query, CSV import, and group nodes can be deleted.", 3000
+                    "Table boxes are managed automatically; only query, CSV import, group, and note nodes can be deleted.", 3000
                 )
 
     def _auto_layout(self, direction: str = "horizontal") -> None:
         """Auto-format layout or align objects horizontally or vertically.
 
-        If objects are selected, only aligns the selected objects.
-        If nothing is selected, aligns all objects (queries, table boxes, import nodes).
+        If a GroupBox or >= 2 objects are selected, auto-formats only within the selection.
+        If nothing or a single non-group object is selected, formats all objects on canvas.
         """
         selected_nodes = self.graph.selected_nodes()
-        if len(selected_nodes) >= 2:
-            self._align_selected_nodes(selected_nodes, direction)
-            return
+        has_group_selected = any(
+            isinstance(n, GroupBoxNode) or getattr(n, "type_", "") == "reporting.nodes.GroupBoxNode"
+            for n in selected_nodes
+        )
+        is_scoped_selection = has_group_selected or len(selected_nodes) >= 2
 
         active_query_names: List[str] = []
         for node in self.graph.all_nodes():
@@ -2073,12 +2341,21 @@ class ProcessFlowEditorWindow(QMainWindow):
             active_queries,
             direction=direction,
             import_csv_data=csv_imports,
+            target_nodes=selected_nodes if is_scoped_selection else None,
         )
         self._node_positions.update(new_positions)
-        self._fit_graph_to_canvas()
+        if not is_scoped_selection:
+            self._fit_graph_to_canvas()
         self._mark_dirty_and_schedule_save()
+
         dir_name = "Horizontal (Left-to-Right)" if direction == "horizontal" else "Vertical (Top-to-Bottom)"
-        self.status_bar.showMessage(f"Auto-formatted all objects: {dir_name}", 3000)
+        if is_scoped_selection:
+            if has_group_selected:
+                self.status_bar.showMessage(f"Auto-formatted selected group: {dir_name}", 3000)
+            else:
+                self.status_bar.showMessage(f"Auto-formatted selected objects: {dir_name}", 3000)
+        else:
+            self.status_bar.showMessage(f"Auto-formatted all objects: {dir_name}", 3000)
 
     def _align_selected_nodes(self, nodes: List[BaseNode], direction: str) -> None:
         """Align only the selected objects (tables, query boxes, import nodes)."""
@@ -2244,6 +2521,9 @@ class ProcessFlowEditorWindow(QMainWindow):
                 qname = node.get_property("query_name") if hasattr(node, "get_property") else None
                 if qname:
                     self._node_positions[qname] = (float(pos[0]), float(pos[1]))
+                box_key = node.get_property("box_key") if hasattr(node, "get_property") else None
+                if box_key:
+                    self._node_positions[box_key] = (float(pos[0]), float(pos[1]))
         self._mark_dirty_and_schedule_save()
 
     def _on_backdrop_updated(self, node_id: str, update_type: str, size_data: dict) -> None:
@@ -2654,7 +2934,7 @@ class ProcessFlowEditorWindow(QMainWindow):
             # 4. Update existing positions map
             if old_name in self._node_positions:
                 self._node_positions[new_name] = self._node_positions.pop(old_name)
-            for suffix in ("[Out]", "[CSV]", "[In]"):
+            for suffix in ("[Out]", "[CSV]", "[In]", "[Convergence]"):
                 old_key = f"{old_name} {suffix}"
                 new_key = f"{new_name} {suffix}"
                 if old_key in self._node_positions:
@@ -2674,6 +2954,8 @@ class ProcessFlowEditorWindow(QMainWindow):
                     n.set_name(f"{new_name}{suffix}")
                     if n.get_property("query_owner") == old_name:
                         n.set_property("query_owner", new_name)
+                    if isinstance(n, TableBoxNode) or getattr(n, "type_", "") == "reporting.nodes.TableBoxNode":
+                        n.set_property("box_key", f"{new_name}{suffix}")
 
             # 6. Re-sync graph topology to preserve all connections and table boxes
             self._sync_graph_topology()
@@ -2791,7 +3073,9 @@ class ProcessFlowEditorWindow(QMainWindow):
                         text_item = getattr(node_item, "_text_item", None)
                         if text_item and (text_item.textInteractionFlags() & Qt.TextEditable):
                             return super().eventFilter(watched, event)
-
+                        _body_item = getattr(node_item, "_body_item", None)
+                        if _body_item and (getattr(_body_item, "_is_editing", False) or (_body_item.textInteractionFlags() & Qt.TextEditable)):
+                            return super().eventFilter(watched, event)
 
                 if key == Qt.Key_Escape:
                     if getattr(viewer, "_LIVE_PIPE", None) and viewer._LIVE_PIPE.isVisible():
@@ -2817,6 +3101,11 @@ class ProcessFlowEditorWindow(QMainWindow):
                     cursor_pos = viewer.mapFromGlobal(QCursor.pos())
                     scene_pos = viewer.mapToScene(cursor_pos)
                     self._on_add_group_box(pos=(scene_pos.x(), scene_pos.y()))
+                    return True
+                elif key == Qt.Key_N:
+                    cursor_pos = viewer.mapFromGlobal(QCursor.pos())
+                    scene_pos = viewer.mapToScene(cursor_pos)
+                    self._on_add_note(pos=(scene_pos.x(), scene_pos.y()))
                     return True
                 elif key == Qt.Key_H:
                     self._auto_layout("horizontal")

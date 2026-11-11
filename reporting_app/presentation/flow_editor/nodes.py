@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 from PySide6 import QtCore, QtGui, QtWidgets
 from NodeGraphQt import BackdropNode, BaseNode
-from NodeGraphQt.constants import NodeEnum, NodePropWidgetEnum
+from NodeGraphQt.constants import NodeEnum, NodePropWidgetEnum, PortEnum
 from NodeGraphQt.qgraphics.node_abstract import AbstractNodeItem
 from NodeGraphQt.qgraphics.node_backdrop import BackdropNodeItem
 from NodeGraphQt.qgraphics.node_base import NodeItem
@@ -14,6 +14,7 @@ COLOR_GREEN = (35, 115, 70, 255)         # Input table box & noodle
 COLOR_BLUE = (45, 80, 130, 255)          # Query node box & noodle
 COLOR_DARK_ORANGE = (180, 85, 20, 255)   # Output table box & noodle
 COLOR_DARK_PURPLE = (110, 45, 130, 255)  # Output CSV box & noodle
+COLOR_NOTE = (115, 95, 40, 255)          # Note node card & noodle
 
 
 class CustomNodeTextItem(QtWidgets.QGraphicsTextItem):
@@ -28,6 +29,12 @@ class CustomNodeTextItem(QtWidgets.QGraphicsTextItem):
         self.setFont(font)
         self.setDefaultTextColor(QtGui.QColor(240, 240, 240))
         self.setTextInteractionFlags(QtCore.Qt.NoTextInteraction)
+
+    def set_locked(self, locked: bool = True):
+        self._locked = locked
+        if locked:
+            self.setTextInteractionFlags(QtCore.Qt.NoTextInteraction)
+            self.setFlag(QtWidgets.QGraphicsItem.ItemIsFocusable, False)
 
     def mouseDoubleClickEvent(self, event):
         if not self._locked and event.button() == QtCore.Qt.LeftButton:
@@ -154,7 +161,12 @@ class TableBoxItem(NodeItem):
     """Custom graphics item for TableBoxNode with arrow expand/collapse and native text rendering."""
 
     def __init__(self, name="Table Box", parent=None):
-        super().__init__(name, parent)
+        super(TableBoxItem, self).__init__(name, parent)
+        if hasattr(self._text_item, "set_locked"):
+            self._text_item.set_locked(True)
+        self._text_item.setFlag(QtWidgets.QGraphicsItem.ItemIsFocusable, False)
+        self._text_item.setTextInteractionFlags(QtCore.Qt.NoTextInteraction)
+
         self.collapsed = False
         self.table_lines: List[str] = []
         self.table_box_type: str = "Input Tables"
@@ -171,10 +183,13 @@ class TableBoxItem(NodeItem):
             return
         super().paint(painter, option, widget)
 
-
     def set_custom_title(self, title: str):
         self.custom_title = title
         if self._text_item:
+            if hasattr(self._text_item, "set_locked"):
+                self._text_item.set_locked(True)
+            self._text_item.setFlag(QtWidgets.QGraphicsItem.ItemIsFocusable, False)
+            self._text_item.setTextInteractionFlags(QtCore.Qt.NoTextInteraction)
             self._text_item.setPlainText(title)
         self.draw_node()
 
@@ -917,6 +932,8 @@ class TableBoxNode(BaseNode):
         self.add_output("out_tables", multi_output=True, display_name=False, color=(COLOR_GREEN[0], COLOR_GREEN[1], COLOR_GREEN[2]))
 
         self.create_property("box_type", "Input Tables")
+        self.create_property("box_key", "")
+        self.create_property("tables", "")
         self.create_property("raw_tables_json", "")
         self.create_property("query_owner", "")
         self.raw_tables: List[str] = []
@@ -1063,6 +1080,416 @@ class TableBoxNode(BaseNode):
                     out_p.set_visible(True)
                     out_p.color = COLOR_DARK_ORANGE
                 self.set_color(COLOR_DARK_ORANGE[0], COLOR_DARK_ORANGE[1], COLOR_DARK_ORANGE[2])
+
+
+class NoteBodyTextItem(QtWidgets.QGraphicsTextItem):
+    """Multi-line editable text item for the body of a NoteNodeItem."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFont(QtGui.QFont("Inter, Segoe UI, Arial", 10))
+        self.setDefaultTextColor(QtGui.QColor(240, 235, 215))
+        self.setTextInteractionFlags(QtCore.Qt.NoTextInteraction)
+        self.setFlag(QtWidgets.QGraphicsItem.ItemIsFocusable, False)
+        self.document().setDocumentMargin(3)
+        self._is_editing = False
+        self._raw_text = ""
+        self._placeholder = "Double-click to add note..."
+        self._update_display()
+
+    def _update_display(self):
+        if self._is_editing:
+            self.setPlainText(self._raw_text)
+            self.setDefaultTextColor(QtGui.QColor(255, 250, 230))
+        elif self._raw_text:
+            self.setPlainText(self._raw_text)
+            self.setDefaultTextColor(QtGui.QColor(240, 235, 215))
+        else:
+            self.setPlainText(self._placeholder)
+            self.setDefaultTextColor(QtGui.QColor(180, 170, 145, 160))
+
+    def start_editing(self):
+        parent = self.parentItem()
+        if parent and getattr(parent, "collapsed", False):
+            parent.set_collapsed(False, emit_signal=True)
+
+        self._is_editing = True
+        self.setPlainText(self._raw_text)
+        self.setDefaultTextColor(QtGui.QColor(255, 250, 230))
+        self.setFlag(QtWidgets.QGraphicsItem.ItemIsFocusable, True)
+        self.setTextInteractionFlags(QtCore.Qt.TextEditorInteraction)
+        self.setFocus(QtCore.Qt.MouseFocusReason)
+        cursor = self.textCursor()
+        cursor.movePosition(QtGui.QTextCursor.End)
+        self.setTextCursor(cursor)
+
+    def finish_editing(self):
+        if not self._is_editing:
+            return
+        self._is_editing = False
+        new_text = self.toPlainText()
+        self.setTextInteractionFlags(QtCore.Qt.NoTextInteraction)
+        self.setFlag(QtWidgets.QGraphicsItem.ItemIsFocusable, False)
+        cursor = self.textCursor()
+        cursor.clearSelection()
+        self.setTextCursor(cursor)
+
+        old_text = self._raw_text
+        self._raw_text = new_text
+        self._update_display()
+
+        parent = self.parentItem()
+        if parent and hasattr(parent, "_calc_size_and_draw"):
+            parent._calc_size_and_draw()
+
+        if parent and hasattr(parent, "node") and parent.node:
+            try:
+                parent.node.model.set_property("note_text", new_text)
+            except Exception:
+                pass
+
+        if new_text != old_text and parent:
+            viewer = parent.viewer() if hasattr(parent, "viewer") and callable(parent.viewer) else None
+            if viewer and hasattr(viewer, "node_note_text_changed"):
+                sig = getattr(viewer, "node_note_text_changed")
+                if hasattr(QtCore, "SignalInstance") and isinstance(sig, QtCore.SignalInstance):
+                    sig.emit(parent.id, new_text)
+                elif hasattr(sig, "emit"):
+                    sig.emit(parent.id, new_text)
+                elif callable(sig):
+                    sig(parent.id, new_text)
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == QtCore.Qt.LeftButton:
+            self.start_editing()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() == QtCore.Qt.Key_Escape or (
+            event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter)
+            and bool(event.modifiers() & (QtCore.Qt.ControlModifier | QtCore.Qt.ShiftModifier))
+        ):
+            self.finish_editing()
+            self.clearFocus()
+            event.accept()
+            return
+
+        super().keyPressEvent(event)
+        parent = self.parentItem()
+        if parent and hasattr(parent, "_calc_size_and_draw"):
+            parent._calc_size_and_draw()
+
+    def focusOutEvent(self, event):
+        super().focusOutEvent(event)
+        self.finish_editing()
+
+
+class NoteNodeItem(NodeItem):
+    """Custom graphics item for NoteNode with expandable multi-line text and rich styling."""
+
+    def __init__(self, name="Note", parent=None):
+        super(NoteNodeItem, self).__init__(name, parent)
+        self.color = COLOR_NOTE
+        self.collapsed = False
+
+        # Replace _text_item with CustomNodeTextItem
+        orig_title = self.name
+        if hasattr(self, "_text_item") and self._text_item:
+            try:
+                orig_title = self._text_item.toPlainText() or self.name
+                if self.scene():
+                    self.scene().removeItem(self._text_item)
+            except Exception:
+                pass
+        self._text_item = CustomNodeTextItem(orig_title, self)
+        title_font = QtGui.QFont("Inter, Segoe UI, Arial", 10, QtGui.QFont.Bold)
+        self._text_item.setFont(title_font)
+        self._text_item.setDefaultTextColor(QtGui.QColor(255, 250, 235))
+
+        # Arrow icon in node header
+        self._arrow_item = QtWidgets.QGraphicsSimpleTextItem("▼", self)
+        self._arrow_item.setBrush(QtGui.QBrush(QtGui.QColor(240, 235, 215)))
+        arrow_font = QtGui.QFont("Inter, Segoe UI, Arial", 10, QtGui.QFont.Bold)
+        self._arrow_item.setFont(arrow_font)
+        self._arrow_item.setAcceptedMouseButtons(QtCore.Qt.NoButton)
+
+        # Multi-line note body item
+        self._body_item = NoteBodyTextItem(self)
+
+        self._calc_size_and_draw()
+
+    def set_note_text(self, text: str):
+        self._body_item._raw_text = text or ""
+        self._body_item._update_display()
+        self._calc_size_and_draw()
+
+    def get_note_text(self) -> str:
+        return self._body_item._raw_text
+
+    def set_collapsed(self, collapsed: bool, emit_signal: bool = False):
+        self.collapsed = bool(collapsed)
+        self._arrow_item.setText("▶" if self.collapsed else "▼")
+        self._body_item.setVisible(not self.collapsed)
+        self._calc_size_and_draw()
+
+        parent_node = getattr(self, "node", None)
+        if parent_node and hasattr(parent_node, "model"):
+            try:
+                parent_node.model.set_property("collapsed", self.collapsed)
+            except Exception:
+                pass
+
+        if emit_signal:
+            viewer = self.viewer() if hasattr(self, "viewer") and callable(self.viewer) else None
+            if viewer and hasattr(viewer, "node_note_collapsed_changed"):
+                sig = getattr(viewer, "node_note_collapsed_changed")
+                if hasattr(QtCore, "SignalInstance") and isinstance(sig, QtCore.SignalInstance):
+                    sig.emit(self.id, self.collapsed)
+                elif hasattr(sig, "emit"):
+                    sig.emit(self.id, self.collapsed)
+                elif callable(sig):
+                    sig(self.id, self.collapsed)
+
+    def toggle_collapse(self):
+        if self._body_item._is_editing:
+            self._body_item.finish_editing()
+        self.set_collapsed(not self.collapsed, emit_signal=True)
+
+    def start_note_editing(self):
+        self._body_item.start_editing()
+
+    def _calc_size_and_draw(self):
+        self.prepareGeometryChange()
+
+        title_w = self._text_item.boundingRect().width() if self._text_item else 40.0
+        arrow_w = self._arrow_item.boundingRect().width() if self._arrow_item else 16.0
+        header_w = 12.0 + title_w + 12.0 + arrow_w + 14.0
+
+        txt_offset = PortEnum.CLICK_FALLOFF.value - 2  # 13.0
+        inputs = [p for p in self.inputs if p.isVisible()]
+        outputs = [p for p in self.outputs if p.isVisible()]
+
+        in_text_w = max([self._input_items[p].boundingRect().width() for p in inputs] or [0.0])
+        out_text_w = max([self._output_items[p].boundingRect().width() for p in outputs] or [0.0])
+        ports_w = in_text_w + out_text_w + 50.0
+
+        body_w = (self._body_item.boundingRect().width() + 24.0) if not self.collapsed else 0.0
+
+        self._width = max(200.0, header_w, ports_w, body_w)
+
+        if self.collapsed:
+            self._height = 62.0
+        else:
+            body_h = self._body_item.boundingRect().height()
+            self._height = max(110.0, 58.0 + body_h + 14.0)
+
+        # Header positions
+        if self._text_item:
+            self._text_item.setPos(12.0, 6.0)
+        if self._arrow_item:
+            self._arrow_item.setPos(self._width - 22.0, 6.0)
+
+        # Position ports at y=34
+        port_y = 34.0
+        spacing = 1.0
+        cur_in_y = port_y
+        for port in inputs:
+            port_w = port.boundingRect().width()
+            port_h = port.boundingRect().height()
+            port.setPos((port_w / 2.0) * -1.0, cur_in_y)
+            text = self._input_items.get(port)
+            if text and text.isVisible():
+                text.setPos(port_w / 2.0 - txt_offset, cur_in_y - 1.5)
+            cur_in_y += port_h + spacing
+
+        cur_out_y = port_y
+        for port in outputs:
+            port_w = port.boundingRect().width()
+            port_h = port.boundingRect().height()
+            port.setPos(self._width - (port_w / 2.0), cur_out_y)
+            text = self._output_items.get(port)
+            if text and text.isVisible():
+                txt_w = text.boundingRect().width() - txt_offset
+                text.setPos(port.x() - txt_w, cur_out_y - 1.5)
+            cur_out_y += port_h + spacing
+
+        # Body text item position
+        if not self.collapsed:
+            self._body_item.setPos(10.0, 58.0)
+            self._body_item.setVisible(True)
+        else:
+            self._body_item.setVisible(False)
+
+        self.update()
+
+    def _calc_size_horizontal(self):
+        return self._width, self._height
+
+    def draw_node(self):
+        self._calc_size_and_draw()
+
+    def _draw_node_horizontal(self):
+        self._calc_size_and_draw()
+
+    def _align_label_horizontal(self, h_offset, v_offset):
+        if hasattr(self, "_text_item") and self._text_item:
+            self._text_item.setPos(12.0, 6.0)
+        if hasattr(self, "_arrow_item") and self._arrow_item:
+            self._arrow_item.setPos(getattr(self, "_width", 200.0) - 22.0, 6.0)
+
+    def _align_ports_horizontal(self, v_offset):
+        self._calc_size_and_draw()
+
+    def paint(self, painter, option, widget):
+        if not self.viewer():
+            return
+        super().paint(painter, option, widget)
+
+    def _paint_horizontal(self, painter, option, widget):
+        painter.save()
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        painter.setRenderHint(QtGui.QPainter.TextAntialiasing, True)
+
+        rect = self.boundingRect()
+        radius = 5.0
+
+        r, g, b = self.color[:3]
+        base_color = QtGui.QColor(r, g, b, 255)
+
+        # 1. Base card background
+        painter.setPen(QtCore.Qt.NoPen)
+        painter.setBrush(QtGui.QBrush(base_color))
+        painter.drawRoundedRect(rect, radius, radius)
+
+        # 2. Darker header band (height=28)
+        header_h = min(28.0, rect.height())
+        header_path = QtGui.QPainterPath()
+        header_path.addRoundedRect(QtCore.QRectF(rect.x(), rect.y(), rect.width(), header_h + radius), radius, radius)
+        card_path = QtGui.QPainterPath()
+        card_path.addRoundedRect(rect, radius, radius)
+        clip_path = card_path.intersected(header_path)
+
+        painter.save()
+        painter.setClipPath(clip_path)
+        header_bg = QtGui.QColor(max(0, r - 30), max(0, g - 25), max(0, b - 15), 235)
+        painter.setBrush(QtGui.QBrush(header_bg))
+        painter.drawRect(QtCore.QRectF(rect.x(), rect.y(), rect.width(), header_h))
+        painter.restore()
+
+        # Separator line at y = 28
+        painter.setPen(QtGui.QPen(QtGui.QColor(0, 0, 0, 70), 1.0))
+        painter.drawLine(QtCore.QPointF(rect.left(), header_h), QtCore.QPointF(rect.right(), header_h))
+        painter.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 25), 1.0))
+        painter.drawLine(QtCore.QPointF(rect.left(), header_h + 1.0), QtCore.QPointF(rect.right(), header_h + 1.0))
+
+        # 3. Subtle inner area behind body text when expanded
+        if not self.collapsed and rect.height() > 60.0:
+            inner_rect = QtCore.QRectF(
+                rect.left() + 6.0,
+                52.0,
+                rect.width() - 12.0,
+                rect.height() - 58.0,
+            )
+            inner_bg = QtGui.QColor(max(0, r - 20), max(0, g - 18), max(0, b - 10), 160)
+            inner_border = QtGui.QColor(0, 0, 0, 40)
+            painter.setBrush(QtGui.QBrush(inner_bg))
+            painter.setPen(QtGui.QPen(inner_border, 1.0))
+            painter.drawRoundedRect(inner_rect, 4.0, 4.0)
+
+        # 4. Outer border / Selection border
+        if self.selected:
+            border_color = QtGui.QColor(*NodeEnum.SELECTED_BORDER_COLOR.value)
+            border_width = 1.6
+        else:
+            border_color = QtGui.QColor(max(0, r - 45), max(0, g - 40), max(0, b - 20), 220)
+            border_width = 1.0
+
+        border_rect = QtCore.QRectF(rect.left(), rect.top(), rect.width(), rect.height())
+        painter.setBrush(QtCore.Qt.NoBrush)
+        painter.setPen(QtGui.QPen(border_color, border_width))
+        painter.drawRoundedRect(border_rect, radius, radius)
+
+        painter.restore()
+
+    def mousePressEvent(self, event):
+        arrow_rect = self._arrow_item.boundingRect().translated(self._arrow_item.pos()).adjusted(-8, -8, 8, 8)
+        if event.button() == QtCore.Qt.LeftButton and arrow_rect.contains(event.pos()):
+            self.toggle_collapse()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == QtCore.Qt.LeftButton:
+            pos = event.pos()
+            arrow_rect = self._arrow_item.boundingRect().translated(self._arrow_item.pos()).adjusted(-8, -8, 8, 8)
+            if arrow_rect.contains(pos):
+                event.accept()
+                return
+            if pos.y() <= 30.0:
+                if hasattr(self._text_item, "set_editable"):
+                    self._text_item.set_editable(True)
+                event.accept()
+                return
+            else:
+                self.start_note_editing()
+                event.accept()
+                return
+        super().mouseDoubleClickEvent(event)
+
+
+class NoteNode(BaseNode):
+    """Node representing an expandable/collapsible rich note card."""
+
+    __identifier__ = "reporting.nodes"
+    NODE_NAME = "Note"
+
+    def __init__(self):
+        super(NoteNode, self).__init__(NoteNodeItem)
+        self.set_color(COLOR_NOTE[0], COLOR_NOTE[1], COLOR_NOTE[2])
+
+        # Execution order ports (Blue)
+        self.add_input("run_in", multi_input=True, display_name=True, color=(COLOR_BLUE[0], COLOR_BLUE[1], COLOR_BLUE[2]))
+        self.add_output("run_out", multi_output=True, display_name=True, color=(COLOR_BLUE[0], COLOR_BLUE[1], COLOR_BLUE[2]))
+
+        # Custom properties
+        self.create_property("note_text", "")
+        self.create_property("collapsed", False)
+
+        if hasattr(self, "view") and self.view:
+            self.view.node = self
+
+    def set_property(self, name, value, push_undo=True):
+        if name not in self.model.properties and not self.has_property(name):
+            self.create_property(name, value)
+        else:
+            super().set_property(name, value, push_undo=push_undo)
+
+        if name == "note_text" and hasattr(self.view, "set_note_text"):
+            self.view.set_note_text(value)
+        elif name == "collapsed" and hasattr(self.view, "set_collapsed"):
+            self.view.set_collapsed(bool(value), emit_signal=False)
+
+    def on_property_changed(self, name, value):
+        super().on_property_changed(name, value)
+        if name == "note_text" and hasattr(self.view, "set_note_text"):
+            self.view.set_note_text(value)
+        elif name == "collapsed" and hasattr(self.view, "set_collapsed"):
+            self.view.set_collapsed(bool(value), emit_signal=False)
+
+    def set_note_text(self, text: str):
+        self.set_property("note_text", text)
+
+    def get_note_text(self) -> str:
+        return self.get_property("note_text") or ""
+
+    def set_collapsed(self, collapsed: bool):
+        self.set_property("collapsed", bool(collapsed))
+
+    def is_collapsed(self) -> bool:
+        return bool(self.get_property("collapsed"))
 
 
 # Dark mode group box color palette matching the 10 swatches in reference image
@@ -1802,4 +2229,39 @@ def _safe_port_disconnected_redo(self):
 
 commands.PortConnectedCmd.redo = _safe_port_connected_redo
 commands.PortDisconnectedCmd.redo = _safe_port_disconnected_redo
+
+__all__ = [
+    "COLOR_BLUE",
+    "COLOR_DARK_ORANGE",
+    "COLOR_DARK_PURPLE",
+    "COLOR_GREEN",
+    "COLOR_NOTE",
+    "CircularInfoButtonItem",
+    "CustomNodeTextItem",
+    "DEFAULT_GROUP_COLOR",
+    "ExecutableNodeItem",
+    "FloatingPillItem",
+    "GROUP_DARK_COLORS",
+    "GroupBoxItem",
+    "GroupBoxNode",
+    "GroupColorButtonItem",
+    "GroupColorPalettePopup",
+    "GroupPlayButtonItem",
+    "ImportCsvItem",
+    "ImportCsvNode",
+    "ImportFilesItem",
+    "ImportFilesNode",
+    "NodeExecutionOverlayItem",
+    "NoteBodyTextItem",
+    "NoteNode",
+    "NoteNodeItem",
+    "QueryNode",
+    "QueryNodeItem",
+    "TableBoxItem",
+    "TableBoxNode",
+    "get_node_lod",
+    "get_noodle_color",
+    "wrap_node_name_lines",
+]
+
 

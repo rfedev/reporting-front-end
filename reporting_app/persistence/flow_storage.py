@@ -123,17 +123,26 @@ class FlowStorage:
             pos = ndata.get("pos")
             nname = ndata.get("name") or str(nid)
             qname = (ndata.get("custom") or {}).get("query_name") if isinstance(ndata.get("custom"), dict) else None
+            box_key = (ndata.get("custom") or {}).get("box_key") if isinstance(ndata.get("custom"), dict) else None
             if isinstance(pos, (list, tuple)) and len(pos) >= 2:
                 coord = [float(pos[0]), float(pos[1])]
+            elif box_key and box_key in positions:
+                coord = list(positions[box_key])
             elif nname in positions:
                 coord = list(positions[nname])
             elif qname and qname in positions:
                 coord = list(positions[qname])
+            elif str(nid) in positions:
+                coord = list(positions[str(nid)])
             else:
                 coord = [0.0, 0.0]
             extracted[str(nname)] = coord
             if qname and qname != nname:
                 extracted[str(qname)] = coord
+            if box_key and box_key != nname:
+                extracted[str(box_key)] = coord
+            if str(nid) != nname:
+                extracted[str(nid)] = coord
 
         return extracted
 
@@ -275,14 +284,22 @@ class FlowStorage:
                 continue
             nname = ndata.get("name") or str(nid)
             qname = (ndata.get("custom") or {}).get("query_name") if isinstance(ndata.get("custom"), dict) else None
+            box_key = (ndata.get("custom") or {}).get("box_key") if isinstance(ndata.get("custom"), dict) else None
+            if ndata.get("type_") == "reporting.nodes.TableBoxNode" and box_key:
+                if not ndata.get("name") or ndata.get("name") in ("Input Tables", "Output Tables", "Output CSV"):
+                    ndata["name"] = box_key
+                nname = ndata.get("name") or str(nid)
+
             pos = None
             if isinstance(node_positions, dict):
-                if nname in node_positions:
+                if str(nid) in node_positions:
+                    pos = node_positions[str(nid)]
+                elif box_key and box_key in node_positions:
+                    pos = node_positions[box_key]
+                elif nname in node_positions:
                     pos = node_positions[nname]
                 elif qname and qname in node_positions:
                     pos = node_positions[qname]
-                elif str(nid) in node_positions:
-                    pos = node_positions[str(nid)]
             if isinstance(pos, (list, tuple)) and len(pos) >= 2:
                 ndata["pos"] = [float(pos[0]), float(pos[1])]
             elif "pos" not in ndata:

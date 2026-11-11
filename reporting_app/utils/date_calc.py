@@ -23,6 +23,7 @@ QUARTER_ITEMS = ["1st of Qtr", "1st Workday", "Last Workday", "Quarter End"]
 IMPORT_DATE_OPTIONS = [
     "Flow Date",
     "None",
+    "Current • Today",
     "Current • Week • Mon",
     "Current • Week • Sun",
     "Current • Month • 1st of Month",
@@ -73,6 +74,7 @@ def evaluate_date_preset(
     - "Pick Date" -> returns today's date (or ref_date)
     - "Flow Date" -> returns flow_date
     - "None" -> returns ""
+    - "Current • Today" -> returns today's date (or ref_date)
     - "Current • Week • <Mon..Sun>"
     - "Previous • Week • <Mon..Sun>"
     - "Current • Month • <1st of Month | 1st Workday | Last Workday | Month End>"
@@ -92,7 +94,7 @@ def evaluate_date_preset(
     if opt_lower == "flow date":
         return (flow_date or "").strip()
 
-    if opt_lower in ("pick date", "pick_date"):
+    if opt_lower in ("pick date", "pick_date", "today", "current • today", "current->today"):
         return (ref_date or date.today()).strftime("%Y-%m-%d")
 
     if ref_date is None:
@@ -101,6 +103,9 @@ def evaluate_date_preset(
     # Split hierarchical parts separated by "•", "->", or ":"
     clean = raw_opt.replace("->", "•").replace(":", "•")
     parts = [p.strip() for p in clean.split("•")]
+
+    if len(parts) == 2 and parts[0].lower() == "current" and parts[1].lower() == "today":
+        return (ref_date or date.today()).strftime("%Y-%m-%d")
 
     if len(parts) >= 3:
         period_type = parts[0].lower()  # "current" or "previous" / "prev"

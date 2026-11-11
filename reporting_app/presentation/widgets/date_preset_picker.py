@@ -202,6 +202,14 @@ class DatePresetPicker(QPushButton):
     def _populate_cadence_menu(self, parent_menu: QMenu, period_type: str) -> None:
         parent_menu.hovered.connect(self._on_action_hovered)
 
+        # Today (for Current menu)
+        if period_type == "Current":
+            today_preset = "Current • Today"
+            today_act = parent_menu.addAction("Today")
+            today_act.triggered.connect(lambda checked=False, p=today_preset: self.set_preset(p))
+            self._action_preset_map[today_act] = today_preset
+            parent_menu.addSeparator()
+
         # Week
         week_menu = parent_menu.addMenu("Week")
         week_menu.hovered.connect(self._on_action_hovered)

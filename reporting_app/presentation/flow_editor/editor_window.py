@@ -95,7 +95,13 @@ except ImportError:
 from reporting_app.presentation.flow_editor.schema_dialog import SchemaEditorDialog
 from reporting_app.presentation.flow_editor.parameter_overlay import CanvasParameterOverlay
 from reporting_app.presentation.flow_editor.query_tree_widget import QueryManagementPanel
+from reporting_app.presentation.flow_editor.report_tree_widget import (
+    AddReportDialog,
+    NewProcessFlowDialog,
+    ReportFlowTreePanel,
+)
 from reporting_app.presentation.query_dialog import QueryRunDialog
+from reporting_app.presentation.settings_dialog import SettingsDialog
 
 logger = logging.getLogger(__name__)
 
@@ -109,32 +115,63 @@ from reporting_app.presentation.flow_editor.execution_tab import FlowExecutionTa
 
 
 class ProcessFlowEditorWindow(QMainWindow):
-    """Visual Process Flow Editor built on NodeGraphQt."""
+    """Visual Process Flow Editor and unified main application window built on NodeGraphQt."""
 
     def __init__(
         self,
-        report: Report,
+        report: Optional[Report] = None,
         flow_info: Optional[ProcessFlowInfo] = None,
         flow_name: Optional[str] = None,
         app_controller: Optional[AppController] = None,
+        controller: Optional[AppController] = None,
         parent: Optional[QWidget] = None,
     ):
         super().__init__(parent)
+        self.app_controller = app_controller or controller
+
+        if self.app_controller and not self.app_controller.reports_by_key and report is None:
+            self.app_controller.initialize()
+
+        if report is None and self.app_controller:
+            report = self.app_controller.active_report
+
+        self._has_active_report: bool = report is not None
+        if report is None:
+            report = Report(name="No Report Selected", folder_path=Path.cwd())
+
+        if self._has_active_report and flow_info is None and not flow_name:
+            if self.app_controller and self.app_controller.active_flow_name:
+                flow_name = self.app_controller.active_flow_name
+            elif report.process_flows:
+                flow_name = report.process_flows[0].name
+            else:
+                flow_name = "Process Flow 01"
+            flow_info = report.get_process_flow(flow_name)
+        elif self._has_active_report and flow_info is None and flow_name:
+            flow_info = report.get_process_flow(flow_name)
+        elif flow_info is not None and not flow_name:
+            flow_name = flow_info.name
+
         self.report = report
-        self.app_controller = app_controller
+        self._switching_flow: bool = False
+        self._last_left_width: int = ReportFlowTreePanel.DEFAULT_EXPANDED_WIDTH
+        self._last_right_width: int = QueryManagementPanel.DEFAULT_EXPANDED_WIDTH
 
         # Controller for this process flow
-        repo = app_controller.repo if app_controller else None
+        repo = self.app_controller.repo if self.app_controller else None
         self.flow_controller = ProcessFlowController(
-            report=report,
+            report=self.report,
             flow_info=flow_info,
             flow_name=flow_name,
             repo=repo,
             parent=self,
         )
 
-        self.setWindowTitle(f"Process Flow - {report.name} - {self.flow_controller.flow_name}")
-        self.resize(1200, 750)
+        if self._has_active_report:
+            self.setWindowTitle(f"Process Flow - {self.report.name} - {self.flow_controller.flow_name}")
+        else:
+            self.setWindowTitle("Reporting Front End - Process Flow Editor")
+        self.resize(1320, 800)
         self.setAttribute(Qt.WA_DeleteOnClose, True)
 
         self._node_counter = 0
@@ -163,9 +200,14 @@ class ProcessFlowEditorWindow(QMainWindow):
         self._load_initial_graph()
         self._wire_auto_save_signals()
 
-        # Connect file watcher / report change signal to detect disk edits to queries
+        # Connect file watcher / controller change signals
         if self.app_controller:
             self.app_controller.active_report_changed.connect(self._on_report_updated_from_controller)
+            self.app_controller.reports_updated.connect(self._on_controller_reports_updated)
+            self.app_controller.process_flows_updated.connect(self._on_controller_flows_updated)
+            self.app_controller.queries_updated.connect(self._on_controller_queries_updated)
+            self.app_controller.status_changed.connect(self._on_controller_status_changed)
+            QTimer.singleShot(100, self._check_workbench_dataset)
 
     def _init_graph(self) -> None:
         """Initialize NodeGraphQt instance and register custom nodes."""
@@ -871,19 +913,10 @@ class ProcessFlowEditorWindow(QMainWindow):
         self._update_run_button_state()
 
     def _build_ui(self) -> None:
-        # Toolbar
-        toolbar = QToolBar("Flow Actions", self)
-        toolbar.setMovable(False)
-        self.addToolBar(toolbar)
-
-        # Far left: Left panel collapse/expand arrow button
-        self.toggle_left_btn = QPushButton("◀")
-        self.toggle_left_btn.setFixedWidth(36)
-        self.toggle_left_btn.setToolTip("Toggle Queries Panel")
-        self.toggle_left_btn.clicked.connect(self._toggle_left_panel)
-        toolbar.addWidget(self.toggle_left_btn)
-
-        toolbar.addSeparator()
+        # Center Toolbar (confined to center panel so side panels extend to the top edge of the window)
+        self.toolbar = QToolBar("Flow Actions", self)
+        self.toolbar.setMovable(False)
+        toolbar = self.toolbar
 
         self.save_btn = QPushButton("💾")
         self.save_btn.setFixedSize(32, 32)
@@ -944,12 +977,12 @@ class ProcessFlowEditorWindow(QMainWindow):
         self.open_folder_btn.clicked.connect(self._on_open_report_folder)
         toolbar.addWidget(self.open_folder_btn)
 
-        # Spacer to push Appearance menu and toggle right button to far right
+        # Spacer to push Appearance menu to far right of toolbar
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         toolbar.addWidget(spacer)
 
-        # Appearance dropdown menu button (to the left of the right panel toggle)
+        # Appearance dropdown menu button
         self.appearance_btn = QToolButton(self)
         self.appearance_btn.setText("Appearance ☰")
         self.appearance_btn.setStyleSheet("QToolButton::menu-indicator { image: none; width: 0px; }")
@@ -977,7 +1010,9 @@ class ProcessFlowEditorWindow(QMainWindow):
                         return
                 super().drawControl(element, opt, p, widget)
 
-        appearance_menu.setStyle(LowercaseGreyShortcutStyle())
+        self._appearance_menu_style = LowercaseGreyShortcutStyle()
+        self._appearance_menu_style.setParent(appearance_menu)
+        appearance_menu.setStyle(self._appearance_menu_style)
 
         action_layout_h = appearance_menu.addAction("Auto Layout (Horizontal)\th")
         action_layout_h.triggered.connect(lambda: self._auto_layout("horizontal"))
@@ -1000,28 +1035,34 @@ class ProcessFlowEditorWindow(QMainWindow):
         self.appearance_btn.setMenu(appearance_menu)
         toolbar.addWidget(self.appearance_btn)
 
-        toolbar.addSeparator()
-
-        # Far right: Right panel collapse/expand arrow button
-        self.toggle_right_btn = QPushButton("▶")
-        self.toggle_right_btn.setFixedWidth(36)
-        self.toggle_right_btn.setToolTip("Toggle Inspector Panel")
-        self.toggle_right_btn.clicked.connect(self._toggle_right_panel)
-        toolbar.addWidget(self.toggle_right_btn)
-
-        # Main splitter layout: Left Panel | Canvas | Right Panel
+        # Main splitter layout: Left Panel (Reports/Flows) | Center Panel (Toolbar + Canvas) | Right Panel (Queries)
         self.splitter = QSplitter(Qt.Horizontal, self)
 
-        # Left Panel (Query management & Drag-and-Drop)
-        self.left_panel = QueryManagementPanel(self)
-        self._refresh_left_queries()
-        self.left_panel.query_added.connect(self._on_query_added)
-        self.left_panel.query_removed.connect(self._on_query_removed)
-        self.left_panel.query_renamed.connect(self._on_query_renamed)
-        self.left_panel.query_double_clicked.connect(self._open_query_file)
+        # Left Panel (Reports & Process Flows tree + bottom Auth/Settings/Sync controls)
+        self.left_panel = ReportFlowTreePanel(self)
+        self.left_panel.process_flow_selected.connect(self._on_tree_process_flow_selected)
+        self.left_panel.add_report_requested.connect(self._on_add_report)
+        self.left_panel.rename_report_requested.connect(self._on_rename_report)
+        self.left_panel.remove_report_requested.connect(self._on_remove_report)
+        self.left_panel.add_flow_requested.connect(self._on_add_process_flow)
+        self.left_panel.rename_flow_requested.connect(self._on_rename_process_flow)
+        self.left_panel.remove_flow_requested.connect(self._on_remove_process_flow)
+        self.left_panel.auth_requested.connect(self._on_auth_login)
+        self.left_panel.settings_requested.connect(self._on_open_settings)
+        self.left_panel.sync_requested.connect(self._on_manual_sync)
+        self.left_panel.collapse_toggled.connect(self._on_left_panel_collapse_toggled)
+        self.left_panel.pinned_reports_changed.connect(self._on_pinned_reports_changed)
+        if self.app_controller and self.app_controller.repo:
+            raw_pinned = self.app_controller.repo.get_setting("pinned_reports", "[]")
+            try:
+                pinned_list = json.loads(raw_pinned)
+                if isinstance(pinned_list, list):
+                    self.left_panel.set_pinned_reports([str(x) for x in pinned_list if x])
+            except Exception:
+                pass
         self.splitter.addWidget(self.left_panel)
 
-        # Center: Node Graph Canvas Widget
+        # Center Panel: Toolbar + Node Graph Canvas Widget
         self.graph_widget = self.graph.widget
         viewer = self.graph.viewer()
         viewer.setAcceptDrops(True)
@@ -1045,22 +1086,43 @@ class ProcessFlowEditorWindow(QMainWindow):
         self.execution_tab.hide()
         self.execution_tab.run_state_changed.connect(self._update_run_button_state)
 
-        self.splitter.addWidget(self.graph_widget)
+        self.center_panel = QWidget(self)
+        center_layout = QVBoxLayout(self.center_panel)
+        center_layout.setContentsMargins(0, 0, 0, 0)
+        center_layout.setSpacing(0)
+        center_layout.addWidget(self.toolbar)
+        center_layout.addWidget(self.graph_widget, 1)
+        self.splitter.addWidget(self.center_panel)
 
-        # Right Panel (Currently unused / placeholder)
-        self.right_panel = QWidget(self)
-        self.right_panel.setMinimumWidth(0)
-        right_layout = QVBoxLayout(self.right_panel)
-        right_label = QLabel("<b>Properties & Inspector</b><br><br><i>(Right panel currently unused)</i>")
-        right_label.setAlignment(Qt.AlignCenter)
-        right_label.setStyleSheet("color: #888888; font-size: 12px;")
-        right_layout.addWidget(right_label)
+        # Right Panel (Query management & Drag-and-Drop)
+        self.right_panel = QueryManagementPanel(self)
+        self.right_panel.query_added.connect(self._on_query_added)
+        self.right_panel.query_removed.connect(self._on_query_removed)
+        self.right_panel.query_renamed.connect(self._on_query_renamed)
+        self.right_panel.query_double_clicked.connect(self._open_query_file)
+        self.right_panel.query_run_requested.connect(self._on_run_standalone_query)
+        self.right_panel.collapse_toggled.connect(self._on_right_panel_collapse_toggled)
         self.splitter.addWidget(self.right_panel)
+
         self.splitter.setCollapsible(0, False)
         self.splitter.setCollapsible(1, False)
-        self.splitter.setCollapsible(2, True)
+        self.splitter.setCollapsible(2, False)
+        self.splitter.setStretchFactor(0, 0)
+        self.splitter.setStretchFactor(1, 1)
+        self.splitter.setStretchFactor(2, 0)
+        self.splitter.splitterMoved.connect(self._on_splitter_moved)
 
-        # Set initial splitter sizes (load from flow_controller or repository if present)
+        # Populate side panels
+        self._refresh_left_reports_tree()
+        self._refresh_right_queries()
+
+        # Set initial splitter sizes & collapsed states
+        left_collapsed = False
+        right_collapsed = False
+        if self.app_controller and self.app_controller.repo:
+            left_collapsed = self.app_controller.repo.get_setting("flow_editor_left_collapsed", "0") == "1"
+            right_collapsed = self.app_controller.repo.get_setting("flow_editor_right_collapsed", "0") == "1"
+
         saved_sizes = self.flow_controller.get_splitter_sizes()
         if not saved_sizes and self.app_controller and self.app_controller.repo:
             repo_sizes = self.app_controller.repo.get_setting("flow_editor_splitter_sizes", "")
@@ -1069,10 +1131,33 @@ class ProcessFlowEditorWindow(QMainWindow):
                     saved_sizes = [int(s) for s in repo_sizes.split(",") if s.strip()]
                 except Exception:
                     saved_sizes = None
+
         if saved_sizes and len(saved_sizes) == 3:
-            self.splitter.setSizes(saved_sizes)
+            lw = int(saved_sizes[0])
+            cw = int(saved_sizes[1])
+            rw = int(saved_sizes[2])
+            if not left_collapsed and lw < ReportFlowTreePanel.EXPANDED_MIN_WIDTH:
+                lw = ReportFlowTreePanel.DEFAULT_EXPANDED_WIDTH
+            if not right_collapsed and rw < QueryManagementPanel.EXPANDED_MIN_WIDTH:
+                rw = QueryManagementPanel.DEFAULT_EXPANDED_WIDTH
+            self._last_left_width = max(ReportFlowTreePanel.EXPANDED_MIN_WIDTH, lw)
+            self._last_right_width = max(QueryManagementPanel.EXPANDED_MIN_WIDTH, rw)
+            if left_collapsed:
+                self.left_panel.set_collapsed(True)
+                lw = ReportFlowTreePanel.COLLAPSED_WIDTH
+            if right_collapsed:
+                self.right_panel.set_collapsed(True)
+                rw = QueryManagementPanel.COLLAPSED_WIDTH
+            self.splitter.setSizes([lw, max(300, cw), rw])
         else:
-            self.splitter.setSizes([240, 960, 0])
+            lw = ReportFlowTreePanel.COLLAPSED_WIDTH if left_collapsed else ReportFlowTreePanel.DEFAULT_EXPANDED_WIDTH
+            rw = QueryManagementPanel.COLLAPSED_WIDTH if right_collapsed else QueryManagementPanel.DEFAULT_EXPANDED_WIDTH
+            if left_collapsed:
+                self.left_panel.set_collapsed(True)
+            if right_collapsed:
+                self.right_panel.set_collapsed(True)
+            self.splitter.setSizes([lw, 830, rw])
+
         self.setCentralWidget(self.splitter)
 
         # Status bar
@@ -1101,17 +1186,57 @@ class ProcessFlowEditorWindow(QMainWindow):
         """Called when a query file is modified on disk."""
         self._sync_query_files_and_parameters()
 
+    def _on_splitter_moved(self, pos: int, index: int) -> None:
+        """Track user-resized expanded widths of left and right panels."""
+        sizes = self.splitter.sizes()
+        if len(sizes) != 3:
+            return
+        if not self.left_panel.is_collapsed() and sizes[0] >= ReportFlowTreePanel.EXPANDED_MIN_WIDTH:
+            self._last_left_width = sizes[0]
+        if not self.right_panel.is_collapsed() and sizes[2] >= QueryManagementPanel.EXPANDED_MIN_WIDTH:
+            self._last_right_width = sizes[2]
+
+    def _on_left_panel_collapse_toggled(self, is_collapsed: bool) -> None:
+        """Adjust splitter widths when left panel collapses to 32px rail or expands."""
+        sizes = list(self.splitter.sizes())
+        if len(sizes) != 3:
+            return
+        if is_collapsed:
+            if sizes[0] >= ReportFlowTreePanel.EXPANDED_MIN_WIDTH:
+                self._last_left_width = sizes[0]
+            delta = max(0, sizes[0] - ReportFlowTreePanel.COLLAPSED_WIDTH)
+            self.splitter.setSizes([ReportFlowTreePanel.COLLAPSED_WIDTH, sizes[1] + delta, sizes[2]])
+        else:
+            target_w = max(ReportFlowTreePanel.EXPANDED_MIN_WIDTH, self._last_left_width)
+            delta = target_w - sizes[0]
+            self.splitter.setSizes([target_w, max(300, sizes[1] - delta), sizes[2]])
+        if self.app_controller and self.app_controller.repo:
+            self.app_controller.repo.set_setting("flow_editor_left_collapsed", "1" if is_collapsed else "0")
+
+    def _on_right_panel_collapse_toggled(self, is_collapsed: bool) -> None:
+        """Adjust splitter widths when right panel collapses to 32px rail or expands."""
+        sizes = list(self.splitter.sizes())
+        if len(sizes) != 3:
+            return
+        if is_collapsed:
+            if sizes[2] >= QueryManagementPanel.EXPANDED_MIN_WIDTH:
+                self._last_right_width = sizes[2]
+            delta = max(0, sizes[2] - QueryManagementPanel.COLLAPSED_WIDTH)
+            self.splitter.setSizes([sizes[0], sizes[1] + delta, QueryManagementPanel.COLLAPSED_WIDTH])
+        else:
+            target_w = max(QueryManagementPanel.EXPANDED_MIN_WIDTH, self._last_right_width)
+            delta = target_w - sizes[2]
+            self.splitter.setSizes([sizes[0], max(300, sizes[1] - delta), target_w])
+        if self.app_controller and self.app_controller.repo:
+            self.app_controller.repo.set_setting("flow_editor_right_collapsed", "1" if is_collapsed else "0")
+
     def _toggle_left_panel(self) -> None:
-        """Collapse or expand left queries panel."""
-        is_visible = self.left_panel.isVisible()
-        self.left_panel.setVisible(not is_visible)
-        self.toggle_left_btn.setText("▶" if is_visible else "◀")
+        """Collapse or expand left Reports & Process Flows panel."""
+        self.left_panel.set_collapsed(not self.left_panel.is_collapsed(), emit_signal=True)
 
     def _toggle_right_panel(self) -> None:
-        """Collapse or expand right inspector panel."""
-        is_visible = self.right_panel.isVisible()
-        self.right_panel.setVisible(not is_visible)
-        self.toggle_right_btn.setText("◀" if is_visible else "▶")
+        """Collapse or expand right Queries panel."""
+        self.right_panel.set_collapsed(not self.right_panel.is_collapsed(), emit_signal=True)
 
     def _toggle_table_names_display(self) -> None:
         """Toggle full table address vs short table name across all TableBoxNodes."""
@@ -1161,13 +1286,45 @@ class ProcessFlowEditorWindow(QMainWindow):
                     return replace(orig_q, name=curr_name)
         return None
 
-    def _refresh_left_queries(self) -> None:
-        """Update the list of available queries in the left panel, respecting pending renames."""
+    def _get_active_report_key(self) -> Optional[str]:
+        """Return the active report display key used in app_controller.reports_by_key."""
+        if not self.app_controller or not getattr(self, "_has_active_report", True) or not self.report:
+            return None
+        for k, r in self.app_controller.reports_by_key.items():
+            if r.folder_path == self.report.folder_path:
+                return k
+        for k, r in self.app_controller.reports_by_key.items():
+            if r.name == self.report.name:
+                return k
+        return self.report.name
+
+    def _refresh_left_reports_tree(self) -> None:
+        """Populate/refresh the left Reports & Process Flows tree panel."""
+        if not hasattr(self, "left_panel") or not self.app_controller:
+            return
+        rep_key = self._get_active_report_key()
+        flow_name = self.flow_controller.flow_name if (getattr(self, "_has_active_report", True) and self.flow_controller) else None
+        self.left_panel.set_reports_tree(
+            self.app_controller.reports_by_key,
+            active_report_key=rep_key,
+            active_flow_name=flow_name,
+        )
+        self.left_panel.set_sync_visible(not self.app_controller.get_auto_scan())
+
+    def _refresh_right_queries(self) -> None:
+        """Update the list of available queries in the right panel, respecting pending renames."""
+        if not hasattr(self, "right_panel"):
+            return
+        if not getattr(self, "_has_active_report", True) or not self.report:
+            self.right_panel.set_queries([])
+            return
         query_names = []
         for q in self.report.queries:
             name = self._pending_query_renames.get(q.name, q.name)
             query_names.append(name)
-        self.left_panel.set_queries(query_names)
+        self.right_panel.set_queries(query_names)
+
+    _refresh_left_queries = _refresh_right_queries
 
     def _sync_all_query_csv_comments(self) -> None:
         """Ensure active query files in the current flow have synchronized # output: comments."""
@@ -1330,6 +1487,16 @@ class ProcessFlowEditorWindow(QMainWindow):
 
     def _load_initial_graph(self) -> None:
         """Load saved session or automatically add flow queries if brand new."""
+        if not getattr(self, "_has_active_report", True):
+            self._suppress_dirty = True
+            try:
+                self._refresh_parameter_overlay()
+            finally:
+                self._suppress_dirty = False
+                self._is_dirty = False
+                self._update_dirty_ui()
+            return
+
         flow_queries = set(self.flow_controller.get_query_names())
         session_data = self.flow_controller.get_graph_session()
         if session_data and "nodes" in session_data:
@@ -1345,7 +1512,11 @@ class ProcessFlowEditorWindow(QMainWindow):
         viewer = self.graph.viewer()
 
         def apply_view_state():
-            self._fit_graph_to_canvas()
+            try:
+                if not getattr(self, "_is_closing", False) and hasattr(self, "graph"):
+                    self._fit_graph_to_canvas()
+            except RuntimeError:
+                pass
 
         self._suppress_dirty = True
         try:
@@ -1877,19 +2048,632 @@ class ProcessFlowEditorWindow(QMainWindow):
 
     def _on_report_updated_from_controller(self, new_report: Optional[Report]) -> None:
         """Handle disk modifications detected by the application controller/file watcher."""
-        if getattr(self, "_is_renaming_query", False):
+        if getattr(self, "_is_renaming_query", False) or getattr(self, "_switching_flow", False):
             return
-        if not new_report or new_report.name != self.report.name:
+        if not getattr(self, "_has_active_report", True) or not new_report or new_report.name != self.report.name:
             return
 
         self._suppress_dirty = True
         try:
             self.report = new_report
             self.flow_controller.report = new_report
-            self._refresh_left_queries()
+            self._refresh_right_queries()
+            self._refresh_left_reports_tree()
             self._sync_query_files_and_parameters()
         finally:
             self._suppress_dirty = False
+
+    def _on_controller_reports_updated(self, _report_names: list) -> None:
+        if getattr(self, "_switching_flow", False):
+            return
+        self._refresh_left_reports_tree()
+
+    def _on_controller_flows_updated(self, _flow_names: list) -> None:
+        if getattr(self, "_switching_flow", False):
+            return
+        self._refresh_left_reports_tree()
+
+    def _on_controller_queries_updated(self, _query_names: list) -> None:
+        if getattr(self, "_switching_flow", False):
+            return
+        self._refresh_right_queries()
+
+    def _on_controller_status_changed(self, msg: str) -> None:
+        if hasattr(self, "status_bar") and msg:
+            self.status_bar.showMessage(msg, 4000)
+
+    def _check_workbench_dataset(self) -> None:
+        """Prompt user for Workbench Dataset if not yet set."""
+        if not self.isVisible() or not self.app_controller or not getattr(self.app_controller, "repo", None):
+            return
+        current_wb = self.app_controller.repo.get_workbench_dataset()
+        if not current_wb:
+            default_val = SettingsDialog.DEFAULT_WORKBENCH_DATASET
+            val, ok = QInputDialog.getText(
+                self,
+                "Workbench Dataset",
+                "Please enter your team workbench dataset address:",
+                text=default_val,
+            )
+            if ok and val.strip():
+                self.app_controller.repo.set_workbench_dataset(val.strip())
+
+    def _on_tree_process_flow_selected(self, report_key: str, flow_name: str) -> None:
+        """Load the selected process flow from the left tree into the center canvas."""
+        self.switch_to_process_flow(report_key, flow_name)
+
+    def switch_to_process_flow(self, report_key: str, flow_name: str, force: bool = False) -> bool:
+        """Switch the active report and process flow displayed in the center canvas."""
+        if not self.app_controller:
+            return False
+
+        target_report = (
+            self.app_controller.reports_by_key.get(report_key)
+            or self.app_controller.reports_by_name.get(report_key)
+        )
+        if not target_report:
+            return False
+
+        cur_key = self._get_active_report_key()
+        if (
+            not force
+            and getattr(self, "_has_active_report", True)
+            and (cur_key == report_key or (self.report and self.report.folder_path == target_report.folder_path))
+            and self.flow_controller
+            and self.flow_controller.flow_name == flow_name
+        ):
+            self.left_panel.set_active_selection(report_key, flow_name, report_title=target_report.name)
+            return True
+
+        if not force and hasattr(self, "execution_tab") and self.execution_tab.is_running():
+            QMessageBox.information(
+                self,
+                "Execution In Progress",
+                "A process flow is currently running. Please wait for it to finish or cancel it before switching flows.",
+            )
+            self.left_panel.set_active_selection(cur_key, self.flow_controller.flow_name, report_title=self.report.name)
+            return False
+
+        # Save or prompt if there are unsaved changes on the current flow
+        if not force and self._is_dirty and getattr(self, "_has_active_report", True):
+            if self.auto_save_enabled:
+                try:
+                    self._on_save(show_popup=False)
+                except Exception as e:
+                    logger.warning(f"Auto-save before switching flow failed: {e}")
+            else:
+                msg_box = QMessageBox(self)
+                msg_box.setWindowTitle("Unsaved Changes")
+                msg_box.setText(f"Process flow '{self.flow_controller.flow_name}' has unsaved changes.")
+                msg_box.setInformativeText("Do you want to save your changes before switching?")
+                msg_box.setStandardButtons(QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel)
+                msg_box.setDefaultButton(QMessageBox.Save)
+                reply = msg_box.exec()
+                if reply == QMessageBox.Save:
+                    try:
+                        self._on_save(show_popup=False)
+                    except Exception as e:
+                        QMessageBox.critical(self, "Save Error", f"Failed to save process flow: {e}")
+                        self.left_panel.set_active_selection(cur_key, self.flow_controller.flow_name, report_title=self.report.name)
+                        return False
+                elif reply == QMessageBox.Cancel:
+                    self.left_panel.set_active_selection(cur_key, self.flow_controller.flow_name, report_title=self.report.name)
+                    return False
+
+        self._switching_flow = True
+        try:
+            self.app_controller.select_report(report_key, preserve_flow=True)
+            self.app_controller.select_process_flow(flow_name)
+            self.report = self.app_controller.active_report or target_report
+            self._has_active_report = self.report is not None
+
+            flow_info = self.report.get_process_flow(flow_name) if self.report else None
+            repo = self.app_controller.repo
+            self.flow_controller = ProcessFlowController(
+                report=self.report,
+                flow_info=flow_info,
+                flow_name=flow_name,
+                repo=repo,
+                parent=self,
+            )
+
+            self._pending_query_renames.clear()
+            self._node_positions = self.flow_controller.get_node_positions()
+            self.show_full_table_names = self.flow_controller.get_show_full_table_names()
+            if hasattr(self, "action_full_table_names"):
+                self.action_full_table_names.setChecked(self.show_full_table_names)
+
+            # Clear canvas safely before loading new flow
+            all_existing = list(self.graph.all_nodes())
+            if all_existing:
+                self.graph.delete_nodes(all_existing)
+            try:
+                self.graph.clear_session()
+            except Exception:
+                pass
+
+            if hasattr(self, "execution_tab"):
+                self.execution_tab.hide()
+
+            self._load_initial_graph()
+            self._refresh_right_queries()
+            self._refresh_left_reports_tree()
+            self._update_run_button_state()
+            self._update_dirty_ui()
+            if hasattr(self, "status_bar"):
+                self.status_bar.showMessage(f"Opened {self.report.name} / {flow_name}", 3000)
+            return True
+        finally:
+            self._switching_flow = False
+
+    def _on_add_report(self) -> None:
+        if not self.app_controller:
+            return
+        working_dirs = self.app_controller.get_working_directories()
+        aliases = [d.get("alias", "Default") for d in working_dirs if d.get("alias")]
+        if not aliases:
+            aliases = ["Default"]
+
+        dialog = AddReportDialog(directory_aliases=aliases, parent=self)
+        if dialog.exec() == QDialog.Accepted:
+            rep_name = dialog.get_report_name()
+            selected_alias = dialog.get_directory_alias()
+            if rep_name:
+                rep = self.app_controller.add_report(rep_name, directory_alias=selected_alias)
+                if rep:
+                    new_key = next(
+                        (k for k, r in self.app_controller.reports_by_key.items() if r.folder_path == rep.folder_path),
+                        rep.name,
+                    )
+                    target_flow = rep.process_flows[0].name if rep.process_flows else self.app_controller.DEFAULT_PROCESS_FLOW_NAME
+                    self.switch_to_process_flow(new_key, target_flow, force=not getattr(self, "_has_active_report", True))
+                    self.status_bar.showMessage(f"Report '{rep.name}' created in [{selected_alias}].", 3000)
+
+    def _on_pinned_reports_changed(self, pinned_list: List[str]) -> None:
+        """Persist pinned report keys to settings repository."""
+        if self.app_controller and self.app_controller.repo:
+            self.app_controller.repo.set_setting("pinned_reports", json.dumps(list(pinned_list)))
+
+    def _on_rename_report(self, report_key: str) -> None:
+        if not self.app_controller:
+            return
+        rep = self.app_controller.reports_by_key.get(report_key) or self.app_controller.reports_by_name.get(report_key)
+        if not rep:
+            return
+        old_rep_name = rep.name
+        new_name, ok = QInputDialog.getText(
+            self,
+            "Rename Report",
+            "Enter new report name:",
+            text=rep.name,
+        )
+        if ok and new_name.strip() and new_name.strip() != rep.name:
+            clean_new = new_name.strip()
+            was_active = getattr(self, "_has_active_report", True) and self.report and self.report.folder_path == rep.folder_path
+            cur_flow = self.flow_controller.flow_name if self.flow_controller else None
+            if was_active and self._is_dirty:
+                try:
+                    self._on_save(show_popup=False)
+                except Exception:
+                    pass
+
+            self._switching_flow = True
+            try:
+                success = self.app_controller.rename_report(report_key, clean_new)
+                if success:
+                    if hasattr(self, "left_panel") and self.left_panel.is_report_pinned(report_key):
+                        new_key = next(
+                            (k for k, r in self.app_controller.reports_by_key.items() if r.name == clean_new),
+                            clean_new,
+                        )
+                        updated_pins = [
+                            new_key if (p == report_key or p == old_rep_name) else p
+                            for p in self.left_panel.get_pinned_reports()
+                        ]
+                        self.left_panel.set_pinned_reports(updated_pins)
+                        self._on_pinned_reports_changed(updated_pins)
+                    if was_active and self.app_controller.active_report:
+                        self.report = self.app_controller.active_report
+                        self.flow_controller.report = self.report
+                        if cur_flow:
+                            pf = self.report.get_process_flow(cur_flow)
+                            if pf:
+                                self.flow_controller.file_path = pf.file_path
+                                self.app_controller.select_process_flow(cur_flow)
+                        self._update_dirty_ui()
+                    self._refresh_left_reports_tree()
+                    self._refresh_right_queries()
+                    self.status_bar.showMessage(f"Report renamed to '{clean_new}'.", 3000)
+                else:
+                    QMessageBox.warning(self, "Rename Failed", f"Could not rename report to '{clean_new}'.")
+            finally:
+                self._switching_flow = False
+
+    def _on_remove_report(self, report_key: str) -> None:
+        if not self.app_controller:
+            return
+        rep = self.app_controller.reports_by_key.get(report_key) or self.app_controller.reports_by_name.get(report_key)
+        if not rep:
+            return
+        old_rep_name = rep.name
+        confirm = QMessageBox.question(
+            self,
+            "Confirm Remove Report",
+            f"Are you sure you want to remove report '{rep.name}' and all its files?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+
+        was_active = getattr(self, "_has_active_report", True) and self.report and self.report.folder_path == rep.folder_path
+        self._switching_flow = True
+        try:
+            self.app_controller.remove_report(report_key)
+            if hasattr(self, "left_panel") and self.left_panel.is_report_pinned(report_key):
+                updated_pins = [
+                    p for p in self.left_panel.get_pinned_reports()
+                    if p != report_key and p != old_rep_name
+                ]
+                self.left_panel.set_pinned_reports(updated_pins)
+                self._on_pinned_reports_changed(updated_pins)
+            if was_active:
+                next_rep = self.app_controller.active_report
+                if next_rep:
+                    next_key = next(
+                        (k for k, r in self.app_controller.reports_by_key.items() if r.folder_path == next_rep.folder_path),
+                        next_rep.name,
+                    )
+                    next_flow = self.app_controller.active_flow_name or (
+                        next_rep.process_flows[0].name if next_rep.process_flows else self.app_controller.DEFAULT_PROCESS_FLOW_NAME
+                    )
+                    self._switching_flow = False
+                    self.switch_to_process_flow(next_key, next_flow, force=True)
+                else:
+                    self._has_active_report = False
+                    self.report = Report(name="No Report Selected", folder_path=Path.cwd())
+                    all_existing = list(self.graph.all_nodes())
+                    if all_existing:
+                        self.graph.delete_nodes(all_existing)
+                    try:
+                        self.graph.clear_session()
+                    except Exception:
+                        pass
+                    self._is_dirty = False
+                    self._update_dirty_ui()
+                    self._refresh_left_reports_tree()
+                    self._refresh_right_queries()
+            else:
+                self._refresh_left_reports_tree()
+            self.status_bar.showMessage(f"Report '{rep.name}' removed.", 3000)
+        finally:
+            self._switching_flow = False
+
+    def _on_add_process_flow(self, report_key: str) -> None:
+        if not self.app_controller:
+            return
+        target_report = (
+            self.app_controller.reports_by_key.get(report_key)
+            or self.app_controller.reports_by_name.get(report_key)
+        )
+        if not target_report:
+            return
+
+        existing_flows = [f.name for f in target_report.process_flows]
+        default_name = f"Process-{len(target_report.process_flows) + 1:02d}"
+        dlg = NewProcessFlowDialog(default_name, existing_flows, self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        flow_name = dlg.get_flow_name()
+        if not flow_name:
+            return
+        source_flow = dlg.get_source_flow()
+
+        prev_active_report = self.app_controller.active_report
+        self._switching_flow = True
+        try:
+            self.app_controller.select_report(report_key, preserve_flow=True)
+            flow_info = self.app_controller.add_process_flow(flow_name, source_flow_name=source_flow)
+            if not flow_info:
+                # Restore previous active report if creation failed
+                if prev_active_report:
+                    prev_key = self._get_active_report_key()
+                    if prev_key:
+                        self.app_controller.select_report(prev_key, preserve_flow=True)
+                return
+        finally:
+            self._switching_flow = False
+
+        self.switch_to_process_flow(report_key, flow_name)
+        self.status_bar.showMessage(f"Process flow '{flow_name}' created.", 3000)
+
+    def _on_rename_process_flow(self, report_key: str, old_flow_name: str) -> None:
+        if not self.app_controller:
+            return
+        target_report = (
+            self.app_controller.reports_by_key.get(report_key)
+            or self.app_controller.reports_by_name.get(report_key)
+        )
+        if not target_report:
+            return
+
+        new_name, ok = QInputDialog.getText(
+            self,
+            "Rename Process Flow",
+            "Enter new process flow name:",
+            text=old_flow_name,
+        )
+        if not ok or not new_name.strip() or new_name.strip() == old_flow_name:
+            return
+        clean_new = new_name.strip()
+
+        is_cur_flow = (
+            getattr(self, "_has_active_report", True)
+            and self.report
+            and self.report.folder_path == target_report.folder_path
+            and self.flow_controller
+            and self.flow_controller.flow_name == old_flow_name
+        )
+        if is_cur_flow and self._is_dirty:
+            try:
+                self._on_save(show_popup=False)
+            except Exception:
+                pass
+
+        cur_active_key = self._get_active_report_key()
+        cur_active_flow = self.flow_controller.flow_name if self.flow_controller else None
+
+        self._switching_flow = True
+        try:
+            self.app_controller.select_report(report_key, preserve_flow=True)
+            success = self.app_controller.rename_process_flow(old_flow_name, clean_new)
+            if success:
+                if is_cur_flow:
+                    updated_rep = self.app_controller.active_report or self.report
+                    self.report = updated_rep
+                    self.flow_controller.report = updated_rep
+                    self.flow_controller.flow_name = clean_new
+                    pf = updated_rep.get_process_flow(clean_new)
+                    if pf:
+                        self.flow_controller.file_path = pf.file_path
+                    self._update_dirty_ui()
+                elif cur_active_key:
+                    self.app_controller.select_report(cur_active_key, preserve_flow=True)
+                    if cur_active_flow:
+                        self.app_controller.select_process_flow(cur_active_flow)
+                self._refresh_left_reports_tree()
+                self.status_bar.showMessage(f"Process flow renamed to '{clean_new}'.", 3000)
+            else:
+                if cur_active_key and not is_cur_flow:
+                    self.app_controller.select_report(cur_active_key, preserve_flow=True)
+                QMessageBox.warning(self, "Rename Failed", f"Could not rename process flow to '{clean_new}'.")
+        finally:
+            self._switching_flow = False
+
+    def _on_remove_process_flow(self, report_key: str, flow_name: str) -> None:
+        if not self.app_controller:
+            return
+        target_report = (
+            self.app_controller.reports_by_key.get(report_key)
+            or self.app_controller.reports_by_name.get(report_key)
+        )
+        if not target_report:
+            return
+
+        confirm = QMessageBox.question(
+            self,
+            "Confirm Remove Process Flow",
+            f"Are you sure you want to remove process flow '{flow_name}'?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+
+        is_cur_flow = (
+            getattr(self, "_has_active_report", True)
+            and self.report
+            and self.report.folder_path == target_report.folder_path
+            and self.flow_controller
+            and self.flow_controller.flow_name == flow_name
+        )
+        cur_active_key = self._get_active_report_key()
+        cur_active_flow = self.flow_controller.flow_name if self.flow_controller else None
+
+        self._switching_flow = True
+        try:
+            self.app_controller.select_report(report_key, preserve_flow=True)
+            success = self.app_controller.remove_process_flow(flow_name)
+            if success:
+                if is_cur_flow:
+                    updated_rep = self.app_controller.active_report
+                    next_flow = self.app_controller.active_flow_name or (
+                        updated_rep.process_flows[0].name if updated_rep and updated_rep.process_flows else self.app_controller.DEFAULT_PROCESS_FLOW_NAME
+                    )
+                    self._switching_flow = False
+                    self.switch_to_process_flow(report_key, next_flow, force=True)
+                else:
+                    if cur_active_key:
+                        self.app_controller.select_report(cur_active_key, preserve_flow=True)
+                        if cur_active_flow:
+                            self.app_controller.select_process_flow(cur_active_flow)
+                    self._refresh_left_reports_tree()
+                self.status_bar.showMessage(f"Process flow '{flow_name}' removed.", 3000)
+        finally:
+            self._switching_flow = False
+
+    def _on_auth_login(self) -> None:
+        """Run 'gcloud auth application-default login' in a terminal."""
+        from reporting_app.utils.terminal import launch_in_terminal
+        self.status_bar.showMessage("Opening terminal for gcloud authentication...", 3000)
+        success = launch_in_terminal("gcloud auth application-default login", title="Google Cloud Authentication")
+        if not success:
+            QMessageBox.warning(
+                self,
+                "Authentication Error",
+                "Could not launch terminal automatically.\nPlease run 'gcloud auth application-default login' manually in a terminal.",
+            )
+
+    def _on_open_settings(self) -> None:
+        """Open application Settings dialog and apply updated configuration."""
+        if not self.app_controller:
+            return
+        dialog = SettingsDialog(
+            working_directories=self.app_controller.get_working_directories(),
+            auto_scan=self.app_controller.get_auto_scan(),
+            workbench_dataset=self.app_controller.repo.get_workbench_dataset(),
+            log_database_path=self.app_controller.get_log_database_path(),
+            parent=self,
+        )
+        if dialog.exec() == SettingsDialog.Accepted:
+            new_dirs = dialog.get_working_directories()
+            new_auto_scan = dialog.get_auto_scan()
+            new_wb = dialog.get_workbench_dataset()
+            new_log_db = dialog.get_log_database_path()
+
+            self.app_controller.set_auto_scan(new_auto_scan)
+            self.app_controller.repo.set_workbench_dataset(new_wb)
+            if new_log_db and new_log_db != self.app_controller.get_log_database_path():
+                self.app_controller.set_log_database_path(new_log_db)
+            if hasattr(self, "left_panel"):
+                self.left_panel.set_sync_visible(not new_auto_scan)
+
+            if new_dirs != self.app_controller.get_working_directories():
+                self.app_controller.set_working_directories(new_dirs)
+                next_rep = self.app_controller.active_report
+                if next_rep:
+                    next_key = next(
+                        (k for k, r in self.app_controller.reports_by_key.items() if r.folder_path == next_rep.folder_path),
+                        next_rep.name,
+                    )
+                    next_flow = self.app_controller.active_flow_name or (
+                        next_rep.process_flows[0].name if next_rep.process_flows else self.app_controller.DEFAULT_PROCESS_FLOW_NAME
+                    )
+                    self.switch_to_process_flow(next_key, next_flow, force=True)
+
+    def _on_manual_sync(self) -> None:
+        """Trigger a manual directory scan when auto-scan is disabled."""
+        if self.app_controller:
+            self.app_controller.scan()
+            self.report = self.app_controller.active_report or self.report
+            self._refresh_left_reports_tree()
+            self._refresh_right_queries()
+
+    def _on_run_standalone_query(self, query_name: str) -> None:
+        """Open Run Query dialog and execute an individual query outside the canvas flow."""
+        if not query_name or not self.app_controller or not getattr(self, "_has_active_report", True):
+            return
+
+        qinfo = self.app_controller.get_query_info(query_name, ensure_parsed=True)
+        if not qinfo:
+            return
+
+        saved_defaults = self.app_controller.repo.get_all_defaults_for_scope("query", query_name)
+        dialog = QueryRunDialog(
+            query_info=qinfo,
+            initial_defaults=saved_defaults,
+            parent=self,
+        )
+        if dialog.exec() == QueryRunDialog.Accepted:
+            values = dialog.get_parameter_values()
+            for param, val in values.items():
+                self.app_controller.repo.set_parameter_default("query", query_name, param, val)
+
+            active_report = self.report
+            if not active_report:
+                return
+
+            outputs_dir = active_report.folder_path / "outputs"
+            outputs_dir.mkdir(parents=True, exist_ok=True)
+
+            self.status_bar.showMessage(f"Running '{query_name}' in BigQuery...")
+            QtWidgets.QApplication.processEvents()
+
+            import uuid
+            from datetime import datetime, timezone
+            run_id = str(uuid.uuid4())
+            start_ts = datetime.now(timezone.utc).isoformat()
+            t0 = datetime.now(timezone.utc)
+            repo = self.app_controller.repo
+
+            try:
+                res = run_bigquery_script(
+                    sql_script_path=qinfo.file_path,
+                    report_name=active_report.name,
+                    outputs_dir=outputs_dir,
+                    parameters=values,
+                )
+                msgs = []
+                if res.get("has_output_tables"):
+                    tbls = ", ".join(res.get("output_tables", []))
+                    rc = res.get("row_count")
+                    rc_str = f" ({rc:,} rows)" if rc is not None else ""
+                    msgs.append(f"Created/updated table(s){rc_str}:\n{tbls}")
+                if res.get("is_export"):
+                    details = res.get("export_details", [])
+                    if len(details) == 1:
+                        d = details[0]
+                        msgs.append(f"Exported '{d['filename']}' ({d['row_count']:,} rows)")
+                    elif len(details) > 1:
+                        lines = [f"Exported {len(details)} tables:"]
+                        for d in details:
+                            lines.append(f"* {d['filename']} ({d['row_count']:,} rows)")
+                        msgs.append("\n".join(lines))
+                    else:
+                        msgs.append(f"Exported {res.get('row_count', 0):,} rows to:\n{res.get('output_file')}")
+                if not msgs:
+                    msgs.append("Query executed in BigQuery successfully.")
+
+                if repo:
+                    t1 = datetime.now(timezone.utc)
+                    wall_node_dur = (t1 - t0).total_seconds()
+                    repo.record_execution_log({
+                        "run_id": run_id,
+                        "flow_start_time": start_ts,
+                        "node_start_time": start_ts,
+                        "node_end_time": t1.isoformat(),
+                        "duration_seconds": max(float(res.get("duration_seconds", 0.0) or 0.0), wall_node_dur),
+                        "bq_duration_seconds": res.get("bq_duration_seconds"),
+                        "report_name": active_report.name,
+                        "flow_name": "Standalone",
+                        "node_type": "query",
+                        "node_name": query_name,
+                        "status": "SUCCESS",
+                        "submitted_query": res.get("submitted_query"),
+                        "output_rows": res.get("row_count"),
+                        "total_bytes_processed": res.get("total_bytes_processed"),
+                        "total_bytes_billed": res.get("total_bytes_billed"),
+                        "slot_millis": res.get("slot_millis"),
+                        "cache_hit": res.get("cache_hit"),
+                        "export_details_json": res.get("export_details", []),
+                    })
+
+                msg = f"Query '{query_name}' completed successfully!\n\n" + "\n\n".join(msgs)
+                self.status_bar.showMessage(f"Query '{query_name}' completed.", 5000)
+                QMessageBox.information(self, "Query Completed", msg)
+            except Exception as e:
+                if repo:
+                    t1 = datetime.now(timezone.utc)
+                    repo.record_execution_log({
+                        "run_id": run_id,
+                        "flow_start_time": start_ts,
+                        "node_start_time": start_ts,
+                        "node_end_time": t1.isoformat(),
+                        "duration_seconds": (t1 - t0).total_seconds(),
+                        "report_name": active_report.name,
+                        "flow_name": "Standalone",
+                        "node_type": "query",
+                        "node_name": query_name,
+                        "status": "FAILED",
+                        "error_message": str(e),
+                    })
+                self.status_bar.showMessage(f"Query '{query_name}' failed.", 5000)
+                QMessageBox.critical(
+                    self,
+                    "Query Execution Error",
+                    f"Error in query node: '{query_name}'\n\nFailed to execute query '{query_name}':\n\n{e}\n\nNote: If authentication failed, please run 'gcloud auth application-default login' in terminal.",
+                )
 
     def _on_node_double_clicked(self, node) -> None:
         """Handle double click on query node to open in OS default application, CSV box to edit names, or note to edit text."""
@@ -2416,6 +3200,8 @@ class ProcessFlowEditorWindow(QMainWindow):
 
     def _on_save(self, show_popup: bool = True) -> None:
         """Save process flow graph state, parameter defaults, and table display mode."""
+        if not getattr(self, "_has_active_report", True):
+            return
         self._suppress_dirty = True
         try:
             session_data = self.graph.serialize_session()
@@ -2458,10 +3244,19 @@ class ProcessFlowEditorWindow(QMainWindow):
             }
             csv_imports = self._collect_csv_import_data()
 
-            # Capture splitter sizes
-            cur_splitter_sizes = self.splitter.sizes()
+            # Capture splitter sizes (preserve last expanded widths if collapsed)
+            raw_sizes = self.splitter.sizes()
+            cur_splitter_sizes = [
+                self._last_left_width if (hasattr(self, "left_panel") and self.left_panel.is_collapsed()) else raw_sizes[0],
+                raw_sizes[1],
+                self._last_right_width if (hasattr(self, "right_panel") and self.right_panel.is_collapsed()) else raw_sizes[2],
+            ]
             if self.app_controller and self.app_controller.repo:
                 self.app_controller.repo.set_setting("flow_editor_splitter_sizes", ",".join(str(s) for s in cur_splitter_sizes))
+                if hasattr(self, "left_panel"):
+                    self.app_controller.repo.set_setting("flow_editor_left_collapsed", "1" if self.left_panel.is_collapsed() else "0")
+                if hasattr(self, "right_panel"):
+                    self.app_controller.repo.set_setting("flow_editor_right_collapsed", "1" if self.right_panel.is_collapsed() else "0")
 
             # Collect parameters and date options from overlay if present
             date_options = {}
@@ -2577,6 +3372,9 @@ class ProcessFlowEditorWindow(QMainWindow):
 
     def _update_dirty_ui(self) -> None:
         """Update window title and Save button indicator based on dirty state."""
+        if not getattr(self, "_has_active_report", True):
+            self.setWindowTitle("Reporting Front End - Process Flow Editor")
+            return
         base_title = f"Process Flow - {self.report.name} - {self.flow_controller.flow_name}"
         if self._is_dirty:
             self.setWindowTitle(f"● {base_title} *")
@@ -2648,24 +3446,53 @@ class ProcessFlowEditorWindow(QMainWindow):
 
         try:
             if hasattr(self, "splitter"):
-                cur_sizes = self.splitter.sizes()
+                raw_sizes = self.splitter.sizes()
+                cur_sizes = [
+                    self._last_left_width if (hasattr(self, "left_panel") and self.left_panel.is_collapsed()) else raw_sizes[0],
+                    raw_sizes[1],
+                    self._last_right_width if (hasattr(self, "right_panel") and self.right_panel.is_collapsed()) else raw_sizes[2],
+                ]
                 if self.app_controller and self.app_controller.repo:
                     self.app_controller.repo.set_setting("flow_editor_splitter_sizes", ",".join(str(s) for s in cur_sizes))
+                    if hasattr(self, "left_panel"):
+                        self.app_controller.repo.set_setting("flow_editor_left_collapsed", "1" if self.left_panel.is_collapsed() else "0")
+                    if hasattr(self, "right_panel"):
+                        self.app_controller.repo.set_setting("flow_editor_right_collapsed", "1" if self.right_panel.is_collapsed() else "0")
         except Exception as e:
             logger.debug(f"Error saving splitter sizes on close: {e}")
 
         # Stop debounce auto-save timer and shut down execution tab
+        self._is_closing = True
         if hasattr(self, "_auto_save_timer") and self._auto_save_timer.isActive():
             self._auto_save_timer.stop()
         if hasattr(self, "execution_tab"):
             self.execution_tab.shutdown()
 
-        # Disconnect controller active_report_changed signal
-        if self.app_controller:
+        # Clear side panel tree/list item references cleanly before C++ teardown
+        if hasattr(self, "left_panel") and hasattr(self.left_panel, "clear_items"):
             try:
-                self.app_controller.active_report_changed.disconnect(self._on_report_updated_from_controller)
+                self.left_panel.clear_items()
             except Exception:
                 pass
+        if hasattr(self, "right_panel") and hasattr(self.right_panel, "clear_items"):
+            try:
+                self.right_panel.clear_items()
+            except Exception:
+                pass
+
+        # Disconnect controller signals
+        if self.app_controller:
+            for sig, slot in (
+                (self.app_controller.active_report_changed, self._on_report_updated_from_controller),
+                (self.app_controller.reports_updated, self._on_controller_reports_updated),
+                (self.app_controller.process_flows_updated, self._on_controller_flows_updated),
+                (self.app_controller.queries_updated, self._on_controller_queries_updated),
+                (self.app_controller.status_changed, self._on_controller_status_changed),
+            ):
+                try:
+                    sig.disconnect(slot)
+                except Exception:
+                    pass
 
         # Cancel any active live connection on viewer and close graph
         try:

@@ -8,13 +8,12 @@ import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="google.auth._default")
 logging.getLogger("google.auth._default").setLevel(logging.ERROR)
 
-from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication
 
 from reporting_app.controllers.app_controller import AppController
 from reporting_app.persistence.database import DatabaseManager
-from reporting_app.presentation.main_window import MainWindow
+from reporting_app.presentation.flow_editor.editor_window import ProcessFlowEditorWindow
 
 logging.basicConfig(
     level=logging.INFO,
@@ -53,7 +52,7 @@ def main() -> int:
             import ctypes
             ctypes.windll.user32.DisableProcessWindowsGhosting()
         except Exception as e:
-            logger.debug(f"DisableProcessWindowsGhosting failed: {e}")
+            logging.getLogger(__name__).debug(f"DisableProcessWindowsGhosting failed: {e}")
 
     app = QApplication(sys.argv)
     app.setApplicationName("Reporting Front End")
@@ -72,7 +71,8 @@ def main() -> int:
     except Exception:
         pass
 
-    window = MainWindow(controller=controller)
+    controller.initialize()
+    window = ProcessFlowEditorWindow(app_controller=controller)
     window.show()
 
     def on_about_to_quit():
@@ -81,12 +81,11 @@ def main() -> int:
                 controller.watcher.stop()
             except Exception:
                 pass
-        for editor in list(window.editor_windows):
-            try:
-                if editor.isVisible():
-                    editor.close()
-            except Exception:
-                pass
+        try:
+            if window.isVisible():
+                window.close()
+        except Exception:
+            pass
         QApplication.processEvents()
 
     app.aboutToQuit.connect(on_about_to_quit)

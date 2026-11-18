@@ -57,6 +57,7 @@ try:
         CircularInfoButtonItem,
         CustomNodeTextItem,
         DEFAULT_GROUP_COLOR,
+        FloatingPillItem,
         GROUP_DARK_COLORS,
         GroupBoxNode,
         GroupColorButtonItem,
@@ -74,6 +75,7 @@ except ImportError:
         CircularInfoButtonItem,
         CustomNodeTextItem,
         DEFAULT_GROUP_COLOR,
+        FloatingPillItem,
         GROUP_DARK_COLORS,
         GroupBoxNode,
         GroupColorButtonItem,
@@ -343,6 +345,21 @@ class ProcessFlowEditorWindow(QMainWindow):
         orig_mouse_press = viewer.mousePressEvent
         orig_mouse_move = viewer.mouseMoveEvent
         orig_mouse_release = viewer.mouseReleaseEvent
+        orig_items_near = viewer._items_near
+
+        def custom_items_near(pos, item_type=None, width=20, height=20):
+            raw_items = orig_items_near(pos, None, width, height)
+            resolved = []
+            for itm in raw_items:
+                target = getattr(itm, "_node_item", None) if isinstance(itm, FloatingPillItem) else itm
+                if target is None:
+                    continue
+                if not item_type or isinstance(target, item_type):
+                    if target not in resolved:
+                        resolved.append(target)
+            return resolved
+
+        viewer._items_near = custom_items_near
 
         def custom_viewer_resize(event):
             # Reveal more canvas area when expanded, rather than zooming/stretching the scene
@@ -395,6 +412,7 @@ class ProcessFlowEditorWindow(QMainWindow):
                                 CustomNodeTextItem,
                                 CircularInfoButtonItem,
                                 NoteBodyTextItem,
+                                FloatingPillItem,
                             ),
                         )
                     ),
@@ -604,13 +622,14 @@ class ProcessFlowEditorWindow(QMainWindow):
         viewer = self.graph.viewer()
         items = viewer.scene().items(scene_pos) if viewer.scene() else []
         for item in items:
+            resolved_item = getattr(item, "_node_item", item) if isinstance(item, FloatingPillItem) else item
             # Check if item corresponds to a node view
             for node in self.graph.all_nodes():
                 if isinstance(node, (QueryNode, ImportCsvNode)) or getattr(node, "type_", "") in ("reporting.nodes.QueryNode", "reporting.nodes.ImportCsvNode"):
-                    if getattr(node, "view", None) == item or (hasattr(item, "topLevelItem") and item.topLevelItem() == getattr(node, "view", None)):
+                    if getattr(node, "view", None) in (item, resolved_item) or (hasattr(resolved_item, "topLevelItem") and resolved_item.topLevelItem() == getattr(node, "view", None)):
                         return node
                     # Also check parents
-                    cur = item
+                    cur = resolved_item
                     while cur:
                         if cur == getattr(node, "view", None):
                             return node

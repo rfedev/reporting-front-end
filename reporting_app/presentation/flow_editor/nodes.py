@@ -548,24 +548,243 @@ class NodeExecutionOverlayItem(QtWidgets.QGraphicsItem):
 
 
 class FloatingPillItem(QtWidgets.QGraphicsItem):
-    """Top-level scene graphics item displaying execution node names at high Z-order above all nodes and pipes."""
+    """Top-level scene graphics item displaying execution node names at high Z-order above all nodes and pipes.
+
+    When zoomed out, clicking or dragging this pill selects and drags its associated node (and any other
+    currently selected nodes).
+    """
 
     def __init__(self, node_item: "ExecutableNodeItem"):
         super().__init__()
         self._node_item = node_item
-        self.setAcceptedMouseButtons(QtCore.Qt.NoButton)
-        self.setAcceptHoverEvents(False)
+        self._drag_start_scene_pos: Optional[QtCore.QPointF] = None
+        self._drag_last_scene_pos: Optional[QtCore.QPointF] = None
+        self._did_drag: bool = False
+        self._was_multi_press: bool = False
+        self._drag_initial_positions: dict = {}
+
+        self.setAcceptedMouseButtons(QtCore.Qt.LeftButton | QtCore.Qt.RightButton)
+        self.setAcceptHoverEvents(True)
+        self.setCursor(QtCore.Qt.PointingHandCursor)
         self.setCacheMode(QtWidgets.QGraphicsItem.NoCache)
         self.setZValue(1000.0)
 
+    @property
+    def node(self):
+        return getattr(self._node_item, "node", None)
+
+    @property
+    def id(self):
+        return getattr(self._node_item, "id", None)
+
+    def get_pill_local_rect(self, painter: Optional[QtGui.QPainter] = None) -> QtCore.QRectF:
+        """Compute the pill box rectangle in FloatingPillItem local/scene coordinates."""
+        node = self._node_item
+        if not node or not node.viewer():
+            return QtCore.QRectF()
+
+        lod = get_node_lod(node, painter)
+        inv_scale = 1.0 / max(lod, 0.001)
+        w = getattr(node, "_width", 160.0)
+
+        font = QtGui.QFont("sans-serif")
+        font.setPointSizeF(8.0)
+        font.setBold(True)
+        fm = QtGui.QFontMetricsF(font)
+
+        node_name = (getattr(node, "name", "") or "").strip() or "Node"
+        display_name = fm.elidedText(node_name, QtCore.Qt.ElideRight, 260.0)
+        text_w = fm.horizontalAdvance(display_name)
+        text_h = fm.height()
+
+        pad_x = 8.5
+        pad_y = 3.5
+        pill_w = text_w + pad_x * 2.0
+        pill_h = text_h + pad_y * 2.0
+
+        overlay = getattr(node, "_exec_overlay", None)
+        has_halo = bool(overlay and overlay.exec_halo_visible and overlay.exec_status != "IDLE")
+        gap_y = 12.0 if has_halo else 6.0
+        y_top = -gap_y - pill_h
+
+        scene_w = pill_w * inv_scale
+        scene_h = pill_h * inv_scale
+        scene_x = (w / 2.0) - (scene_w / 2.0)
+        scene_y = y_top * inv_scale
+        return QtCore.QRectF(scene_x, scene_y, scene_w, scene_h)
+
     def shape(self) -> QtGui.QPainterPath:
-        return QtGui.QPainterPath()
+        path = QtGui.QPainterPath()
+        node = self._node_item
+        if not node or not node.viewer() or not node.is_zoomed_out_mode():
+            return path
+        rect = self.get_pill_local_rect()
+        if not rect.isNull() and not rect.isEmpty():
+            path.addRect(rect)
+        return path
 
     def boundingRect(self) -> QtCore.QRectF:
         node = self._node_item
         w = getattr(node, "_width", 160.0)
-        # Ample bounding rect above the node to ensure redraws don't leave artifacts
-        return QtCore.QRectF(-200.0, -100.0, w + 400.0, 100.0)
+        base_rect = QtCore.QRectF(-800.0, -500.0, w + 1600.0, 500.0)
+        if node and node.viewer() and node.is_zoomed_out_mode():
+            pill_rect = self.get_pill_local_rect()
+            if not pill_rect.isNull() and not pill_rect.isEmpty():
+                return base_rect.united(pill_rect.adjusted(-10.0, -10.0, 10.0, 10.0))
+        return base_rect
+
+    def _get_selected_node_items(self) -> List[AbstractNodeItem]:
+        scene = self.scene()
+        if not scene:
+            return [self._node_item] if self._node_item else []
+        items = [
+            itm for itm in scene.selectedItems()
+            if isinstance(itm, AbstractNodeItem)
+        ]
+        if self._node_item and getattr(self._node_item, "selected", False) and self._node_item not in items:
+            items.append(self._node_item)
+        return items
+
+    def mousePressEvent(self, event) -> None:
+        node = self._node_item
+        if not node or not node.viewer() or not node.is_zoomed_out_mode():
+            event.ignore()
+            return
+
+        if event.button() == QtCore.Qt.LeftButton:
+            viewer = node.viewer()
+            self._drag_start_scene_pos = QtCore.QPointF(event.scenePos())
+            self._drag_last_scene_pos = QtCore.QPointF(event.scenePos())
+            self._did_drag = False
+            self.setCursor(QtCore.Qt.ClosedHandCursor)
+
+            is_multi = bool(
+                event.modifiers() & (QtCore.Qt.ControlModifier | QtCore.Qt.ShiftModifier)
+            ) or bool(getattr(viewer, "SHIFT_state", False))
+
+            if is_multi:
+                self._was_multi_press = True
+                new_sel = not bool(node.selected)
+                node.setSelected(new_sel)
+                node.selected = new_sel
+            else:
+                self._was_multi_press = False
+                if not node.selected:
+                    if self.scene():
+                        for itm in list(self.scene().selectedItems()):
+                            if itm is not node and itm is not self:
+                                itm.setSelected(False)
+                                if hasattr(itm, "selected"):
+                                    itm.selected = False
+                    node.setSelected(True)
+                    node.selected = True
+
+            selected_nodes = self._get_selected_node_items()
+            self._drag_initial_positions = {}
+            for n in selected_nodes:
+                pos_xy = list(n.xy_pos) if hasattr(n, "xy_pos") else [float(n.pos().x()), float(n.pos().y())]
+                self._drag_initial_positions[n] = pos_xy
+                if hasattr(viewer, "_node_positions"):
+                    viewer._node_positions[n] = pos_xy
+                if isinstance(n, BackdropNodeItem) and hasattr(n, "get_nodes"):
+                    n._is_dragging_group = True
+                    n._drag_last_scene_pos = QtCore.QPointF(n.scenePos())
+                    n._drag_contained_items = n.get_nodes(inc_intersects=False)
+
+            if hasattr(viewer, "node_selected"):
+                viewer.node_selected.emit(node.id)
+
+            event.accept()
+            return
+
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        node = self._node_item
+        if (
+            node
+            and (event.buttons() & QtCore.Qt.LeftButton)
+            and self._drag_last_scene_pos is not None
+        ):
+            curr_pos = event.scenePos()
+            dx = curr_pos.x() - self._drag_last_scene_pos.x()
+            dy = curr_pos.y() - self._drag_last_scene_pos.y()
+            if dx != 0.0 or dy != 0.0:
+                self._did_drag = True
+                self._drag_last_scene_pos = QtCore.QPointF(curr_pos)
+                selected_nodes = self._get_selected_node_items()
+                if node not in selected_nodes:
+                    selected_nodes.append(node)
+                for n in selected_nodes:
+                    new_x = n.pos().x() + dx
+                    new_y = n.pos().y() + dy
+                    n.setPos(new_x, new_y)
+                    if hasattr(n, "xy_pos"):
+                        n.xy_pos = [new_x, new_y]
+
+                if self.scene():
+                    for scene_item in self.scene().items():
+                        if isinstance(scene_item, PipeItem):
+                            scene_item.reset()
+            event.accept()
+            return
+
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        node = self._node_item
+        if event.button() == QtCore.Qt.LeftButton:
+            self.setCursor(QtCore.Qt.PointingHandCursor)
+            viewer = node.viewer() if node else None
+
+            for n in list(self._drag_initial_positions.keys()):
+                if isinstance(n, BackdropNodeItem):
+                    n._is_dragging_group = False
+                    n._drag_last_scene_pos = None
+                    n._drag_contained_items = []
+
+            if not self._did_drag and not self._was_multi_press and node:
+                if self.scene():
+                    for itm in list(self.scene().selectedItems()):
+                        if itm is not node and itm is not self:
+                            itm.setSelected(False)
+                            if hasattr(itm, "selected"):
+                                itm.selected = False
+                node.setSelected(True)
+                node.selected = True
+            elif self._did_drag and viewer is not None:
+                moved_nodes = {
+                    n: init_pos
+                    for n, init_pos in self._drag_initial_positions.items()
+                    if getattr(n, "xy_pos", [n.pos().x(), n.pos().y()]) != init_pos
+                }
+                if moved_nodes and hasattr(viewer, "moved_nodes"):
+                    # Only emit if NodeViewer.mouseReleaseEvent hasn't already emitted and cleared _node_positions
+                    if getattr(viewer, "_node_positions", None):
+                        viewer._node_positions = {}
+                        viewer.moved_nodes.emit(moved_nodes)
+                    elif not hasattr(viewer, "_node_positions"):
+                        viewer.moved_nodes.emit(moved_nodes)
+
+            self._drag_start_scene_pos = None
+            self._drag_last_scene_pos = None
+            self._did_drag = False
+            self._was_multi_press = False
+            self._drag_initial_positions = {}
+            event.accept()
+            return
+
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        node = self._node_item
+        if event.button() == QtCore.Qt.LeftButton and node and node.viewer():
+            viewer = node.viewer()
+            if hasattr(viewer, "node_double_clicked"):
+                viewer.node_double_clicked.emit(node.id)
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
 
     def paint(self, painter: QtGui.QPainter, option, widget=None) -> None:
         node = self._node_item
@@ -676,6 +895,8 @@ class ExecutableNodeItem(NodeItem):
             elif change == QtWidgets.QGraphicsItem.ItemSelectedChange:
                 pill.setZValue(1001.0 if value else 1000.0)
                 pill.update()
+            elif change == QtWidgets.QGraphicsItem.ItemVisibleHasChanged:
+                pill.setVisible(bool(value))
         return res
 
     def is_zoomed_out_mode(self, painter: Optional[QtGui.QPainter] = None) -> bool:
@@ -691,10 +912,8 @@ class ExecutableNodeItem(NodeItem):
             if pill.scene() != self.scene():
                 self.scene().addItem(pill)
             pill.setPos(self.scenePos())
-            is_zoomed = self.is_zoomed_out_mode()
-            pill.setVisible(is_zoomed)
-            if is_zoomed:
-                pill.update()
+            pill.setVisible(self.isVisible())
+            pill.update()
 
     def draw_node(self) -> None:
         super().draw_node()
@@ -731,9 +950,8 @@ class ExecutableNodeItem(NodeItem):
                 if self.scene() and pill.scene() != self.scene():
                     self.scene().addItem(pill)
                 pill.setPos(self.scenePos())
-                is_zoomed = self.is_zoomed_out_mode(painter)
-                pill.setVisible(is_zoomed)
-                if is_zoomed:
+                pill.setVisible(self.isVisible())
+                if self.is_zoomed_out_mode(painter):
                     pill.update()
         finally:
             self._active_painter = None

@@ -93,6 +93,128 @@ def is_csv_export_query(sql: str) -> bool:
     return len(csv_tables) > 0
 
 
+def _format_bytes(num_bytes: int) -> str:
+    """Format byte counts into a compact human-readable string."""
+    val = max(0, int(num_bytes or 0))
+    if val < 1024:
+        return f"{val} B"
+    for unit in ("KB", "MB", "GB", "TB", "PB"):
+        val /= 1024.0
+        if val < 1024.0 or unit == "PB":
+            return f"{val:.2f} {unit}" if unit != "KB" else f"{val:.1f} {unit}"
+    return f"{val:.2f} PB"
+
+
+def dry_run_bigquery_sql(
+    sql_text: str,
+    parameters: Optional[Dict[str, str]] = None,
+    project_id: Optional[str] = None,
+    client: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Validate SQL text natively using BigQuery's dry_run mode without executing or billing."""
+    from reporting_app.core.sql_parser import extract_project_id_from_sql
+
+    substituted_sql = substitute_parameters(sql_text or "", parameters or {})
+    if not substituted_sql.strip():
+        return {
+            "valid": False,
+            "error_message": "SQL query is empty.",
+            "full_error": "Cannot run BigQuery dry-run on an empty SQL query.",
+            "line": None,
+            "col": None,
+            "project_id": project_id,
+        }
+
+    resolved_project = project_id
+    if not resolved_project:
+        try:
+            from reporting_app.persistence.database import DatabaseManager
+            from reporting_app.persistence.repository import Repository
+            repo = Repository(DatabaseManager())
+            wb = repo.get_workbench_dataset().strip()
+            if wb and "." in wb:
+                resolved_project = wb.split(".")[0].strip()
+        except Exception:
+            pass
+
+    if not resolved_project:
+        resolved_project = extract_project_id_from_sql(substituted_sql)
+
+    if resolved_project and not os.environ.get("GOOGLE_CLOUD_PROJECT"):
+        os.environ["GOOGLE_CLOUD_PROJECT"] = resolved_project
+
+    if client is None:
+        try:
+            client = bigquery.Client(project=resolved_project) if resolved_project else bigquery.Client()
+        except Exception as exc:
+            full_err = format_bigquery_error(exc, resolved_project)
+            first_line = full_err.splitlines()[0] if full_err else str(exc)
+            return {
+                "valid": False,
+                "error_message": first_line,
+                "full_error": full_err,
+                "line": None,
+                "col": None,
+                "project_id": resolved_project,
+            }
+
+    active_project = resolved_project or getattr(client, "project", None)
+    if not active_project:
+        msg = (
+            "No Google Cloud project resolved. Configure Workbench Dataset in Settings "
+            "or reference a project in the SQL query."
+        )
+        return {
+            "valid": False,
+            "error_message": msg,
+            "full_error": msg,
+            "line": None,
+            "col": None,
+            "project_id": None,
+        }
+
+    try:
+        job_config = bigquery.QueryJobConfig(dry_run=True, use_query_cache=False)
+        query_job = client.query(
+            substituted_sql,
+            job_config=job_config,
+            project=active_project,
+            job_retry=None,
+            timeout=30.0,
+        )
+        total_bytes = int(getattr(query_job, "total_bytes_processed", 0) or 0)
+        human_bytes = _format_bytes(total_bytes)
+        return {
+            "valid": True,
+            "total_bytes_processed": total_bytes,
+            "formatted_bytes": human_bytes,
+            "project_id": active_project,
+            "message": f"✓ BQ Dry-Run OK ({human_bytes} est.)",
+        }
+    except Exception as exc:
+        raw_msg = str(exc)
+        loc_match = re.search(r"at\s+\[(\d+):(\d+)\]", raw_msg)
+        err_line = int(loc_match.group(1)) if loc_match else None
+        err_col = int(loc_match.group(2)) if loc_match else None
+        full_err = format_bigquery_error(exc, active_project)
+        clean_summary = raw_msg.splitlines()[0].strip() if raw_msg else str(exc)
+        if clean_summary.startswith("400 "):
+            clean_summary = clean_summary[4:].strip()
+        if "POST https://" in clean_summary:
+            # Strip long API endpoint URL prefix from google.api_core BadRequest strings
+            parts = clean_summary.split(": ", 1)
+            if len(parts) == 2 and parts[1].strip():
+                clean_summary = parts[1].strip()
+        return {
+            "valid": False,
+            "error_message": clean_summary,
+            "full_error": full_err,
+            "line": err_line,
+            "col": err_col,
+            "project_id": active_project,
+        }
+
+
 def run_bigquery_script(
     sql_script_path: str | Path,
     report_name: str,

@@ -47,7 +47,12 @@ from NodeGraphQt.qgraphics.port import PortItem
 
 from reporting_app.controllers.app_controller import AppController
 from reporting_app.controllers.flow_controller import ProcessFlowController
-from reporting_app.core.bigquery_run import run_bigquery_script, run_bigquery_import_csv, run_bigquery_import_file
+from reporting_app.core.bigquery_run import (
+    dry_run_bigquery_sql,
+    run_bigquery_import_csv,
+    run_bigquery_import_file,
+    run_bigquery_script,
+)
 from reporting_app.core.models import ProcessFlowInfo, QueryInfo, QueryParameter, Report
 from reporting_app.core.sql_parser import sync_query_csv_comments, update_query_csv_comment
 from reporting_app.presentation.flow_editor.graph_builder import ProcessFlowGraphBuilder
@@ -102,6 +107,7 @@ from reporting_app.presentation.flow_editor.report_tree_widget import (
     NewProcessFlowDialog,
     ReportFlowTreePanel,
 )
+from reporting_app.presentation.flow_editor.sql_editor_panel import SqlEditorPanel
 from reporting_app.presentation.query_dialog import QueryRunDialog
 from reporting_app.presentation.settings_dialog import SettingsDialog
 
@@ -158,6 +164,24 @@ class ProcessFlowEditorWindow(QMainWindow):
         self._switching_flow: bool = False
         self._last_left_width: int = ReportFlowTreePanel.DEFAULT_EXPANDED_WIDTH
         self._last_right_width: int = QueryManagementPanel.DEFAULT_EXPANDED_WIDTH
+        self._last_sql_panel_width: int = SqlEditorPanel.DEFAULT_WIDTH
+        self._sql_panel_open: bool = False
+        if self.app_controller and self.app_controller.repo:
+            self._sql_panel_open = self.app_controller.repo.get_setting("flow_editor_sql_panel_open", "0") == "1"
+            raw_sql_w = self.app_controller.repo.get_setting(
+                "flow_editor_sql_panel_width",
+                str(SqlEditorPanel.DEFAULT_WIDTH),
+            )
+            try:
+                self._last_sql_panel_width = max(SqlEditorPanel.MINIMUM_WIDTH, int(raw_sql_w))
+            except Exception:
+                self._last_sql_panel_width = SqlEditorPanel.DEFAULT_WIDTH
+        self._sql_panel_query_name: Optional[str] = None
+        self._restoring_node_selection: bool = False
+        self._prompting_sql_save: bool = False
+        self._cancelled_sql_switch_in_event: bool = False
+        self._empty_canvas_press_pos: Optional[QPoint] = None
+        self._did_pan_canvas: bool = False
 
         # Controller for this process flow
         repo = self.app_controller.repo if self.app_controller else None
@@ -374,6 +398,8 @@ class ProcessFlowEditorWindow(QMainWindow):
             viewer.viewport().setContextMenuPolicy(Qt.CustomContextMenu)
 
         def custom_mouse_press(event):
+            if not getattr(self, "_prompting_sql_save", False):
+                self._cancelled_sql_switch_in_event = False
             # If user right-clicks while dragging a live connection noodle, cancel the action
             if getattr(viewer, "_LIVE_PIPE", None) and viewer._LIVE_PIPE.isVisible():
                 if event.button() in (Qt.RightButton, Qt.LeftButton):
@@ -436,12 +462,9 @@ class ProcessFlowEditorWindow(QMainWindow):
                 # Check if click lands on empty canvas (no node / pipe)
                 items_near = viewer._items_near(map_pos, None, 15, 15)
                 if not items_near:
-                    # Deselect everything in the process flow editor by clicking once on empty space
-                    self.graph.clear_selection()
-                    if viewer.scene():
-                        viewer.scene().clearSelection()
-
-                    # Engage smooth pan mode using MMB engine
+                    # Defer deselect until mouse release so panning never triggers unsaved-SQL prompt
+                    self._empty_canvas_press_pos = QPoint(event.pos())
+                    self._did_pan_canvas = False
                     viewer.MMB_state = True
                     viewer._origin_pos = event.pos()
                     viewer._previous_pos = event.pos()
@@ -451,6 +474,12 @@ class ProcessFlowEditorWindow(QMainWindow):
 
             return orig_mouse_press(event)
 
+        def custom_mouse_move(event):
+            if viewer.MMB_state and self._empty_canvas_press_pos is not None:
+                if (event.pos() - self._empty_canvas_press_pos).manhattanLength() >= 4:
+                    self._did_pan_canvas = True
+            return orig_mouse_move(event)
+
         def custom_mouse_release(event):
             if event.button() == Qt.RightButton:
                 event.accept()
@@ -459,6 +488,14 @@ class ProcessFlowEditorWindow(QMainWindow):
             if event.button() == Qt.LeftButton and viewer.MMB_state:
                 viewer.MMB_state = False
                 viewer.viewport().unsetCursor()
+                was_click_only = (
+                    self._empty_canvas_press_pos is not None
+                    and not self._did_pan_canvas
+                )
+                self._empty_canvas_press_pos = None
+                self._did_pan_canvas = False
+                if was_click_only:
+                    self._on_deselect_all()
                 event.accept()
                 return
 
@@ -489,7 +526,7 @@ class ProcessFlowEditorWindow(QMainWindow):
 
         viewer.sceneMousePressEvent = custom_scene_mouse_press
         viewer.mousePressEvent = custom_mouse_press
-        viewer.mouseMoveEvent = orig_mouse_move
+        viewer.mouseMoveEvent = custom_mouse_move
         viewer.mouseReleaseEvent = custom_mouse_release
 
         # Color the live dashed noodle according to the connector being dragged
@@ -909,10 +946,19 @@ class ProcessFlowEditorWindow(QMainWindow):
             self.add_query_to_canvas(query_name, pos=(scene_pos.x(), scene_pos.y()))
 
     def _on_deselect_all(self) -> None:
-        """Deselect all nodes and items in the scene."""
-        self.graph.clear_selection()
-        if self.graph.viewer().scene():
-            self.graph.viewer().scene().clearSelection()
+        """Deselect all nodes and items in the scene cleanly without duplicate selectionChanged triggers."""
+        viewer = self.graph.viewer()
+        scene = viewer.scene() if viewer else None
+        if scene:
+            scene.blockSignals(True)
+            try:
+                self.graph.clear_selection()
+                if scene.selectedItems():
+                    scene.clearSelection()
+            finally:
+                scene.blockSignals(False)
+        else:
+            self.graph.clear_selection()
         self._update_run_button_state()
 
     def _on_select_all(self) -> None:
@@ -932,9 +978,10 @@ class ProcessFlowEditorWindow(QMainWindow):
         self._update_run_button_state()
 
     def _build_ui(self) -> None:
-        # Center Toolbar (confined to center panel so side panels extend to the top edge of the window)
+        # Center Toolbar (confined to middle canvas panel so side panels and SQL panel extend to the top edge)
         self.toolbar = QToolBar("Flow Actions", self)
         self.toolbar.setMovable(False)
+        self.toolbar.setMinimumWidth(120)
         toolbar = self.toolbar
 
         self.save_btn = QPushButton("💾")
@@ -942,69 +989,89 @@ class ProcessFlowEditorWindow(QMainWindow):
         self.save_btn.setStyleSheet("QPushButton { font-size: 18px; padding: 0px; margin: 0px; }")
         self.save_btn.setToolTip("Save Process Flow (Ctrl+S)")
         self.save_btn.clicked.connect(self._on_save)
-        toolbar.addWidget(self.save_btn)
+        self.save_act = toolbar.addWidget(self.save_btn)
 
         # Standard gap between save button and auto-save checkbox
-        gap = QWidget(self)
-        gap.setFixedWidth(8)
-        toolbar.addWidget(gap)
+        self._toolbar_gap = QWidget(self)
+        self._toolbar_gap.setFixedWidth(8)
+        self.gap_act = toolbar.addWidget(self._toolbar_gap)
 
         self.auto_save_cb = QCheckBox("Auto-Save", self)
         self.auto_save_cb.setChecked(self.auto_save_enabled)
         self.auto_save_cb.setToolTip("Automatically save process flow when changes are made")
         self.auto_save_cb.toggled.connect(self._on_auto_save_toggled)
-        toolbar.addWidget(self.auto_save_cb)
+        self.auto_save_act = toolbar.addWidget(self.auto_save_cb)
 
-        toolbar.addSeparator()
+        self.sep_run_act = toolbar.addSeparator()
 
-        import_files_btn = QPushButton("📥 Import Files")
-        import_files_btn.setToolTip("Add an Import Files node to load CSV or Excel files into BigQuery tables")
-        import_files_btn.clicked.connect(self._on_add_import_csv)
-        toolbar.addWidget(import_files_btn)
+        self.run_flow_btn = QPushButton("▶ Run Flow")
+        self.run_flow_btn.setStyleSheet("font-weight: bold; background-color: #2b78e4; color: white;")
+        self.run_flow_btn.setToolTip("Execute process flow queries in dependency order (F5)")
+        self.run_flow_btn.clicked.connect(self._on_run_flow_button_clicked)
+        self.run_flow_act = toolbar.addWidget(self.run_flow_btn)
+
+        self.sep_tools_act = toolbar.addSeparator()
+
+        self.import_files_btn = QPushButton("📥 Import Files")
+        self.import_files_btn.setToolTip("Add an Import Files node to load CSV or Excel files into BigQuery tables")
+        self.import_files_btn.clicked.connect(self._on_add_import_csv)
+        self.import_files_act = toolbar.addWidget(self.import_files_btn)
 
         self.add_group_btn = QPushButton("Add Group")
         self.add_group_btn.setIcon(self._create_group_toolbar_icon())
         self.add_group_btn.setIconSize(QtCore.QSize(18, 18))
         self.add_group_btn.setToolTip("Add a Group Box around selected nodes or on the canvas (G)")
         self.add_group_btn.clicked.connect(lambda: self._on_add_group_box())
-        toolbar.addWidget(self.add_group_btn)
+        self.add_group_act = toolbar.addWidget(self.add_group_btn)
 
         self.add_note_btn = QPushButton("📝 Add Note")
         self.add_note_btn.setToolTip("Add a text note to the canvas (N)")
         self.add_note_btn.clicked.connect(lambda: self._on_add_note())
-        toolbar.addWidget(self.add_note_btn)
+        self.add_note_act = toolbar.addWidget(self.add_note_btn)
 
-        toolbar.addSeparator()
-
-        self.run_flow_btn = QPushButton("▶ Run Flow")
-        self.run_flow_btn.setStyleSheet("font-weight: bold; background-color: #2b78e4; color: white;")
-        self.run_flow_btn.setToolTip("Execute process flow queries in dependency order (F5)")
-        self.run_flow_btn.clicked.connect(self._on_run_flow_button_clicked)
-        toolbar.addWidget(self.run_flow_btn)
-
-        toolbar.addSeparator()
+        self.sep_logs_act = toolbar.addSeparator()
 
         self.logs_btn = QPushButton("📜 Logs")
         self.logs_btn.setToolTip("View Execution Logs for this Process Flow")
         self.logs_btn.clicked.connect(lambda: self._on_open_logs())
-        toolbar.addWidget(self.logs_btn)
+        self.logs_act = toolbar.addWidget(self.logs_btn)
 
         self.open_folder_btn = QPushButton("📁")
         self.open_folder_btn.setFixedSize(25, 25)
         self.open_folder_btn.setStyleSheet("QPushButton { font-size: 16px; padding: 0px; margin: 0px; }")
         self.open_folder_btn.setToolTip("Open Report Folder in File Browser")
         self.open_folder_btn.clicked.connect(self._on_open_report_folder)
-        toolbar.addWidget(self.open_folder_btn)
+        self.open_folder_act = toolbar.addWidget(self.open_folder_btn)
 
-        # Spacer to push Appearance menu to far right of toolbar
+        # Spacer to push right-aligned buttons to far right of toolbar
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        toolbar.addWidget(spacer)
+        self.spacer_act = toolbar.addWidget(spacer)
+
+        # Overflow menu button for narrow middle-panel widths ('»')
+        self.overflow_btn = QToolButton(self)
+        self.overflow_btn.setText("»")
+        self.overflow_btn.setFixedSize(28, 28)
+        self.overflow_btn.setToolTip("More Toolbar Actions")
+        self.overflow_btn.setStyleSheet(
+            "QToolButton { font-size: 15px; font-weight: bold; padding: 0px; }"
+            "QToolButton::menu-indicator { image: none; width: 0px; }"
+        )
+        self.overflow_btn.setPopupMode(QToolButton.InstantPopup)
+        self.overflow_menu = QMenu(self.overflow_btn)
+        self.overflow_btn.setMenu(self.overflow_menu)
+        self.overflow_act = toolbar.addWidget(self.overflow_btn)
+        self.overflow_act.setVisible(False)
 
         # Appearance dropdown menu button
         self.appearance_btn = QToolButton(self)
-        self.appearance_btn.setText("Appearance ☰")
-        self.appearance_btn.setStyleSheet("QToolButton::menu-indicator { image: none; width: 0px; }")
+        self.appearance_btn.setText("⋮")
+        self.appearance_btn.setFixedSize(28, 28)
+        self.appearance_btn.setToolTip("Appearance")
+        self.appearance_btn.setStyleSheet(
+            "QToolButton { font-size: 16px; font-weight: bold; padding: 0px; }"
+            "QToolButton::menu-indicator { image: none; width: 0px; }"
+        )
         self.appearance_btn.setPopupMode(QToolButton.InstantPopup)
         appearance_menu = QMenu(self.appearance_btn)
 
@@ -1054,7 +1121,21 @@ class ProcessFlowEditorWindow(QMainWindow):
         self.appearance_btn.setMenu(appearance_menu)
         toolbar.addWidget(self.appearance_btn)
 
-        # Main splitter layout: Left Panel (Reports/Flows) | Center Panel (Toolbar + Canvas) | Right Panel (Queries)
+        # Built-in SQL Editor panel toggle button ('☰')
+        self.sql_panel_btn = QPushButton("☰", self)
+        self.sql_panel_btn.setFixedSize(28, 28)
+        self.sql_panel_btn.setCheckable(True)
+        self.sql_panel_btn.setChecked(self._sql_panel_open)
+        self.sql_panel_btn.setToolTip("Toggle SQL Editor Panel")
+        self.sql_panel_btn.setStyleSheet(
+            "QPushButton { font-size: 15px; padding: 0px; }"
+            "QPushButton:checked { background-color: #2b78e4; color: white; border: 1px solid #3b82f6; }"
+        )
+        self.sql_panel_btn.clicked.connect(self._on_toggle_sql_panel)
+        self.sql_panel_act = toolbar.addWidget(self.sql_panel_btn)
+        self.sql_panel_act.setVisible(not self._sql_panel_open)
+
+        # Main splitter layout: Left Panel | Center Area ([Toolbar + Canvas] | SQL Panel) | Right Panel
         self.splitter = QSplitter(Qt.Horizontal, self)
 
         # Left Panel (Reports & Process Flows tree + bottom Auth/Settings/Sync controls)
@@ -1105,12 +1186,36 @@ class ProcessFlowEditorWindow(QMainWindow):
         self.execution_tab.hide()
         self.execution_tab.run_state_changed.connect(self._update_run_button_state)
 
+        # Center Area: [Middle Canvas Panel (Toolbar + Graph)] + [Built-in SQL Editor Panel]
+        self.canvas_panel = QWidget(self)
+        canvas_layout = QVBoxLayout(self.canvas_panel)
+        canvas_layout.setContentsMargins(0, 0, 0, 0)
+        canvas_layout.setSpacing(0)
+        canvas_layout.addWidget(self.toolbar)
+        canvas_layout.addWidget(self.graph_widget, 1)
+        self.toolbar.installEventFilter(self)
+        self.canvas_panel.installEventFilter(self)
+
+        self.sql_editor_panel = SqlEditorPanel(self)
+        self.sql_editor_panel.save_requested.connect(self._on_sql_panel_save_requested)
+        self.sql_editor_panel.dry_run_requested.connect(self._on_sql_panel_dry_run_requested)
+        self.sql_editor_panel.close_requested.connect(lambda: self._on_toggle_sql_panel(False))
+        self.sql_editor_panel.setVisible(self._sql_panel_open)
+
+        self.center_splitter = QSplitter(Qt.Horizontal, self)
+        self.center_splitter.addWidget(self.canvas_panel)
+        self.center_splitter.addWidget(self.sql_editor_panel)
+        self.center_splitter.setCollapsible(0, False)
+        self.center_splitter.setCollapsible(1, False)
+        self.center_splitter.setStretchFactor(0, 1)
+        self.center_splitter.setStretchFactor(1, 0)
+        self.center_splitter.splitterMoved.connect(self._on_center_splitter_moved)
+
         self.center_panel = QWidget(self)
         center_layout = QVBoxLayout(self.center_panel)
         center_layout.setContentsMargins(0, 0, 0, 0)
         center_layout.setSpacing(0)
-        center_layout.addWidget(self.toolbar)
-        center_layout.addWidget(self.graph_widget, 1)
+        center_layout.addWidget(self.center_splitter)
         self.splitter.addWidget(self.center_panel)
 
         # Right Panel (Query management & Drag-and-Drop)
@@ -1167,15 +1272,24 @@ class ProcessFlowEditorWindow(QMainWindow):
             if right_collapsed:
                 self.right_panel.set_collapsed(True)
                 rw = QueryManagementPanel.COLLAPSED_WIDTH
-            self.splitter.setSizes([lw, max(300, cw), rw])
+            cw = max(300, cw)
+            self.splitter.setSizes([lw, cw, rw])
         else:
             lw = ReportFlowTreePanel.COLLAPSED_WIDTH if left_collapsed else ReportFlowTreePanel.DEFAULT_EXPANDED_WIDTH
             rw = QueryManagementPanel.COLLAPSED_WIDTH if right_collapsed else QueryManagementPanel.DEFAULT_EXPANDED_WIDTH
+            cw = 830
             if left_collapsed:
                 self.left_panel.set_collapsed(True)
             if right_collapsed:
                 self.right_panel.set_collapsed(True)
-            self.splitter.setSizes([lw, 830, rw])
+            self.splitter.setSizes([lw, cw, rw])
+
+        if self._sql_panel_open:
+            sql_w = max(SqlEditorPanel.MINIMUM_WIDTH, self._last_sql_panel_width)
+            canvas_w = max(260, cw - sql_w)
+            self.center_splitter.setSizes([canvas_w, sql_w])
+        else:
+            self.center_splitter.setSizes([cw, 0])
 
         self.setCentralWidget(self.splitter)
 
@@ -1205,6 +1319,78 @@ class ProcessFlowEditorWindow(QMainWindow):
         """Called when a query file is modified on disk."""
         self._sync_query_files_and_parameters()
 
+    def _update_toolbar_overflow(self) -> None:
+        """Move toolbar buttons that do not fit in the middle canvas width into an overflow menu."""
+        if not hasattr(self, "toolbar") or not hasattr(self, "overflow_menu"):
+            return
+
+        avail_w = self.toolbar.width() or (self.canvas_panel.width() if hasattr(self, "canvas_panel") else 0)
+        if avail_w <= 0:
+            return
+
+        fixed_w = (
+            self.save_btn.sizeHint().width()
+            + self._toolbar_gap.width()
+            + self.auto_save_cb.sizeHint().width()
+            + self.appearance_btn.sizeHint().width()
+            + self.sql_panel_btn.sizeHint().width()
+            + 36  # toolbar margins & item spacing
+        )
+
+        # Ordered collapsible items: (action, leading_sep_action, group_key, label_fn, callback, widget)
+        collapsible_items = [
+            (self.run_flow_act, self.sep_run_act, "run", lambda: self.run_flow_btn.text(), self._on_run_flow_button_clicked, self.run_flow_btn),
+            (self.import_files_act, self.sep_tools_act, "tools", lambda: "📥 Import Files", self._on_add_import_csv, self.import_files_btn),
+            (self.add_group_act, None, "tools", lambda: "Add Group", lambda: self._on_add_group_box(), self.add_group_btn),
+            (self.add_note_act, None, "tools", lambda: "📝 Add Note", lambda: self._on_add_note(), self.add_note_btn),
+            (self.logs_act, self.sep_logs_act, "logs", lambda: "📜 Logs", lambda: self._on_open_logs(), self.logs_btn),
+            (self.open_folder_act, None, "logs", lambda: "📁 Open Report Folder", self._on_open_report_folder, self.open_folder_btn),
+        ]
+
+        # First determine whether any overflow occurs without reserving the '»' button
+        item_widths = [w.sizeHint().width() + 6 for (_, _, _, _, _, w) in collapsible_items]
+        sep_widths = {
+            "run": 10,
+            "tools": 10,
+            "logs": 10,
+        }
+        total_needed = fixed_w + sum(item_widths) + sum(sep_widths.values())
+        budget = avail_w if total_needed <= avail_w else max(0, avail_w - 34)
+
+        used = fixed_w
+        visible_flags: List[bool] = []
+        seen_groups: set = set()
+        overflowed = False
+        for idx, (_act, _sep, grp, _lbl, _cb, _w) in enumerate(collapsible_items):
+            if overflowed:
+                visible_flags.append(False)
+                continue
+            extra_sep = sep_widths[grp] if grp not in seen_groups else 0
+            needed = item_widths[idx] + extra_sep
+            if used + needed <= budget:
+                used += needed
+                seen_groups.add(grp)
+                visible_flags.append(True)
+            else:
+                overflowed = True
+                visible_flags.append(False)
+
+        self.overflow_menu.clear()
+        group_has_visible = {"run": False, "tools": False, "logs": False}
+        for is_vis, (act, _sep, grp, label_fn, cb, widget) in zip(visible_flags, collapsible_items):
+            act.setVisible(is_vis)
+            if is_vis:
+                group_has_visible[grp] = True
+            else:
+                menu_act = self.overflow_menu.addAction(label_fn())
+                menu_act.setEnabled(True)
+                menu_act.triggered.connect(cb)
+
+        self.sep_run_act.setVisible(group_has_visible["run"])
+        self.sep_tools_act.setVisible(group_has_visible["tools"])
+        self.sep_logs_act.setVisible(group_has_visible["logs"])
+        self.overflow_act.setVisible(any(not v for v in visible_flags))
+
     def _on_splitter_moved(self, pos: int, index: int) -> None:
         """Track user-resized expanded widths of left and right panels."""
         sizes = self.splitter.sizes()
@@ -1214,6 +1400,63 @@ class ProcessFlowEditorWindow(QMainWindow):
             self._last_left_width = sizes[0]
         if not self.right_panel.is_collapsed() and sizes[2] >= QueryManagementPanel.EXPANDED_MIN_WIDTH:
             self._last_right_width = sizes[2]
+        self._update_toolbar_overflow()
+
+    def _on_center_splitter_moved(self, pos: int, index: int) -> None:
+        """Track user-resized width of the built-in SQL editor panel."""
+        if not getattr(self, "_sql_panel_open", False) or not hasattr(self, "center_splitter"):
+            return
+        sizes = self.center_splitter.sizes()
+        if len(sizes) == 2 and sizes[1] >= SqlEditorPanel.MINIMUM_WIDTH:
+            self._last_sql_panel_width = sizes[1]
+        self._update_toolbar_overflow()
+
+    def _persist_sql_panel_state(self) -> None:
+        """Persist SQL panel open/closed state and width in repository settings."""
+        if self.app_controller and self.app_controller.repo:
+            self.app_controller.repo.set_setting(
+                "flow_editor_sql_panel_open",
+                "1" if self._sql_panel_open else "0",
+            )
+            self.app_controller.repo.set_setting(
+                "flow_editor_sql_panel_width",
+                str(max(SqlEditorPanel.MINIMUM_WIDTH, int(self._last_sql_panel_width))),
+            )
+
+    def _on_toggle_sql_panel(self, checked: Optional[bool] = None) -> None:
+        """Open or close the built-in SQL editor panel between the canvas and right Queries panel."""
+        if not hasattr(self, "sql_editor_panel") or not hasattr(self, "center_splitter"):
+            return
+
+        new_open = bool(checked) if isinstance(checked, bool) else (not self._sql_panel_open)
+        if not new_open and self.sql_editor_panel.is_dirty():
+            if not self._prompt_unsaved_sql_panel_changes():
+                if hasattr(self, "sql_panel_btn"):
+                    self.sql_panel_btn.setChecked(True)
+                return
+
+        self._sql_panel_open = new_open
+        if hasattr(self, "sql_panel_btn"):
+            self.sql_panel_btn.setChecked(new_open)
+        if hasattr(self, "sql_panel_act"):
+            self.sql_panel_act.setVisible(not new_open)
+
+        if new_open:
+            self.sql_editor_panel.setVisible(True)
+            total_w = self.center_splitter.width() or self.center_panel.width() or 830
+            target_sql_w = max(SqlEditorPanel.MINIMUM_WIDTH, self._last_sql_panel_width)
+            canvas_w = max(260, total_w - target_sql_w)
+            self.center_splitter.setSizes([canvas_w, target_sql_w])
+            self._sync_sql_panel_with_selection(force_reload=True)
+        else:
+            sizes = self.center_splitter.sizes()
+            if len(sizes) == 2 and sizes[1] >= SqlEditorPanel.MINIMUM_WIDTH:
+                self._last_sql_panel_width = sizes[1]
+            self.sql_editor_panel.setVisible(False)
+            self.center_splitter.setSizes([max(300, sum(sizes) if sizes else 830), 0])
+
+        self._persist_sql_panel_state()
+        self._update_toolbar_overflow()
 
     def _on_left_panel_collapse_toggled(self, is_collapsed: bool) -> None:
         """Adjust splitter widths when left panel collapses to 32px rail or expands."""
@@ -1231,6 +1474,7 @@ class ProcessFlowEditorWindow(QMainWindow):
             self.splitter.setSizes([target_w, max(300, sizes[1] - delta), sizes[2]])
         if self.app_controller and self.app_controller.repo:
             self.app_controller.repo.set_setting("flow_editor_left_collapsed", "1" if is_collapsed else "0")
+        self._update_toolbar_overflow()
 
     def _on_right_panel_collapse_toggled(self, is_collapsed: bool) -> None:
         """Adjust splitter widths when right panel collapses to 32px rail or expands."""
@@ -1248,6 +1492,7 @@ class ProcessFlowEditorWindow(QMainWindow):
             self.splitter.setSizes([sizes[0], max(300, sizes[1] - delta), target_w])
         if self.app_controller and self.app_controller.repo:
             self.app_controller.repo.set_setting("flow_editor_right_collapsed", "1" if is_collapsed else "0")
+        self._update_toolbar_overflow()
 
     def _toggle_left_panel(self) -> None:
         """Collapse or expand left Reports & Process Flows panel."""
@@ -1423,6 +1668,16 @@ class ProcessFlowEditorWindow(QMainWindow):
                             n_qname = node.get_property("query_name") or node.name()
                             if n_qname == q.name:
                                 node.set_parameters(q.parameter_names)
+                    if (
+                        hasattr(self, "sql_editor_panel")
+                        and self._sql_panel_query_name == q.name
+                        and not self.sql_editor_panel.is_dirty()
+                    ):
+                        try:
+                            disk_sql = q.file_path.read_text(encoding="utf-8", errors="replace")
+                            self.sql_editor_panel.load_query(q.name, disk_sql)
+                        except Exception:
+                            pass
             except Exception as e:
                 logger.debug(f"Error syncing query file {q.file_path}: {e}")
 
@@ -1491,12 +1746,13 @@ class ProcessFlowEditorWindow(QMainWindow):
             self.param_overlay.raise_()
 
     def showEvent(self, event: QShowEvent) -> None:
-        """Ensure parameter overlay is refreshed and positioned when editor is shown."""
+        """Ensure parameter overlay and toolbar overflow state are updated when editor is shown."""
         super().showEvent(event)
         if hasattr(self, "param_overlay"):
             self.param_overlay.move(14, 14)
             self.param_overlay.raise_()
         self._refresh_parameter_overlay()
+        self._update_toolbar_overflow()
 
     def changeEvent(self, event: QEvent) -> None:
         """Detect window focus/activation to sync any external query file edits immediately."""
@@ -2153,6 +2409,11 @@ class ProcessFlowEditorWindow(QMainWindow):
             self.left_panel.set_active_selection(cur_key, self.flow_controller.flow_name, report_title=self.report.name)
             return False
 
+        # Prompt if the built-in SQL editor has unsaved edits before switching flows
+        if not force and not self._prompt_unsaved_sql_panel_changes():
+            self.left_panel.set_active_selection(cur_key, self.flow_controller.flow_name, report_title=self.report.name)
+            return False
+
         # Save or prompt if there are unsaved changes on the current flow
         if not force and self._is_dirty and getattr(self, "_has_active_report", True):
             if self.auto_save_enabled:
@@ -2215,6 +2476,9 @@ class ProcessFlowEditorWindow(QMainWindow):
                 self.execution_tab.hide()
 
             self._load_initial_graph()
+            self._sql_panel_query_name = None
+            if hasattr(self, "sql_editor_panel"):
+                self.sql_editor_panel.clear_query()
             self._refresh_right_queries()
             self._refresh_left_reports_tree()
             self._update_run_button_state()
@@ -3218,7 +3482,18 @@ class ProcessFlowEditorWindow(QMainWindow):
         self.status_bar.showMessage(f"Aligned {len(nodes)} selected object(s) {dir_msg}.", 3000)
 
     def _on_save(self, show_popup: bool = True) -> None:
-        """Save process flow graph state, parameter defaults, and table display mode."""
+        """Save SQL editor changes when focused, otherwise save process flow graph state."""
+        # If Ctrl+S is pressed while editing in the built-in SQL editor, save the active SQL file only
+        if hasattr(self, "sql_editor_panel"):
+            focus_w = QtWidgets.QApplication.focusWidget()
+            if (
+                focus_w is not None
+                and (focus_w is self.sql_editor_panel or self.sql_editor_panel.isAncestorOf(focus_w))
+            ):
+                if self.sql_editor_panel.current_query_name():
+                    self.sql_editor_panel.request_save()
+                return
+
         if not getattr(self, "_has_active_report", True):
             return
         self._suppress_dirty = True
@@ -3276,6 +3551,11 @@ class ProcessFlowEditorWindow(QMainWindow):
                     self.app_controller.repo.set_setting("flow_editor_left_collapsed", "1" if self.left_panel.is_collapsed() else "0")
                 if hasattr(self, "right_panel"):
                     self.app_controller.repo.set_setting("flow_editor_right_collapsed", "1" if self.right_panel.is_collapsed() else "0")
+                if hasattr(self, "center_splitter") and self._sql_panel_open:
+                    csizes = self.center_splitter.sizes()
+                    if len(csizes) == 2 and csizes[1] >= SqlEditorPanel.MINIMUM_WIDTH:
+                        self._last_sql_panel_width = csizes[1]
+                self._persist_sql_panel_state()
 
             # Collect parameters and date options from overlay if present
             date_options = {}
@@ -3432,7 +3712,11 @@ class ProcessFlowEditorWindow(QMainWindow):
                 logger.warning(f"Auto-save failed: {e}")
 
     def closeEvent(self, event) -> None:
-        """Handle window close: check for unsaved changes or flush auto-save."""
+        """Handle window close: check for unsaved SQL or flow changes and persist window layout."""
+        if not self._prompt_unsaved_sql_panel_changes():
+            event.ignore()
+            return
+
         if self._is_dirty:
             if self.auto_save_enabled:
                 # Flush pending auto-save immediately
@@ -3477,6 +3761,11 @@ class ProcessFlowEditorWindow(QMainWindow):
                         self.app_controller.repo.set_setting("flow_editor_left_collapsed", "1" if self.left_panel.is_collapsed() else "0")
                     if hasattr(self, "right_panel"):
                         self.app_controller.repo.set_setting("flow_editor_right_collapsed", "1" if self.right_panel.is_collapsed() else "0")
+                    if hasattr(self, "center_splitter") and getattr(self, "_sql_panel_open", False):
+                        csizes = self.center_splitter.sizes()
+                        if len(csizes) == 2 and csizes[1] >= SqlEditorPanel.MINIMUM_WIDTH:
+                            self._last_sql_panel_width = csizes[1]
+                    self._persist_sql_panel_state()
         except Exception as e:
             logger.debug(f"Error saving splitter sizes on close: {e}")
 
@@ -3527,16 +3816,253 @@ class ProcessFlowEditorWindow(QMainWindow):
         event.accept()
         super().closeEvent(event)
 
+    def _safe_selected_nodes(self) -> List[BaseNode]:
+        """Safely retrieve currently selected nodes from NodeGraphQt without raising on deleted view IDs."""
+        try:
+            return list(self.graph.selected_nodes())
+        except KeyError:
+            nodes_map = getattr(getattr(self.graph, "_model", None), "nodes", {}) or {}
+            viewer = self.graph.viewer()
+            scene = viewer.scene() if viewer else None
+            if not scene:
+                return []
+            res: List[BaseNode] = []
+            for item in scene.selectedItems():
+                nid = getattr(item, "id", None)
+                if nid in nodes_map:
+                    node = self.graph.get_node_by_id(nid)
+                    if node is not None:
+                        res.append(node)
+            return res
+
     def _get_selected_query_nodes(self) -> List[BaseNode]:
         """Return list of selected QueryNode and ImportCsvNode objects."""
         return [
-            n for n in self.graph.selected_nodes()
+            n for n in self._safe_selected_nodes()
             if isinstance(n, (QueryNode, ImportCsvNode))
             or getattr(n, "type_", "") in ("reporting.nodes.QueryNode", "reporting.nodes.ImportCsvNode")
         ]
 
+    def _get_single_selected_query_node_name(self) -> Optional[str]:
+        """Return query name when exactly one QueryNode is selected on the canvas, else None."""
+        selected = self._safe_selected_nodes()
+        if len(selected) != 1:
+            return None
+        node = selected[0]
+        if isinstance(node, QueryNode) or getattr(node, "type_", "") == "reporting.nodes.QueryNode":
+            qname = node.get_property("query_name") or node.name()
+            return str(qname).strip() if qname else None
+        return None
+
+    def _restore_query_node_selection(self, query_name: Optional[str]) -> None:
+        """Select only the QueryNode matching query_name on the canvas without re-triggering SQL switch."""
+        self._restoring_node_selection = True
+        try:
+            self.graph.clear_selection()
+            viewer = self.graph.viewer()
+            if viewer and viewer.scene():
+                viewer.scene().clearSelection()
+            if query_name:
+                for node in self.graph.all_nodes():
+                    if isinstance(node, QueryNode) or getattr(node, "type_", "") == "reporting.nodes.QueryNode":
+                        if (node.get_property("query_name") or node.name()) == query_name:
+                            node.set_selected(True)
+                            break
+        finally:
+            self._restoring_node_selection = False
+
+    def _reset_canvas_drag_state(self) -> None:
+        """Clear any active canvas pan/marquee/grab state so modal dialogs never lock pan mode."""
+        self._empty_canvas_press_pos = None
+        self._did_pan_canvas = False
+        try:
+            viewer = self.graph.viewer()
+            if not viewer:
+                return
+            viewer.LMB_state = False
+            viewer.MMB_state = False
+            viewer.RMB_state = False
+            if hasattr(viewer, "_rubber_band") and viewer._rubber_band:
+                viewer._rubber_band.isActive = False
+                viewer._rubber_band.hide()
+            if hasattr(viewer, "viewport") and viewer.viewport():
+                viewer.viewport().unsetCursor()
+            scene = viewer.scene() if hasattr(viewer, "scene") else None
+            if scene and scene.mouseGrabberItem():
+                try:
+                    scene.mouseGrabberItem().ungrabMouse()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _finish_cancelled_sql_switch(self) -> None:
+        """Complete deferred cleanup after cancelling an unsaved-SQL node switch."""
+        self._cancelled_sql_switch_in_event = False
+        if not getattr(self, "_is_closing", False) and self._sql_panel_query_name:
+            self._restore_query_node_selection(self._sql_panel_query_name)
+        self._reset_canvas_drag_state()
+
+    def _prompt_unsaved_sql_panel_changes(self) -> bool:
+        """Prompt user to Save, Discard, or Cancel if the SQL editor has unsaved edits."""
+        if not hasattr(self, "sql_editor_panel") or not self.sql_editor_panel.is_dirty():
+            return True
+
+        self._reset_canvas_drag_state()
+        qname = self.sql_editor_panel.current_query_name() or "query"
+        self._prompting_sql_save = True
+        try:
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle("Unsaved SQL Changes")
+            msg_box.setText(f"Query '{qname}' has unsaved SQL changes in the SQL editor.")
+            msg_box.setInformativeText("Do you want to save your SQL changes before continuing?")
+            msg_box.setStandardButtons(QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel)
+            msg_box.setDefaultButton(QMessageBox.Save)
+            reply = msg_box.exec()
+        finally:
+            self._prompting_sql_save = False
+
+        self._reset_canvas_drag_state()
+
+        if reply == QMessageBox.Save:
+            return self._on_sql_panel_save_requested(qname, self.sql_editor_panel.current_sql_text())
+        if reply == QMessageBox.Discard:
+            qinfo = self._get_working_query(qname)
+            disk_sql = ""
+            if qinfo and qinfo.file_path and qinfo.file_path.exists():
+                try:
+                    disk_sql = qinfo.file_path.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    disk_sql = ""
+            self.sql_editor_panel.mark_saved(disk_sql)
+            return True
+        return False
+
+    def _sync_sql_panel_with_selection(self, force_reload: bool = False) -> None:
+        """Load the selected QueryNode's SQL into the built-in SQL editor, or clear if none/multiple selected."""
+        if (
+            not hasattr(self, "sql_editor_panel")
+            or getattr(self, "_restoring_node_selection", False)
+            or getattr(self, "_is_closing", False)
+            or getattr(self, "_switching_flow", False)
+            or getattr(self, "_prompting_sql_save", False)
+            or getattr(self, "_syncing_sql_topology", False)
+        ):
+            return
+
+        if getattr(self, "_cancelled_sql_switch_in_event", False):
+            self._restore_query_node_selection(self._sql_panel_query_name)
+            return
+
+        target_qname = self._get_single_selected_query_node_name()
+        if not force_reload and target_qname == self._sql_panel_query_name:
+            return
+
+        if target_qname != self._sql_panel_query_name and self.sql_editor_panel.is_dirty():
+            prev_qname = self._sql_panel_query_name
+            if not self._prompt_unsaved_sql_panel_changes():
+                self._cancelled_sql_switch_in_event = True
+                self._restore_query_node_selection(prev_qname)
+                QTimer.singleShot(0, self._finish_cancelled_sql_switch)
+                return
+
+        self._sql_panel_query_name = target_qname
+        if not target_qname:
+            self.sql_editor_panel.clear_query()
+            return
+
+        qinfo = self._get_working_query(target_qname)
+        sql_text = ""
+        if qinfo and qinfo.file_path and qinfo.file_path.exists():
+            try:
+                sql_text = qinfo.file_path.read_text(encoding="utf-8", errors="replace")
+            except Exception as e:
+                logger.warning(f"Failed to read SQL file for '{target_qname}': {e}")
+        self.sql_editor_panel.load_query(target_qname, sql_text)
+
+    def _on_sql_panel_dry_run_requested(self, query_name: str, sql_text: str) -> dict:
+        """Run BigQuery Native Dry-Run validation on the active SQL editor contents."""
+        if not hasattr(self, "sql_editor_panel"):
+            return {}
+
+        param_values = dict(self.flow_controller.parameter_defaults) if self.flow_controller else {}
+        if hasattr(self, "param_overlay"):
+            try:
+                if hasattr(self.param_overlay, "refresh_calculated_dates"):
+                    self.param_overlay.refresh_calculated_dates()
+                param_values.update(self.param_overlay.get_parameter_values())
+            except Exception:
+                pass
+
+        self.sql_editor_panel.set_dry_run_in_progress(True)
+        QtWidgets.QApplication.processEvents()
+        try:
+            res = dry_run_bigquery_sql(sql_text, parameters=param_values)
+        finally:
+            self.sql_editor_panel.set_dry_run_in_progress(False)
+
+        self.sql_editor_panel.show_dry_run_result(res)
+        return res
+
+    def _on_sql_panel_save_requested(self, query_name: str, sql_text: str) -> bool:
+        """Manually save SQL editor changes to disk and synchronize canvas topology & parameters."""
+        if not query_name or not getattr(self, "_has_active_report", True):
+            return False
+
+        qinfo = self._get_working_query(query_name)
+        if not qinfo or not qinfo.file_path:
+            QMessageBox.warning(self, "Save Error", f"Could not locate SQL file for '{query_name}'.")
+            return False
+
+        file_path = Path(qinfo.file_path)
+        if self.app_controller and hasattr(self.app_controller, "watcher"):
+            try:
+                self.app_controller.watcher.suppress(file_path)
+            except Exception:
+                pass
+
+        try:
+            file_path.write_text(sql_text, encoding="utf-8")
+        except Exception as e:
+            QMessageBox.critical(self, "Save SQL Error", f"Failed to write SQL file:\n{e}")
+            return False
+
+        was_selected_qname = self._get_single_selected_query_node_name()
+        qinfo.ensure_parsed(force=True)
+        if qinfo.output_csv_tables:
+            self.flow_controller.set_csv_filename(qinfo.name, ", ".join(qinfo.output_csv_tables))
+        else:
+            flow_csvs = self.flow_controller.get_csv_filenames()
+            flow_csvs.pop(qinfo.name, None)
+
+        final_sql = sql_text
+        try:
+            final_sql = file_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+        if hasattr(self, "sql_editor_panel") and self._sql_panel_query_name == query_name:
+            self.sql_editor_panel.mark_saved(final_sql)
+
+        self._syncing_sql_topology = True
+        try:
+            for node in self.graph.all_nodes():
+                if isinstance(node, QueryNode) or getattr(node, "type_", "") == "reporting.nodes.QueryNode":
+                    n_qname = node.get_property("query_name") or node.name()
+                    if n_qname == query_name:
+                        node.set_parameters(qinfo.parameter_names)
+            self._sync_graph_topology()
+            if was_selected_qname:
+                self._restore_query_node_selection(was_selected_qname)
+        finally:
+            self._syncing_sql_topology = False
+
+        if hasattr(self, "status_bar"):
+            self.status_bar.showMessage(f"Saved SQL for '{query_name}'.", 3000)
+        return True
+
     def _update_run_button_state(self) -> None:
-        """Update Run Flow button label based on whether query/import nodes are selected."""
+        """Update Run Flow button label and SQL editor panel when canvas selection changes."""
         if not hasattr(self, "run_flow_btn"):
             return
         if hasattr(self, "execution_tab") and self.execution_tab.is_running():
@@ -3551,6 +4077,8 @@ class ProcessFlowEditorWindow(QMainWindow):
         else:
             self.run_flow_btn.setText("▶ Run Flow")
             self.run_flow_btn.setToolTip("Execute process flow queries in dependency order (F5)")
+        self._update_toolbar_overflow()
+        self._sync_sql_panel_with_selection()
 
     def _on_run_flow_button_clicked(self) -> None:
         """Handler for toolbar Run button: runs selected if any are selected, else runs full flow."""
@@ -3776,6 +4304,9 @@ class ProcessFlowEditorWindow(QMainWindow):
 
     def _on_query_removed(self, query_name: str) -> None:
         if self.app_controller:
+            if hasattr(self, "sql_editor_panel") and self._sql_panel_query_name == query_name:
+                self._sql_panel_query_name = None
+                self.sql_editor_panel.clear_query()
             self.app_controller.remove_query(query_name)
             self.report = self.app_controller.active_report or self.report
             self._refresh_left_queries()
@@ -3800,6 +4331,10 @@ class ProcessFlowEditorWindow(QMainWindow):
                 self._pending_query_renames.pop(orig_name, None)
             else:
                 self._pending_query_renames[orig_name] = new_name
+
+            if hasattr(self, "sql_editor_panel") and self._sql_panel_query_name == old_name:
+                self._sql_panel_query_name = new_name
+                self.sql_editor_panel.rename_current_query(new_name)
 
             # 1. Immediately update the left panel to reflect the new name
             self._refresh_left_queries()
@@ -3879,6 +4414,11 @@ class ProcessFlowEditorWindow(QMainWindow):
             return False
 
         viewport = viewer.viewport() if hasattr(viewer, "viewport") else None
+        if watched in (getattr(self, "toolbar", None), getattr(self, "canvas_panel", None)):
+            if event.type() == QEvent.Resize:
+                self._update_toolbar_overflow()
+            return super().eventFilter(watched, event)
+
         target_widgets = {viewer, viewport, getattr(self, "graph_widget", None)} - {None}
         if watched in target_widgets:
             # Synchronize modifier keys with the actual OS state to prevent stuck modifiers

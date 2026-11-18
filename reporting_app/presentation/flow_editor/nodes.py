@@ -1972,7 +1972,9 @@ class GroupBoxItem(BackdropNodeItem):
         self._text_item = self._title_item
 
         self._color_btn = GroupColorButtonItem(self, callback=self._on_color_btn_clicked)
+        self._color_btn.setZValue(5.0)
         self._play_btn = GroupPlayButtonItem(self, callback=self._on_play_clicked)
+        self._play_btn.setZValue(5.0)
         self._active_color_popup: Optional[GroupColorPalettePopup] = None
 
         self._is_dragging_group: bool = False
@@ -1981,6 +1983,16 @@ class GroupBoxItem(BackdropNodeItem):
 
         self._update_theme_colors()
         self._sync_header_items()
+        self._update_backdrop_z_value()
+
+    def _update_backdrop_z_value(self) -> None:
+        """Keep smaller/inner group boxes above larger enclosing ones for accurate hit-testing."""
+        try:
+            from NodeGraphQt.constants import Z_VAL_BACKDROP
+            area = max(10000.0, float(self._width) * float(self._height))
+            self.setZValue(Z_VAL_BACKDROP + min(0.9, 10000.0 / area))
+        except Exception:
+            pass
 
     def _compute_palette_tones(self) -> Tuple[QtGui.QColor, QtGui.QColor, QtGui.QColor, QtGui.QColor]:
         """Compute (body_color, header_color, border_color, title_color) from self.color for additive blending."""
@@ -2071,6 +2083,7 @@ class GroupBoxItem(BackdropNodeItem):
         self.prepareGeometryChange()
         BackdropNodeItem.width.fset(self, width)
         self._sync_header_items()
+        self._update_backdrop_z_value()
         self.update()
 
     @BackdropNodeItem.height.setter
@@ -2078,6 +2091,7 @@ class GroupBoxItem(BackdropNodeItem):
         self.prepareGeometryChange()
         BackdropNodeItem.height.fset(self, height)
         self._sync_header_items()
+        self._update_backdrop_z_value()
         self.update()
 
     def on_sizer_pos_changed(self, pos) -> None:
@@ -2090,6 +2104,7 @@ class GroupBoxItem(BackdropNodeItem):
             self._play_btn.setPos(max(self._width - 18.0, 70.0), self.HEADER_HEIGHT / 2.0)
         if hasattr(self, "_color_btn") and self._color_btn is not None:
             self._color_btn.setPos(max(self._width - 52.0, 36.0), self.HEADER_HEIGHT / 2.0)
+        self._update_backdrop_z_value()
         self.update()
 
     def _combined_rect(self, nodes):

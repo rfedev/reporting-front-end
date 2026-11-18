@@ -674,20 +674,27 @@ class ProcessFlowEditorWindow(QMainWindow):
         return None
 
     def _find_group_node_near(self, scene_pos: QtCore.QPointF) -> Optional[GroupBoxNode]:
-        """Find a GroupBoxNode directly under the given scene point."""
-        viewer = self.graph.viewer()
-        items = viewer.scene().items(scene_pos) if viewer.scene() else []
-        for item in items:
-            for node in self.graph.all_nodes():
-                if isinstance(node, GroupBoxNode) or getattr(node, "type_", "") == "reporting.nodes.GroupBoxNode":
-                    if getattr(node, "view", None) == item:
-                        return node
-                    cur = item
-                    while cur:
-                        if cur == getattr(node, "view", None):
-                            return node
-                        cur = cur.parentItem() if hasattr(cur, "parentItem") else None
-        return None
+        """Find the most specific GroupBoxNode under the given scene point (header hits first, then smallest area)."""
+        candidates: List[Tuple[int, float, GroupBoxNode]] = []
+        for node in self.graph.all_nodes():
+            if not (isinstance(node, GroupBoxNode) or getattr(node, "type_", "") == "reporting.nodes.GroupBoxNode"):
+                continue
+            view = getattr(node, "view", None)
+            if not view:
+                continue
+            local_pos = view.mapFromScene(scene_pos)
+            rect = view.boundingRect()
+            if not rect.contains(local_pos):
+                continue
+            header_h = float(getattr(view, "HEADER_HEIGHT", 32.0))
+            in_header = local_pos.y() <= (rect.top() + header_h + 4.0)
+            area = max(1.0, float(rect.width()) * float(rect.height()))
+            candidates.append((0 if in_header else 1, area, node))
+
+        if not candidates:
+            return None
+        candidates.sort(key=lambda entry: (entry[0], entry[1]))
+        return candidates[0][2]
 
     def _find_note_node_near(self, scene_pos: QtCore.QPointF) -> Optional[NoteNode]:
         """Find a NoteNode directly under the given scene point."""
@@ -887,6 +894,10 @@ class ProcessFlowEditorWindow(QMainWindow):
                 menu.addSeparator()
 
             if target_group is not None and target_note is None:
+                if not target_group.selected():
+                    self.graph.clear_selection()
+                    target_group.set_selected(True)
+                    self._update_run_button_state()
                 run_grp_act = menu.addAction(f"Run Group '{target_group.name()}'")
                 run_grp_act.triggered.connect(lambda: self.run_group_nodes(target_group))
 

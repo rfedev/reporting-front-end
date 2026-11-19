@@ -351,6 +351,22 @@ class FlowWorker(QThread):
                             results_log.append(log_line)
                             self.log_message.emit(log_line)
                             if self.preview_cache is not None and self.preview_row_limit > 0:
+                                cached_keys = []
+                                try:
+                                    from reporting_app.core.result_preview_cache import load_local_file_preview
+
+                                    inp_pdata = load_local_file_preview(
+                                        resolved_file,
+                                        limit=self.preview_row_limit,
+                                        sheet_name=sheet_name,
+                                        has_headers=bool(headers),
+                                    )
+                                    self.preview_cache.put(inp_pdata)
+                                    cached_keys.append(inp_pdata.key)
+                                except Exception as inp_prev_err:
+                                    logger.debug(
+                                        f"Input file preview capture skipped for {resolved_file}: {inp_prev_err}"
+                                    )
                                 try:
                                     from reporting_app.core.result_preview_cache import fetch_bigquery_table_preview
 
@@ -361,9 +377,11 @@ class FlowWorker(QThread):
                                         workbench_dataset=wb_ds,
                                     )
                                     self.preview_cache.put(pdata)
-                                    self.previews_cached.emit([pdata.key])
+                                    cached_keys.append(pdata.key)
                                 except Exception as prev_err:
                                     logger.debug(f"Import preview capture skipped for {d_table}: {prev_err}")
+                                if cached_keys:
+                                    self.previews_cached.emit(cached_keys)
                             imp_records.append({
                                 "file_path": str(f_path),
                                 "destination_table": d_table,

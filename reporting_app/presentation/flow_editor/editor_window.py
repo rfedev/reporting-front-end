@@ -60,11 +60,12 @@ from reporting_app.core.result_preview_cache import (
     ResultPreviewData,
     make_bq_cache_key,
     make_csv_cache_key,
+    make_file_cache_key,
     normalize_bq_table_ref,
 )
 from reporting_app.core.sql_parser import sync_query_csv_comments, update_query_csv_comment
 from reporting_app.presentation.flow_editor.graph_builder import ProcessFlowGraphBuilder
-from reporting_app.utils.date_calc import format_filename_with_date
+from reporting_app.utils.date_calc import calculate_import_file_date, format_filename_with_date
 try:
     from reporting_app.presentation.flow_editor.nodes import (
         CircularInfoButtonItem,
@@ -4149,6 +4150,28 @@ class ProcessFlowEditorWindow(QMainWindow):
                 return node
         return None
 
+    def _find_import_csv_node_for_input_box(
+        self, node: TableBoxNode, query_owner: str
+    ) -> Optional[ImportCsvNode]:
+        """Locate the ImportCsvNode fed by an 'Input Tables' TableBoxNode, if any."""
+        out_port = node.get_output("out_tables") if hasattr(node, "get_output") else None
+        if out_port is not None and hasattr(out_port, "connected_ports"):
+            for cp in out_port.connected_ports():
+                cnode = cp.node() if hasattr(cp, "node") else None
+                if cnode is not None and (
+                    isinstance(cnode, ImportCsvNode)
+                    or getattr(cnode, "type_", "") == "reporting.nodes.ImportCsvNode"
+                ):
+                    return cnode
+        if query_owner and getattr(self, "graph", None) is not None:
+            for gnode in self.graph.all_nodes():
+                if (
+                    isinstance(gnode, ImportCsvNode)
+                    or getattr(gnode, "type_", "") == "reporting.nodes.ImportCsvNode"
+                ) and getattr(gnode, "name", lambda: "")() == query_owner:
+                    return gnode
+        return None
+
     def _build_table_box_preview_spec(self, node: TableBoxNode) -> TableBoxPreviewSpec:
         """Build cache keys and refresh metadata for every entry in a TableBoxNode."""
         box_type = (
@@ -4210,7 +4233,91 @@ class ProcessFlowEditorWindow(QMainWindow):
                     )
                 )
         else:
-            for raw_tbl in raw_list:
+            local_file_exts = {".csv", ".xlsx", ".xlsm", ".xls"}
+            imp_node = (
+                self._find_import_csv_node_for_input_box(node, query_owner)
+                if box_type == "Input Tables"
+                else None
+            )
+            imp_items = (
+                imp_node.get_imports()
+                if (imp_node is not None and hasattr(imp_node, "get_imports"))
+                else []
+            )
+            inputs_dir = (self.report.folder_path / "inputs") if self.report else None
+
+            for idx, raw_tbl in enumerate(raw_list):
+                matched_imp: Optional[dict] = None
+                if box_type == "Input Tables" and imp_items:
+                    if idx < len(imp_items):
+                        cand_path = (imp_items[idx].get("file_path") or imp_items[idx].get("csv_path") or "").strip()
+                        if cand_path == raw_tbl:
+                            matched_imp = imp_items[idx]
+                    if matched_imp is None:
+                        for imp_entry in imp_items:
+                            cand_path = (imp_entry.get("file_path") or imp_entry.get("csv_path") or "").strip()
+                            if cand_path == raw_tbl:
+                                matched_imp = imp_entry
+                                break
+
+                is_local_input = box_type == "Input Tables" and (
+                    matched_imp is not None or Path(raw_tbl).suffix.lower() in local_file_exts
+                )
+                if is_local_input:
+                    meta = matched_imp or {}
+                    has_headers = bool(meta.get("has_headers", True))
+                    raw_sheet = meta.get("sheet_name")
+                    sheet_name = str(raw_sheet).strip() if isinstance(raw_sheet, str) and raw_sheet.strip() else None
+                    date_option = str(meta.get("date_option") or "Flow Date").strip() or "Flow Date"
+
+                    from datetime import date
+
+                    resolved_f_path = raw_tbl
+                    effective_date = calculate_import_file_date(
+                        date_option,
+                        flow_date=filename_date,
+                        ref_date=date.today(),
+                    )
+                    if effective_date:
+                        resolved_f_path = format_filename_with_date(raw_tbl, effective_date)
+
+                    primary_path = Path(resolved_f_path)
+                    fallback_path = Path(raw_tbl)
+                    if not primary_path.is_absolute() and inputs_dir is not None:
+                        cand = inputs_dir / primary_path
+                        if cand.exists() or not primary_path.exists():
+                            primary_path = cand
+                    if not fallback_path.is_absolute() and inputs_dir is not None:
+                        cand_fb = inputs_dir / fallback_path
+                        if cand_fb.exists() or not fallback_path.exists():
+                            fallback_path = cand_fb
+
+                    primary_key = make_file_cache_key(primary_path, sheet_name=sheet_name)
+                    fb_keys = []
+                    fb_key = make_file_cache_key(fallback_path, sheet_name=sheet_name)
+                    if fb_key != primary_key:
+                        fb_keys.append(fb_key)
+
+                    disp_label = Path(resolved_f_path).name or resolved_f_path
+                    if sheet_name:
+                        disp_label = f"{disp_label} ({sheet_name})"
+
+                    items.append(
+                        TablePreviewItemSpec(
+                            cache_key=primary_key,
+                            fallback_keys=fb_keys,
+                            label=disp_label,
+                            full_name=str(primary_path),
+                            kind="input_file",
+                            csv_path=primary_path,
+                            fallback_csv_path=fallback_path if fallback_path != primary_path else None,
+                            query_name=query_owner,
+                            has_headers=has_headers,
+                            sheet_name=sheet_name,
+                        )
+                    )
+                    continue
+
                 sub_tbl = substitute_parameters(raw_tbl, param_values)
                 norm_tbl = normalize_bq_table_ref(
                     sub_tbl,

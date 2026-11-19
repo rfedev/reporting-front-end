@@ -16,7 +16,7 @@ from pathlib import Path
 import shutil
 import tempfile
 import threading
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from google.api_core.exceptions import Forbidden, NotFound, Unauthorized
 from google.auth.exceptions import GoogleAuthError
@@ -179,6 +179,23 @@ def make_csv_cache_key(csv_path: str | Path) -> str:
     except Exception:
         resolved = str(csv_path)
     return f"csv:{resolved.lower()}"
+
+
+def make_file_cache_key(
+    file_path: str | Path,
+    sheet_name: Optional[str] = None,
+) -> str:
+    """Build canonical cache key for a local CSV or Excel file (and optional sheet)."""
+    path = Path(file_path)
+    try:
+        resolved = str(path.resolve())
+    except Exception:
+        resolved = str(file_path)
+
+    if path.suffix.lower() in {".xlsx", ".xlsm", ".xls"}:
+        sheet_part = (sheet_name or "").strip().lower()
+        return f"excel:{resolved.lower()}|sheet={sheet_part}"
+    return make_csv_cache_key(path)
 
 
 class ResultPreviewCache:
@@ -534,13 +551,14 @@ def fetch_bigquery_table_preview(
 def load_csv_preview(
     csv_path: str | Path,
     limit: int = 100,
+    has_headers: bool = True,
     display_name: Optional[str] = None,
     cache_key: Optional[str] = None,
 ) -> ResultPreviewData:
-    """Read header and up to ``limit`` rows from a local CSV file without loading the full file."""
+    """Read header (or generate col_N names) and up to ``limit`` rows from a local CSV file."""
     path = Path(csv_path)
     if not path.exists():
-        raise FileNotFoundError(f"Output CSV file not found: {path}")
+        raise FileNotFoundError(f"CSV file not found: {path}")
 
     max_rows = max(1, int(limit or 100))
     columns: List[str] = []
@@ -549,36 +567,68 @@ def load_csv_preview(
 
     with open(path, "r", encoding="utf-8-sig", errors="replace", newline="") as f:
         reader = csv.reader(f)
-        try:
-            header = next(reader)
-        except StopIteration:
-            return ResultPreviewData(
-                key=cache_key or make_csv_cache_key(path),
-                display_name=display_name or path.name,
-                columns=[],
-                column_types=[],
-                column_modes=[],
-                rows=[],
-                total_rows=0,
-                row_limit=max_rows,
-                truncated=False,
-                source="csv",
-                source_detail="CSV",
-            )
+        if has_headers:
+            try:
+                header = next(reader)
+            except StopIteration:
+                return ResultPreviewData(
+                    key=cache_key or make_csv_cache_key(path),
+                    display_name=display_name or path.name,
+                    columns=[],
+                    column_types=[],
+                    column_modes=[],
+                    rows=[],
+                    total_rows=0,
+                    row_limit=max_rows,
+                    truncated=False,
+                    source="csv",
+                    source_detail="CSV",
+                )
 
-        columns = [str(col) for col in header]
-        num_cols = len(columns)
-        for row in reader:
-            if len(collected) >= max_rows:
-                truncated = True
-                break
-            if len(row) < num_cols:
-                padded = list(row) + [""] * (num_cols - len(row))
-            elif len(row) > num_cols:
-                padded = list(row[:num_cols])
-            else:
-                padded = list(row)
-            collected.append(padded)
+            columns = [str(col) for col in header]
+            num_cols = len(columns)
+            for row in reader:
+                if len(collected) >= max_rows:
+                    truncated = True
+                    break
+                if len(row) < num_cols:
+                    padded = list(row) + [""] * (num_cols - len(row))
+                elif len(row) > num_cols:
+                    padded = list(row[:num_cols])
+                else:
+                    padded = list(row)
+                collected.append(padded)
+        else:
+            raw_rows: List[List[str]] = []
+            for row in reader:
+                if len(raw_rows) >= max_rows:
+                    truncated = True
+                    break
+                raw_rows.append(list(row))
+
+            if not raw_rows:
+                return ResultPreviewData(
+                    key=cache_key or make_csv_cache_key(path),
+                    display_name=display_name or path.name,
+                    columns=[],
+                    column_types=[],
+                    column_modes=[],
+                    rows=[],
+                    total_rows=0,
+                    row_limit=max_rows,
+                    truncated=False,
+                    source="csv",
+                    source_detail="CSV",
+                )
+
+            num_cols = max((len(r) for r in raw_rows), default=0)
+            columns = [f"col_{i + 1}" for i in range(num_cols)]
+            for row in raw_rows:
+                if len(row) < num_cols:
+                    padded = row + [""] * (num_cols - len(row))
+                else:
+                    padded = row[:num_cols]
+                collected.append(padded)
 
     return ResultPreviewData(
         key=cache_key or make_csv_cache_key(path),
@@ -592,6 +642,243 @@ def load_csv_preview(
         truncated=truncated,
         source="csv",
         source_detail="CSV",
+    )
+
+
+def _normalize_excel_headers(header_row: Sequence[Any]) -> List[str]:
+    """Build readable string headers from an Excel row, trimming trailing None cells."""
+    header_list = list(header_row)
+    while header_list and header_list[-1] is None:
+        header_list.pop()
+    return [f"col_{idx + 1}" if col is None or str(col) == "" else str(col) for idx, col in enumerate(header_list)]
+
+
+def _pad_and_serialize_row(row: Sequence[Any], num_cols: int) -> List[Any]:
+    """Normalize a spreadsheet row to ``num_cols`` and convert values to JSON-safe primitives."""
+    result: List[Any] = []
+    row_len = len(row)
+    for idx in range(num_cols):
+        val = row[idx] if idx < row_len else None
+        result.append(serialize_preview_value(val))
+    return result
+
+
+def load_spreadsheet_preview(
+    file_path: str | Path,
+    limit: int = 100,
+    sheet_name: Optional[str] = None,
+    has_headers: bool = True,
+    display_name: Optional[str] = None,
+    cache_key: Optional[str] = None,
+) -> ResultPreviewData:
+    """Read up to ``limit`` rows from a local Excel workbook (.xlsx/.xlsm/.xls)."""
+    path = Path(file_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Excel file not found: {path}")
+
+    max_rows = max(1, int(limit or 100))
+    effective_sheet = sheet_name.strip() if isinstance(sheet_name, str) and sheet_name.strip() else None
+    key = cache_key or make_file_cache_key(path, sheet_name=effective_sheet)
+    disp = display_name or (f"{path.name} ({effective_sheet})" if effective_sheet else path.name)
+    ext = path.suffix.lower()
+
+    if ext in {".xlsx", ".xlsm"}:
+        try:
+            import openpyxl
+
+            wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+            try:
+                if effective_sheet:
+                    if effective_sheet not in wb.sheetnames:
+                        available = ", ".join(wb.sheetnames)
+                        raise ValueError(
+                            f"Sheet '{effective_sheet}' not found in {path.name}. "
+                            f"Available sheets: {available}"
+                        )
+                    ws = wb[effective_sheet]
+                    resolved_sheet = effective_sheet
+                else:
+                    ws = wb.active if wb.active is not None else wb[wb.sheetnames[0]]
+                    resolved_sheet = getattr(ws, "title", None)
+
+                detail = f"Excel ({resolved_sheet})" if resolved_sheet else "Excel"
+                row_iter = ws.iter_rows(values_only=True)
+                columns: List[str] = []
+                collected: List[List[Any]] = []
+                truncated = False
+
+                if has_headers:
+                    try:
+                        header_row = next(row_iter)
+                    except StopIteration:
+                        return ResultPreviewData(
+                            key=key,
+                            display_name=disp,
+                            columns=[],
+                            column_types=[],
+                            column_modes=[],
+                            rows=[],
+                            total_rows=0,
+                            row_limit=max_rows,
+                            truncated=False,
+                            source="excel",
+                            source_detail=detail,
+                        )
+
+                    columns = _normalize_excel_headers(header_row)
+                    raw_preview: List[List[Any]] = []
+                    for row in row_iter:
+                        if len(raw_preview) >= max_rows:
+                            truncated = True
+                            break
+                        raw_preview.append(list(row))
+
+                    # If the header row was shorter than wider data rows, expand col count safely.
+                    max_data_cols = 0
+                    for r in raw_preview:
+                        trimmed_len = len(r)
+                        while trimmed_len > 0 and r[trimmed_len - 1] is None:
+                            trimmed_len -= 1
+                        if trimmed_len > max_data_cols:
+                            max_data_cols = trimmed_len
+
+                    while len(columns) < max_data_cols:
+                        columns.append(f"col_{len(columns) + 1}")
+
+                    num_cols = len(columns)
+                    collected = [_pad_and_serialize_row(r, num_cols) for r in raw_preview]
+                else:
+                    raw_preview = []
+                    for row in row_iter:
+                        if len(raw_preview) >= max_rows:
+                            truncated = True
+                            break
+                        raw_preview.append(list(row))
+
+                    if not raw_preview:
+                        return ResultPreviewData(
+                            key=key,
+                            display_name=disp,
+                            columns=[],
+                            column_types=[],
+                            column_modes=[],
+                            rows=[],
+                            total_rows=0,
+                            row_limit=max_rows,
+                            truncated=False,
+                            source="excel",
+                            source_detail=detail,
+                        )
+
+                    max_data_cols = 0
+                    for r in raw_preview:
+                        trimmed_len = len(r)
+                        while trimmed_len > 0 and r[trimmed_len - 1] is None:
+                            trimmed_len -= 1
+                        if trimmed_len > max_data_cols:
+                            max_data_cols = trimmed_len
+
+                    columns = [f"col_{i + 1}" for i in range(max_data_cols)]
+                    collected = [_pad_and_serialize_row(r, max_data_cols) for r in raw_preview]
+
+                return ResultPreviewData(
+                    key=key,
+                    display_name=disp,
+                    columns=columns,
+                    column_types=[],
+                    column_modes=[],
+                    rows=collected,
+                    total_rows=None if truncated else len(collected),
+                    row_limit=max_rows,
+                    truncated=truncated,
+                    source="excel",
+                    source_detail=detail,
+                )
+            finally:
+                wb.close()
+        except ValueError:
+            raise
+        except ImportError:
+            pass
+        except Exception as exc:
+            logger.debug(f"openpyxl streaming preview failed for {path}, falling back to pandas: {exc}")
+
+    # Legacy .xls or fallback via pandas
+    import pandas as pd
+
+    read_kwargs: Dict[str, Any] = {
+        "sheet_name": effective_sheet if effective_sheet else 0,
+        "header": 0 if has_headers else None,
+        "nrows": max_rows + 1,
+        "dtype": object,
+    }
+    if ext in {".xlsx", ".xlsm"}:
+        read_kwargs["engine"] = "openpyxl"
+
+    df = pd.read_excel(path, **read_kwargs)
+    truncated = len(df) > max_rows
+    if truncated:
+        df = df.iloc[:max_rows]
+
+    if has_headers:
+        columns = [
+            f"col_{idx + 1}" if str(col).startswith("Unnamed:") else str(col)
+            for idx, col in enumerate(df.columns)
+        ]
+    else:
+        columns = [f"col_{idx + 1}" for idx in range(len(df.columns))]
+
+    collected_rows: List[List[Any]] = []
+    for row_vals in df.itertuples(index=False, name=None):
+        norm_row: List[Any] = []
+        for val in row_vals:
+            if pd.isna(val):
+                norm_row.append(None)
+            else:
+                norm_row.append(serialize_preview_value(val))
+        collected_rows.append(norm_row)
+
+    detail = f"Excel ({effective_sheet})" if effective_sheet else "Excel"
+    return ResultPreviewData(
+        key=key,
+        display_name=disp,
+        columns=columns,
+        column_types=[],
+        column_modes=[],
+        rows=collected_rows,
+        total_rows=None if truncated else len(collected_rows),
+        row_limit=max_rows,
+        truncated=truncated,
+        source="excel",
+        source_detail=detail,
+    )
+
+
+def load_local_file_preview(
+    file_path: str | Path,
+    limit: int = 100,
+    sheet_name: Optional[str] = None,
+    has_headers: bool = True,
+    display_name: Optional[str] = None,
+    cache_key: Optional[str] = None,
+) -> ResultPreviewData:
+    """Dispatch local preview loading for CSV or Excel (.xlsx/.xlsm/.xls) files."""
+    path = Path(file_path)
+    if path.suffix.lower() in {".xlsx", ".xlsm", ".xls"}:
+        return load_spreadsheet_preview(
+            path,
+            limit=limit,
+            sheet_name=sheet_name,
+            has_headers=has_headers,
+            display_name=display_name,
+            cache_key=cache_key,
+        )
+    return load_csv_preview(
+        path,
+        limit=limit,
+        has_headers=has_headers,
+        display_name=display_name,
+        cache_key=cache_key,
     )
 
 

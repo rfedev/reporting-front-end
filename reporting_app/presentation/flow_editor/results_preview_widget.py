@@ -43,23 +43,26 @@ from reporting_app.core.result_preview_cache import (
     fetch_bigquery_select_preview,
     fetch_bigquery_table_preview,
     load_csv_preview,
+    load_local_file_preview,
 )
 
 
 @dataclass
 class TablePreviewItemSpec:
-    """Descriptor for a single BigQuery table or Output CSV inside a TableBoxNode."""
+    """Descriptor for a single BigQuery table, Output CSV, or Input CSV/Excel file inside a TableBoxNode."""
 
     cache_key: str
     label: str
     full_name: str
-    kind: str  # "bq_table" | "csv"
+    kind: str  # "bq_table" | "csv" | "input_file"
     fallback_keys: List[str] = field(default_factory=list)
     bq_table_ref: str = ""
     csv_path: Optional[Path] = None
     fallback_csv_path: Optional[Path] = None
     query_name: str = ""
     sql_file_path: Optional[Path] = None
+    has_headers: bool = True
+    sheet_name: Optional[str] = None
 
 
 @dataclass
@@ -166,6 +169,8 @@ class PreviewTableModel(QAbstractTableModel):
                     return f"{col_name}\nType: {col_type}{mode_str}"
                 if self._source == "csv":
                     return f"{col_name}\nSource: CSV"
+                if self._source == "excel":
+                    return f"{col_name}\nSource: Excel"
                 return col_name
             return None
 
@@ -456,7 +461,7 @@ class ResultsPreviewTableView(QTableView):
 
 
 class PreviewFetchWorker(QThread):
-    """Background worker fetching table, CSV, or BigQuery SELECT previews without blocking UI."""
+    """Background worker fetching table, CSV, Excel, or BigQuery SELECT previews without blocking UI."""
 
     item_cached = Signal(str)
     progress_changed = Signal(int, int, str)
@@ -473,7 +478,7 @@ class PreviewFetchWorker(QThread):
         parent: Optional[QWidget] = None,
     ):
         super().__init__(parent)
-        self.mode = mode  # "bq_single" | "bq_all" | "csv_single" | "csv_all" | "bq_select"
+        self.mode = mode  # "bq_single" | "bq_all" | "csv_single" | "csv_all" | "file_single" | "file_all" | "bq_select"
         self.spec = spec
         self.target_index = target_index
         self.limit = max(1, int(limit or 100))
@@ -483,16 +488,35 @@ class PreviewFetchWorker(QThread):
     def request_cancel(self) -> None:
         self._cancel_requested = True
 
-    def _load_csv_item(self, item: TablePreviewItemSpec) -> ResultPreviewData:
+    def _load_local_file_item(self, item: TablePreviewItemSpec) -> ResultPreviewData:
         candidate = item.csv_path
         if (candidate is None or not candidate.exists()) and item.fallback_csv_path and item.fallback_csv_path.exists():
             candidate = item.fallback_csv_path
         if candidate is None:
-            raise FileNotFoundError(f"Output CSV path not resolved for '{item.label}'.")
-        return load_csv_preview(
+            label_noun = "Output CSV" if item.kind == "csv" else "File"
+            raise FileNotFoundError(f"{label_noun} path not resolved for '{item.label}'.")
+        return load_local_file_preview(
             candidate,
             limit=self.limit,
+            sheet_name=item.sheet_name,
+            has_headers=item.has_headers,
             display_name=item.label,
+            cache_key=item.cache_key,
+        )
+
+    def _load_csv_item(self, item: TablePreviewItemSpec) -> ResultPreviewData:
+        return self._load_local_file_item(item)
+
+    def _fetch_single_item(self, item: TablePreviewItemSpec) -> ResultPreviewData:
+        if item.kind == "input_file":
+            return self._load_local_file_item(item)
+        if item.kind == "csv" or self.mode in ("csv_single", "csv_all"):
+            return self._load_csv_item(item)
+        return fetch_bigquery_table_preview(
+            item.bq_table_ref or item.full_name,
+            limit=self.limit,
+            project_id=self.spec.project_id or None,
+            workbench_dataset=self.spec.workbench_dataset,
             cache_key=item.cache_key,
         )
 
@@ -503,57 +527,28 @@ class PreviewFetchWorker(QThread):
             return
 
         try:
-            if self.mode in ("bq_single", "bq_all"):
+            if self.mode in ("bq_single", "bq_all", "csv_single", "csv_all", "file_single", "file_all"):
+                fetch_all = self.mode.endswith("_all")
                 indices = (
                     list(range(len(items)))
-                    if self.mode == "bq_all"
+                    if fetch_all
                     else [max(0, min(len(items) - 1, self.target_index))]
                 )
                 total = len(indices)
                 errors: List[str] = []
-                for pos, idx in enumerate(indices, start=1):
-                    if self._cancel_requested:
-                        self.finished_fetch.emit(False, "Preview fetch cancelled.")
-                        return
-                    item = items[idx]
-                    self.progress_changed.emit(pos, total, item.label)
-                    try:
-                        pdata = fetch_bigquery_table_preview(
-                            item.bq_table_ref or item.full_name,
-                            limit=self.limit,
-                            project_id=self.spec.project_id or None,
-                            workbench_dataset=self.spec.workbench_dataset,
-                            cache_key=item.cache_key,
-                        )
-                        self.cache.put(pdata)
-                        self.item_cached.emit(pdata.key)
-                    except Exception as exc:
-                        err = str(exc)
-                        errors.append(f"{item.label}: {err}")
-                        self.item_failed.emit(item.cache_key, err)
-
-                if errors:
-                    self.finished_fetch.emit(False, "\n\n".join(errors))
-                else:
-                    self.finished_fetch.emit(True, "")
-                return
-
-            if self.mode in ("csv_single", "csv_all"):
-                indices = (
-                    list(range(len(items)))
-                    if self.mode == "csv_all"
-                    else [max(0, min(len(items) - 1, self.target_index))]
+                cancel_msg = (
+                    "CSV load cancelled."
+                    if self.mode in ("csv_single", "csv_all")
+                    else "Preview fetch cancelled."
                 )
-                total = len(indices)
-                errors = []
                 for pos, idx in enumerate(indices, start=1):
                     if self._cancel_requested:
-                        self.finished_fetch.emit(False, "CSV load cancelled.")
+                        self.finished_fetch.emit(False, cancel_msg)
                         return
                     item = items[idx]
                     self.progress_changed.emit(pos, total, item.label)
                     try:
-                        pdata = self._load_csv_item(item)
+                        pdata = self._fetch_single_item(item)
                         self.cache.put(pdata)
                         self.item_cached.emit(pdata.key)
                     except Exception as exc:
@@ -805,14 +800,25 @@ class ResultsPreviewWidget(QWidget):
                 pass
         return 100
 
+    @staticmethod
+    def _is_excel_item(item: Optional[TablePreviewItemSpec]) -> bool:
+        if item is None:
+            return False
+        for path in (item.csv_path, item.fallback_csv_path):
+            if path is not None and path.suffix.lower() in {".xlsx", ".xlsm", ".xls"}:
+                return True
+        return Path(item.full_name or item.label).suffix.lower() in {".xlsx", ".xlsm", ".xls"}
+
     def _rebuild_action_controls(self) -> None:
         self.action_menu.clear()
         spec = self._spec
-        is_csv = bool(spec and spec.box_type == "Output CSV")
+        cur_item = self.current_item()
+        is_output_csv = bool(spec and spec.box_type == "Output CSV")
+        is_input_file = bool(cur_item and cur_item.kind == "input_file")
         has_items = bool(spec and spec.items)
         is_busy = self._active_worker is not None and self._active_worker.isRunning()
 
-        if is_csv:
+        if is_output_csv:
             primary_text = "📂 Load from CSV"
             primary_tip = "Load preview rows from the local output CSV file"
             act_load = QAction("Load from CSV", self.action_menu)
@@ -828,6 +834,19 @@ class ResultsPreviewWidget(QWidget):
             act_bq = QAction("Refresh from BigQuery", self.action_menu)
             act_bq.triggered.connect(self.trigger_refresh_from_bigquery)
             self.action_menu.addAction(act_bq)
+        elif is_input_file:
+            is_excel = self._is_excel_item(cur_item)
+            kind_noun = "Excel" if is_excel else "CSV"
+            primary_text = f"📂 Load from {kind_noun}"
+            primary_tip = f"Load preview rows from the local {kind_noun} file"
+            act_load = QAction(f"Load from {kind_noun}", self.action_menu)
+            act_load.triggered.connect(self.trigger_primary_action)
+            self.action_menu.addAction(act_load)
+
+            if spec and len(spec.items) > 1:
+                act_load_all = QAction("Load All Files", self.action_menu)
+                act_load_all.triggered.connect(self.trigger_refresh_all)
+                self.action_menu.addAction(act_load_all)
         else:
             primary_text = "↻ Refresh"
             primary_tip = "Fetch preview rows from BigQuery for the selected table"
@@ -910,6 +929,7 @@ class ResultsPreviewWidget(QWidget):
         cur_it = self.current_item()
         if cur_it:
             self.table_selector_combo.setToolTip(cur_it.full_name)
+        self._rebuild_action_controls()
         self.reload_from_cache()
 
     def reload_from_cache(self) -> None:
@@ -954,6 +974,21 @@ class ResultsPreviewWidget(QWidget):
                     f"Output CSV file does not exist on disk yet:\n{item.label}\n\n"
                     f"Run the query, or open ▾ → Refresh from BigQuery."
                 )
+        elif item.kind == "input_file":
+            kind_noun = "Excel" if self._is_excel_item(item) else "CSV"
+            exists_on_disk = bool(
+                (item.csv_path and item.csv_path.exists())
+                or (item.fallback_csv_path and item.fallback_csv_path.exists())
+            )
+            if exists_on_disk:
+                self.empty_label.setText(
+                    f"Input {kind_noun} file has not been loaded in this session yet.\n"
+                    f"Click 'Load from {kind_noun}' to preview '{item.label}'."
+                )
+            else:
+                self.empty_label.setText(
+                    f"Input {kind_noun} file was not found on disk:\n{item.full_name or item.label}"
+                )
         else:
             self.empty_label.setText(
                 f"Results for '{item.label}' have not been fetched this session.\n"
@@ -979,7 +1014,12 @@ class ResultsPreviewWidget(QWidget):
         self.table_view.adjust_column_widths()
 
         row_cnt = len(data.rows)
-        src_tag = " (from CSV)" if data.source == "csv" else ""
+        if data.source == "csv":
+            src_tag = " (from CSV)"
+        elif data.source == "excel":
+            src_tag = " (from Excel)"
+        else:
+            src_tag = ""
         if data.total_rows is not None and data.total_rows > row_cnt:
             count_text = f"Showing {row_cnt:,} of {data.total_rows:,} rows{src_tag}"
         elif data.truncated:
@@ -996,13 +1036,24 @@ class ResultsPreviewWidget(QWidget):
     def trigger_primary_action(self) -> None:
         if not self._spec or not self._spec.items:
             return
-        mode = "csv_single" if self._spec.box_type == "Output CSV" else "bq_single"
+        cur_item = self.current_item()
+        if self._spec.box_type == "Output CSV":
+            mode = "csv_single"
+        elif cur_item is not None and cur_item.kind == "input_file":
+            mode = "file_single"
+        else:
+            mode = "bq_single"
         self._start_fetch(mode=mode)
 
     def trigger_refresh_all(self) -> None:
         if not self._spec or not self._spec.items:
             return
-        mode = "csv_all" if self._spec.box_type == "Output CSV" else "bq_all"
+        if self._spec.box_type == "Output CSV":
+            mode = "csv_all"
+        elif any(it.kind == "input_file" for it in self._spec.items):
+            mode = "file_all"
+        else:
+            mode = "bq_all"
         self._start_fetch(mode=mode)
 
     def trigger_refresh_from_bigquery(self) -> None:
@@ -1025,6 +1076,11 @@ class ResultsPreviewWidget(QWidget):
             self.loading_label.setText(f"Loading {len(self._spec.items)} CSV file(s)...")
         elif mode == "csv_single":
             self.loading_label.setText(f"Loading CSV preview for '{label}'...")
+        elif mode == "file_all":
+            self.loading_label.setText(f"Loading {len(self._spec.items)} input file(s)...")
+        elif mode == "file_single":
+            kind_noun = "Excel" if self._is_excel_item(cur_item) else "CSV"
+            self.loading_label.setText(f"Loading {kind_noun} preview for '{label}'...")
         elif mode == "bq_select":
             self.loading_label.setText(f"Running '{self._spec.query_owner or 'query'}' preview in BigQuery...")
         else:

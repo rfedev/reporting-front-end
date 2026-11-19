@@ -17,14 +17,18 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 import warnings
 
-# Suppress noisy Google Cloud SDK ADC warnings and missing default project logs
-warnings.filterwarnings("ignore", category=UserWarning, module="google.auth._default")
-logging.getLogger("google.auth._default").setLevel(logging.ERROR)
+from reporting_app.core.bigquery_client_manager import (
+    LazyBigQueryModule,
+    configure_bigquery_env,
+    get_bigquery_client,
+    invalidate_on_auth_error,
+    is_forbidden_error,
+    is_unauthorized_error,
+)
 
-from google.cloud import bigquery
-from google.api_core.exceptions import Forbidden, Unauthorized, GoogleAPICallError
-from google.auth.exceptions import GoogleAuthError
-import pandas as pd
+configure_bigquery_env()
+
+bigquery = LazyBigQueryModule()
 
 logger = logging.getLogger(__name__)
 
@@ -35,10 +39,11 @@ DEFAULT_BQ_JOB_RESULT_TIMEOUT = 300.0
 
 def format_bigquery_error(exc: Exception, project_id: Optional[str] = None) -> str:
     """Format BigQuery, IAM permission, and authentication exceptions into clear, actionable messages."""
+    invalidate_on_auth_error(exc)
     msg = str(exc)
     err_lower = msg.lower()
 
-    if isinstance(exc, Forbidden) or "403" in msg or "access denied" in err_lower or "permission" in err_lower:
+    if is_forbidden_error(exc) or "403" in msg or "access denied" in err_lower or "permission" in err_lower:
         proj_str = f" in project '{project_id}'" if project_id else ""
         guidance = (
             f"BigQuery IAM Permission Denied (403){proj_str}.\n"
@@ -50,7 +55,7 @@ def format_bigquery_error(exc: Exception, project_id: Optional[str] = None) -> s
         )
         return guidance
 
-    if isinstance(exc, (Unauthorized, GoogleAuthError)) or "401" in msg or "credentials" in err_lower:
+    if is_unauthorized_error(exc) or "401" in msg or "credentials" in err_lower:
         return (
             f"BigQuery Authentication Error:\n"
             f"Details: {msg}\n\n"
@@ -145,7 +150,7 @@ def dry_run_bigquery_sql(
 
     if client is None:
         try:
-            client = bigquery.Client(project=resolved_project) if resolved_project else bigquery.Client()
+            client = get_bigquery_client(resolved_project, client_factory=bigquery.Client)
         except Exception as exc:
             full_err = format_bigquery_error(exc, resolved_project)
             first_line = full_err.splitlines()[0] if full_err else str(exc)
@@ -307,10 +312,10 @@ def run_bigquery_script(
     if project_id and not os.environ.get("GOOGLE_CLOUD_PROJECT"):
         os.environ["GOOGLE_CLOUD_PROJECT"] = project_id
 
-    # Initialize BigQuery client using ADC with detected or explicit project_id
+    # Initialize pooled BigQuery client using ADC with detected or explicit project_id
     if client is None:
         try:
-            client = bigquery.Client(project=project_id) if project_id else bigquery.Client()
+            client = get_bigquery_client(project_id, client_factory=bigquery.Client)
         except Exception as e:
             raise RuntimeError(format_bigquery_error(e, project_id)) from e
 
@@ -760,7 +765,7 @@ def run_bigquery_import_file(
 
     if client is None:
         try:
-            client = bigquery.Client(project=project_id) if project_id else bigquery.Client()
+            client = get_bigquery_client(project_id, client_factory=bigquery.Client)
         except Exception as e:
             raise RuntimeError(format_bigquery_error(e, project_id)) from e
 

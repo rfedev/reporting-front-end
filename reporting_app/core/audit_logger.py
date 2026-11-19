@@ -14,15 +14,39 @@ import threading
 from typing import Any, Dict, List, Optional
 import warnings
 
-# Suppress noisy Google Cloud SDK ADC warnings and missing default project logs
-warnings.filterwarnings("ignore", category=UserWarning, module="google.auth._default")
-logging.getLogger("google.auth._default").setLevel(logging.ERROR)
+from reporting_app.core.bigquery_client_manager import (
+    configure_bigquery_env,
+    get_bigquery_client,
+    get_bigquery_module,
+    invalidate_on_auth_error,
+    register_invalidation_callback,
+)
+
+configure_bigquery_env()
 
 logger = logging.getLogger(__name__)
 
+_ACCOUNT_CACHE_LOCK = threading.Lock()
+_CACHED_USER_ACCOUNT: Optional[str] = None
+
+
+def _clear_cached_user_account() -> None:
+    global _CACHED_USER_ACCOUNT
+    with _ACCOUNT_CACHE_LOCK:
+        _CACHED_USER_ACCOUNT = None
+
+
+register_invalidation_callback(_clear_cached_user_account)
+
 
 def get_authenticated_user_account() -> str:
-    """Return the Google Cloud account email or fall back to system user."""
+    """Return the Google Cloud account email or fall back to system user (session-cached)."""
+    global _CACHED_USER_ACCOUNT
+    with _ACCOUNT_CACHE_LOCK:
+        if _CACHED_USER_ACCOUNT is not None:
+            return _CACHED_USER_ACCOUNT
+
+    resolved: Optional[str] = None
     # 1. Try google.auth.default() credentials
     try:
         with warnings.catch_warnings():
@@ -31,79 +55,89 @@ def get_authenticated_user_account() -> str:
             credentials, _ = google.auth.default()
             email = getattr(credentials, "service_account_email", None) or getattr(credentials, "_service_account_email", None)
             if email:
-                return str(email)
-            account = getattr(credentials, "account", None) or getattr(credentials, "_account", None)
-            if account:
-                return str(account)
+                resolved = str(email)
+            if not resolved:
+                account = getattr(credentials, "account", None) or getattr(credentials, "_account", None)
+                if account:
+                    resolved = str(account)
     except Exception:
         pass
 
     # 2. Try reading Application Default Credentials JSON file
-    try:
-        adc_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
-        if not adc_path:
-            adc_path = Path.home() / ".config" / "gcloud" / "application_default_credentials.json"
-        else:
-            adc_path = Path(adc_path)
-        if adc_path.exists():
-            data = json.loads(adc_path.read_text(encoding="utf-8"))
-            if "client_email" in data and data["client_email"]:
-                return str(data["client_email"])
-            if "account" in data and data["account"]:
-                return str(data["account"])
-    except Exception:
-        pass
+    if not resolved:
+        try:
+            adc_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+            if not adc_path:
+                adc_path = Path.home() / ".config" / "gcloud" / "application_default_credentials.json"
+            else:
+                adc_path = Path(adc_path)
+            if adc_path.exists():
+                data = json.loads(adc_path.read_text(encoding="utf-8"))
+                if "client_email" in data and data["client_email"]:
+                    resolved = str(data["client_email"])
+                elif "account" in data and data["account"]:
+                    resolved = str(data["account"])
+        except Exception:
+            pass
 
     # 3. Try reading gcloud active account from config file or subprocess (without showing terminal window)
-    try:
-        import configparser
-        base = Path.home() / ".config" / "gcloud"
-        active_cfg = "default"
-        active_path = base / "active_config"
-        if active_path.exists():
-            c = active_path.read_text(encoding="utf-8").strip()
-            if c:
-                active_cfg = c
-        cfg_file = base / "configurations" / f"config_{active_cfg}"
-        if cfg_file.exists():
-            cp = configparser.ConfigParser()
-            cp.read(cfg_file, encoding="utf-8")
-            if cp.has_section("core") and cp.has_option("core", "account"):
-                acc = cp.get("core", "account").strip()
-                if acc:
-                    return acc
-    except Exception:
-        pass
+    if not resolved:
+        try:
+            import configparser
+            base = Path.home() / ".config" / "gcloud"
+            active_cfg = "default"
+            active_path = base / "active_config"
+            if active_path.exists():
+                c = active_path.read_text(encoding="utf-8").strip()
+                if c:
+                    active_cfg = c
+            cfg_file = base / "configurations" / f"config_{active_cfg}"
+            if cfg_file.exists():
+                cp = configparser.ConfigParser()
+                cp.read(cfg_file, encoding="utf-8")
+                if cp.has_section("core") and cp.has_option("core", "account"):
+                    acc = cp.get("core", "account").strip()
+                    if acc:
+                        resolved = acc
+        except Exception:
+            pass
 
-    try:
-        import subprocess
-        creationflags = 0
-        startupinfo = None
-        if os.name == "nt":
-            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            startupinfo.wShowWindow = 0  # SW_HIDE
+    if not resolved:
+        try:
+            import subprocess
+            creationflags = 0
+            startupinfo = None
+            if os.name == "nt":
+                creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = 0  # SW_HIDE
 
-        proc = subprocess.run(
-            ["gcloud", "config", "get-value", "account"],
-            capture_output=True,
-            text=True,
-            timeout=1.5,
-            creationflags=creationflags,
-            startupinfo=startupinfo,
-        )
-        if proc.returncode == 0 and proc.stdout.strip() and "(unset)" not in proc.stdout:
-            return proc.stdout.strip()
-    except Exception:
-        pass
+            proc = subprocess.run(
+                ["gcloud", "config", "get-value", "account"],
+                capture_output=True,
+                text=True,
+                timeout=1.5,
+                creationflags=creationflags,
+                startupinfo=startupinfo,
+            )
+            if proc.returncode == 0 and proc.stdout.strip() and "(unset)" not in proc.stdout:
+                resolved = proc.stdout.strip()
+        except Exception:
+            pass
 
     # 4. Fallback to OS username
-    try:
-        import getpass
-        return os.environ.get("USER") or os.environ.get("USERNAME") or getpass.getuser()
-    except Exception:
-        return "unknown"
+    if not resolved:
+        try:
+            import getpass
+            resolved = os.environ.get("USER") or os.environ.get("USERNAME") or getpass.getuser()
+        except Exception:
+            resolved = "unknown"
+
+    with _ACCOUNT_CACHE_LOCK:
+        if _CACHED_USER_ACCOUNT is None:
+            _CACHED_USER_ACCOUNT = resolved
+        return _CACHED_USER_ACCOUNT
 
 
 def get_machine_name() -> str:
@@ -204,10 +238,10 @@ def record_audit_run(
         os.environ["GOOGLE_CLOUD_PROJECT"] = project_id
 
     try:
-        from google.cloud import bigquery
+        bigquery = get_bigquery_module()
 
         if client is None:
-            client = bigquery.Client(project=project_id)
+            client = get_bigquery_client(project_id, client_factory=bigquery.Client)
 
         ensure_audit_table(client, table_id)
 
@@ -279,6 +313,7 @@ def record_audit_run(
         return True
 
     except Exception as e:
+        invalidate_on_auth_error(e)
         logger.warning(f"Failed to record audit run to BigQuery table '{table_id}': {e}")
         return False
 

@@ -47,6 +47,10 @@ from NodeGraphQt.qgraphics.port import PortItem
 
 from reporting_app.controllers.app_controller import AppController
 from reporting_app.controllers.flow_controller import ProcessFlowController
+from reporting_app.core.bigquery_client_manager import (
+    invalidate_bigquery_clients,
+    prewarm_bigquery_async,
+)
 from reporting_app.core.bigquery_run import (
     dry_run_bigquery_sql,
     run_bigquery_import_csv,
@@ -2541,7 +2545,15 @@ class ProcessFlowEditorWindow(QMainWindow):
                 text=default_val,
             )
             if ok and val.strip():
-                self.app_controller.repo.set_workbench_dataset(val.strip())
+                clean_wb = val.strip()
+                self.app_controller.repo.set_workbench_dataset(clean_wb)
+                if "." in clean_wb:
+                    import os
+
+                    new_proj = clean_wb.split(".")[0].strip()
+                    if new_proj:
+                        os.environ["GOOGLE_CLOUD_PROJECT"] = new_proj
+                        prewarm_bigquery_async(project_id=new_proj, include_pandas=True)
 
     def _on_tree_process_flow_selected(self, report_key: str, flow_name: str) -> None:
         """Load the selected process flow from the left tree into the center canvas."""
@@ -2963,7 +2975,9 @@ class ProcessFlowEditorWindow(QMainWindow):
         from reporting_app.utils.terminal import launch_in_terminal
         self.status_bar.showMessage("Opening terminal for gcloud authentication...", 3000)
         success = launch_in_terminal("gcloud auth application-default login", title="Google Cloud Authentication")
-        if not success:
+        if success:
+            invalidate_bigquery_clients()
+        else:
             QMessageBox.warning(
                 self,
                 "Authentication Error",
@@ -2974,10 +2988,11 @@ class ProcessFlowEditorWindow(QMainWindow):
         """Open application Settings dialog and apply updated configuration."""
         if not self.app_controller:
             return
+        old_wb = self.app_controller.repo.get_workbench_dataset()
         dialog = SettingsDialog(
             working_directories=self.app_controller.get_working_directories(),
             auto_scan=self.app_controller.get_auto_scan(),
-            workbench_dataset=self.app_controller.repo.get_workbench_dataset(),
+            workbench_dataset=old_wb,
             log_database_path=self.app_controller.get_log_database_path(),
             preview_row_limit=self.app_controller.get_preview_row_limit(),
             parent=self,
@@ -2991,6 +3006,14 @@ class ProcessFlowEditorWindow(QMainWindow):
 
             self.app_controller.set_auto_scan(new_auto_scan)
             self.app_controller.repo.set_workbench_dataset(new_wb)
+            old_proj = old_wb.split(".")[0].strip() if "." in (old_wb or "") else ""
+            new_proj = new_wb.split(".")[0].strip() if "." in (new_wb or "") else ""
+            if new_proj and new_proj != old_proj:
+                import os
+
+                os.environ["GOOGLE_CLOUD_PROJECT"] = new_proj
+                invalidate_bigquery_clients()
+                prewarm_bigquery_async(project_id=new_proj, include_pandas=True)
             self.app_controller.set_preview_row_limit(new_preview_limit)
             if new_log_db and new_log_db != self.app_controller.get_log_database_path():
                 self.app_controller.set_log_database_path(new_log_db)

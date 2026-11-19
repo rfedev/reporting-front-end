@@ -1,10 +1,11 @@
 """Dialog for manually creating, editing, and managing BigQuery table schemas."""
 
+from __future__ import annotations
+
 import csv
 import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-import pandas as pd
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -43,6 +44,8 @@ BQ_MODES = [
 
 def _detect_series_type(s: pd.Series) -> str:
     """Infer BigQuery data type from a pandas Series."""
+    import pandas as pd
+
     non_null = s.dropna()
     if non_null.empty:
         return "STRING"
@@ -110,6 +113,8 @@ def inspect_file_schema(
     ext = p.suffix.lower()
     df = None
     try:
+        import pandas as pd
+
         if ext in (".xlsx", ".xls"):
             sheet = sheet_name or 0
             df = pd.read_excel(p, sheet_name=sheet, header=0 if has_headers else None, nrows=5000, engine="openpyxl")
@@ -166,6 +171,8 @@ def inspect_file_columns(
                     return [str(c).strip() for c in first_row if str(c).strip()]
                 return [f"col_{i+1}" for i in range(len(first_row))]
         elif ext in (".xlsx", ".xls"):
+            import pandas as pd
+
             sheet = sheet_name or 0
             df = pd.read_excel(p, sheet_name=sheet, nrows=0, header=0 if has_headers else None, engine="openpyxl")
             if has_headers:

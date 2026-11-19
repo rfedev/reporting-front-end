@@ -18,10 +18,11 @@ import tempfile
 import threading
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from google.api_core.exceptions import Forbidden, NotFound, Unauthorized
-from google.auth.exceptions import GoogleAuthError
-from google.cloud import bigquery
-
+from reporting_app.core.bigquery_client_manager import (
+    LazyBigQueryModule,
+    get_bigquery_client,
+    is_fatal_preview_error,
+)
 from reporting_app.core.bigquery_run import (
     DEFAULT_BQ_JOB_RESULT_TIMEOUT,
     DEFAULT_BQ_QUERY_TIMEOUT,
@@ -30,6 +31,7 @@ from reporting_app.core.bigquery_run import (
 )
 from reporting_app.core.sql_parser import extract_project_id_from_sql
 
+bigquery = LazyBigQueryModule()
 logger = logging.getLogger(__name__)
 
 
@@ -332,7 +334,7 @@ def _resolve_project_and_client(
 
     if client is None:
         try:
-            client = bigquery.Client(project=resolved_project) if resolved_project else bigquery.Client()
+            client = get_bigquery_client(resolved_project, client_factory=bigquery.Client)
         except Exception as exc:
             raise RuntimeError(format_bigquery_error(exc, resolved_project or None)) from exc
 
@@ -460,9 +462,9 @@ def fetch_bigquery_table_preview(
             if isinstance(raw_num, int) and not isinstance(raw_num, bool):
                 known_num_rows = raw_num
             table_schema = getattr(table_obj, "schema", None)
-        except (Forbidden, Unauthorized, GoogleAuthError, NotFound) as exc:
-            raise RuntimeError(format_bigquery_error(exc, active_project)) from exc
         except Exception as exc:
+            if is_fatal_preview_error(exc):
+                raise RuntimeError(format_bigquery_error(exc, active_project)) from exc
             logger.debug(f"get_table({table_ref}) non-fatal note, continuing with list_rows: {exc}")
 
     def _run_select_fallback() -> ResultPreviewData:
@@ -513,9 +515,9 @@ def fetch_bigquery_table_preview(
     try:
         list_target = table_obj if (table_obj is not None and isinstance(getattr(table_obj, "table_id", None), str)) else table_ref
         row_iter = client.list_rows(list_target, max_results=max_rows)
-    except (Forbidden, Unauthorized, GoogleAuthError, NotFound) as exc:
-        raise RuntimeError(format_bigquery_error(exc, active_project)) from exc
     except Exception as exc:
+        if is_fatal_preview_error(exc):
+            raise RuntimeError(format_bigquery_error(exc, active_project)) from exc
         msg_lower = str(exc).lower()
         if any(tok in msg_lower for tok in ("view", "cannot list", "not supported", "400", "external")):
             logger.info(f"list_rows unsupported for {table_ref}, falling back to SELECT * LIMIT {max_rows}")

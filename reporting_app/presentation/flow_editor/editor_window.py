@@ -399,10 +399,64 @@ class ProcessFlowEditorWindow(QMainWindow):
 
         viewer._items_near = custom_items_near
 
+        self._in_viewer_resize = False
+
+        def _sync_scene_range_preserving_scale(target_scale: float, center: QtCore.QPointF) -> None:
+            """Resize viewer._scene_range so NodeViewer._update_scene() (fitInView) preserves target_scale exactly."""
+            if target_scale <= 1e-6:
+                return
+            vp = viewer.viewport() if hasattr(viewer, "viewport") else None
+            if vp is not None and vp.width() > 6 and vp.height() > 6:
+                eff_w = float(vp.width() - 4)
+                eff_h = float(vp.height() - 4)
+            elif viewer.width() > 6 and viewer.height() > 6:
+                eff_w = float(viewer.width() - 4)
+                eff_h = float(viewer.height() - 4)
+            else:
+                return
+
+            scene_w = eff_w / target_scale
+            scene_h = eff_h / target_scale
+            viewer._scene_range = QtCore.QRectF(
+                center.x() - (scene_w / 2.0),
+                center.y() - (scene_h / 2.0),
+                scene_w,
+                scene_h,
+            )
+            viewer._update_scene()
+
+            # Self-correct once for any platform/DPI difference in Qt fitInView's internal margin
+            actual_scale = float(viewer.transform().m11())
+            if actual_scale > 1e-6 and abs(actual_scale - target_scale) / target_scale > 1e-4:
+                factor = actual_scale / target_scale
+                scene_w *= factor
+                scene_h *= factor
+                viewer._scene_range = QtCore.QRectF(
+                    center.x() - (scene_w / 2.0),
+                    center.y() - (scene_h / 2.0),
+                    scene_w,
+                    scene_h,
+                )
+                viewer._update_scene()
+
+        viewer._sync_scene_range_preserving_scale = _sync_scene_range_preserving_scale
+
         def custom_viewer_resize(event):
-            # Reveal more canvas area when expanded, rather than zooming/stretching the scene
-            viewer._last_size = viewer.size()
-            QtWidgets.QGraphicsView.resizeEvent(viewer, event)
+            # Reveal more/less canvas area on resize or side-panel toggle while keeping zoom constant
+            # AND updating viewer._scene_range so the next pan/zoom never jumps.
+            if self._in_viewer_resize:
+                QtWidgets.QGraphicsView.resizeEvent(viewer, event)
+                return
+            self._in_viewer_resize = True
+            try:
+                cur_scale = float(viewer.transform().m11())
+                old_center = QtCore.QPointF(viewer._scene_range.center())
+                viewer._last_size = viewer.size()
+                QtWidgets.QGraphicsView.resizeEvent(viewer, event)
+                if cur_scale > 1e-6:
+                    _sync_scene_range_preserving_scale(cur_scale, old_center)
+            finally:
+                self._in_viewer_resize = False
 
         viewer.resizeEvent = custom_viewer_resize
 
@@ -502,6 +556,7 @@ class ProcessFlowEditorWindow(QMainWindow):
                     # Defer deselect until mouse release so panning never triggers unsaved-SQL prompt
                     self._empty_canvas_press_pos = QPoint(event.pos())
                     self._did_pan_canvas = False
+                    viewer.ALT_state = False
                     viewer.MMB_state = True
                     viewer._origin_pos = event.pos()
                     viewer._previous_pos = event.pos()
@@ -513,6 +568,7 @@ class ProcessFlowEditorWindow(QMainWindow):
 
         def custom_mouse_move(event):
             if viewer.MMB_state and self._empty_canvas_press_pos is not None:
+                viewer.ALT_state = False
                 if (event.pos() - self._empty_canvas_press_pos).manhattanLength() >= 4:
                     self._did_pan_canvas = True
             return orig_mouse_move(event)
@@ -1591,6 +1647,10 @@ class ProcessFlowEditorWindow(QMainWindow):
         padded_rect = combined_rect.adjusted(-60, -60, 60, 60)
         viewer._scene_range = QtCore.QRectF(padded_rect)
         viewer._update_scene()
+        if hasattr(viewer, "_sync_scene_range_preserving_scale"):
+            fitted_scale = float(viewer.transform().m11())
+            if fitted_scale > 1e-6:
+                viewer._sync_scene_range_preserving_scale(fitted_scale, padded_rect.center())
 
     def _get_working_query(self, query_name: str) -> Optional[QueryInfo]:
         """Find a QueryInfo by current working name or original name, respecting pending renames."""

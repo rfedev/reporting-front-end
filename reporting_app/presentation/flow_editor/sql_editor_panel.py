@@ -298,9 +298,15 @@ class SqlEditorPanel(QWidget):
     MINIMUM_WIDTH = 220
     DEFAULT_WIDTH = 380
     VALIDATION_DEBOUNCE_MS = 450
+    AUTO_SAVE_DEBOUNCE_MS = 1500
 
     save_requested = Signal(str, str)  # (query_name, sql_text)
+    auto_save_requested = Signal(str, str)  # (query_name, sql_text)
     dry_run_requested = Signal(str, str)  # (query_name, sql_text)
+    run_requested = Signal(str)  # (query_name)
+    external_reload_requested = Signal(str)  # (query_name)
+    external_ignore_requested = Signal(str)  # (query_name)
+    external_overwrite_requested = Signal(str, str)  # (query_name, sql_text)
     close_requested = Signal()
     dirty_changed = Signal(bool)
 
@@ -310,6 +316,10 @@ class SqlEditorPanel(QWidget):
         self._saved_sql_text: str = ""
         self._is_dirty: bool = False
         self._loading_text: bool = False
+        self._auto_save_enabled: bool = False
+        self._has_external_conflict: bool = False
+        self._dry_run_in_progress: bool = False
+        self._run_in_progress: bool = False
         self._syntax_errors: List[SqlSyntaxErrorInfo] = []
 
         self.setMinimumWidth(self.MINIMUM_WIDTH)
@@ -319,6 +329,11 @@ class SqlEditorPanel(QWidget):
         self._validation_timer.setSingleShot(True)
         self._validation_timer.setInterval(self.VALIDATION_DEBOUNCE_MS)
         self._validation_timer.timeout.connect(self.run_syntax_check)
+
+        self._auto_save_timer = QTimer(self)
+        self._auto_save_timer.setSingleShot(True)
+        self._auto_save_timer.setInterval(self.AUTO_SAVE_DEBOUNCE_MS)
+        self._auto_save_timer.timeout.connect(self._on_auto_save_timeout)
 
         self.clear_query()
 
@@ -372,13 +387,60 @@ class SqlEditorPanel(QWidget):
         sep.setStyleSheet("color: #374151;")
         layout.addWidget(sep)
 
+        # External file modification banner (hidden until disk conflict occurs while dirty)
+        self.external_change_banner = QFrame(self._sql_page)
+        self.external_change_banner.setObjectName("externalChangeBanner")
+        self.external_change_banner.setVisible(False)
+        self.external_change_banner.setStyleSheet(
+            "QFrame#externalChangeBanner {"
+            "  background-color: #1F384E;"
+            "  border: 1px solid #2e5272;"
+            "  border-radius: 3px;"
+            "}"
+        )
+        banner_layout = QHBoxLayout(self.external_change_banner)
+        banner_layout.setContentsMargins(8, 5, 8, 5)
+        banner_layout.setSpacing(6)
+
+        self.external_change_label = QLabel(
+            "The current file was modified on disk",
+            self.external_change_banner,
+        )
+        self.external_change_label.setWordWrap(True)
+        self.external_change_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.external_change_label.setStyleSheet(
+            "color: #f3f4f6; font-size: 11px; font-weight: bold; background: transparent;"
+        )
+        banner_layout.addWidget(self.external_change_label, 1)
+
+        self.external_reload_btn = QPushButton("Reload", self.external_change_banner)
+        self.external_reload_btn.setFixedHeight(22)
+        self.external_reload_btn.setToolTip("Discard unsaved edits and reload the file from disk")
+        self.external_reload_btn.setStyleSheet(
+            "QPushButton { background-color: #2563eb; color: white; font-size: 11px; font-weight: bold; padding: 1px 8px; border-radius: 3px; }"
+            "QPushButton:hover { background-color: #1d4ed8; }"
+        )
+        self.external_reload_btn.clicked.connect(self._on_external_reload_clicked)
+        banner_layout.addWidget(self.external_reload_btn)
+
+        self.external_secondary_btn = QPushButton("Ignore", self.external_change_banner)
+        self.external_secondary_btn.setFixedHeight(22)
+        self.external_secondary_btn.setStyleSheet(
+            "QPushButton { background-color: #334e68; color: #e5e7eb; font-size: 11px; font-weight: bold; padding: 1px 8px; border: 1px solid #486581; border-radius: 3px; }"
+            "QPushButton:hover { background-color: #3e5c7a; }"
+        )
+        self.external_secondary_btn.clicked.connect(self._on_external_secondary_clicked)
+        banner_layout.addWidget(self.external_secondary_btn)
+
+        layout.addWidget(self.external_change_banner)
+
         # SQL Code Editor + Syntax Highlighter
         self.editor = SqlCodeEditor(self._sql_page)
         self.highlighter = SqlSyntaxHighlighter(self.editor.document())
         self.editor.textChanged.connect(self._on_editor_text_changed)
         layout.addWidget(self.editor, 1)
 
-        # Syntax Status Footer + BigQuery Validate (Dry-Run) Button
+        # Syntax Status Footer + BigQuery Validate (Dry-Run) + Run Buttons
         footer_row = QHBoxLayout()
         footer_row.setContentsMargins(0, 0, 0, 0)
         footer_row.setSpacing(6)
@@ -398,6 +460,18 @@ class SqlEditorPanel(QWidget):
         self.dry_run_btn.setEnabled(False)
         self.dry_run_btn.clicked.connect(self.request_dry_run)
         footer_row.addWidget(self.dry_run_btn)
+
+        self.run_btn = QPushButton("Run", self._sql_page)
+        self.run_btn.setFixedHeight(22)
+        self.run_btn.setToolTip("Run the currently selected query node (F5)")
+        self.run_btn.setStyleSheet(
+            "QPushButton { font-size: 11px; font-weight: bold; padding: 1px 8px; }"
+            "QPushButton:enabled { background-color: #16a34a; color: white; border-radius: 3px; }"
+            "QPushButton:enabled:hover { background-color: #15803d; }"
+        )
+        self.run_btn.setEnabled(False)
+        self.run_btn.clicked.connect(self.request_run)
+        footer_row.addWidget(self.run_btn)
 
         layout.addLayout(footer_row)
         self._stack.addWidget(self._sql_page)
@@ -421,6 +495,79 @@ class SqlEditorPanel(QWidget):
         self.title_label.setToolTip(title_text)
         self.save_btn.setEnabled(self._is_dirty)
 
+    def _update_action_buttons(self) -> None:
+        has_code = bool(self._current_query_name and self.editor.toPlainText().strip())
+        if hasattr(self, "dry_run_btn"):
+            self.dry_run_btn.setEnabled(has_code and not self._dry_run_in_progress)
+        if hasattr(self, "run_btn"):
+            self.run_btn.setEnabled(has_code and not self._run_in_progress)
+
+    def _update_conflict_banner_buttons(self) -> None:
+        if not hasattr(self, "external_secondary_btn"):
+            return
+        if self._auto_save_enabled:
+            self.external_secondary_btn.setText("Overwrite")
+            self.external_secondary_btn.setToolTip(
+                "Overwrite the external changes on disk with your editor changes"
+            )
+        else:
+            self.external_secondary_btn.setText("Ignore")
+            self.external_secondary_btn.setToolTip(
+                "Dismiss this notice and keep your unsaved editor edits"
+            )
+
+    def set_auto_save_enabled(self, enabled: bool) -> None:
+        """Synchronize SQL editor auto-save state with the Process Flow Editor setting."""
+        self._auto_save_enabled = bool(enabled)
+        if hasattr(self, "save_btn"):
+            self.save_btn.setVisible(not self._auto_save_enabled)
+        self._update_conflict_banner_buttons()
+        if self._auto_save_enabled:
+            if self._is_dirty and not self._has_external_conflict and self._current_query_name:
+                self._auto_save_timer.start()
+        else:
+            self.stop_auto_save_timer()
+
+    def is_auto_save_enabled(self) -> bool:
+        return self._auto_save_enabled
+
+    def set_external_modification_detected(self, detected: bool) -> None:
+        """Show or hide the external file modification conflict bar (#1F384E)."""
+        self._has_external_conflict = bool(detected)
+        self._update_conflict_banner_buttons()
+        if hasattr(self, "external_change_banner"):
+            self.external_change_banner.setVisible(self._has_external_conflict)
+        if self._has_external_conflict:
+            self.stop_auto_save_timer()
+
+    def has_external_conflict(self) -> bool:
+        return self._has_external_conflict
+
+    def stop_auto_save_timer(self) -> None:
+        if hasattr(self, "_auto_save_timer") and self._auto_save_timer.isActive():
+            self._auto_save_timer.stop()
+
+    def _on_auto_save_timeout(self) -> None:
+        if (
+            self._auto_save_enabled
+            and self._is_dirty
+            and not self._has_external_conflict
+            and self._current_query_name
+        ):
+            self.auto_save_requested.emit(self._current_query_name, self.editor.toPlainText())
+
+    def _on_external_reload_clicked(self) -> None:
+        if self._current_query_name:
+            self.external_reload_requested.emit(self._current_query_name)
+
+    def _on_external_secondary_clicked(self) -> None:
+        if not self._current_query_name:
+            return
+        if self._auto_save_enabled:
+            self.external_overwrite_requested.emit(self._current_query_name, self.editor.toPlainText())
+        else:
+            self.external_ignore_requested.emit(self._current_query_name)
+
     def _on_editor_text_changed(self) -> None:
         if self._loading_text or not self._current_query_name:
             return
@@ -430,16 +577,22 @@ class SqlEditorPanel(QWidget):
             self._is_dirty = new_dirty
             self.dirty_changed.emit(self._is_dirty)
         self._update_header()
-        if hasattr(self, "dry_run_btn"):
-            self.dry_run_btn.setEnabled(bool(self._current_query_name and self.editor.toPlainText().strip()))
+        self._update_action_buttons()
         self._validation_timer.start()
+
+        if self._auto_save_enabled and self._is_dirty and not self._has_external_conflict:
+            self._auto_save_timer.start()
+        elif not self._is_dirty:
+            self.stop_auto_save_timer()
 
     def load_query(self, query_name: str, sql_text: str) -> None:
         """Load SQL text for the selected QueryNode into the editor."""
         self._stack.setCurrentWidget(self._sql_page)
         self._validation_timer.stop()
+        self.stop_auto_save_timer()
         self._loading_text = True
         try:
+            was_dirty = self._is_dirty
             self._current_query_name = query_name
             self._saved_sql_text = sql_text or ""
             self._is_dirty = False
@@ -448,15 +601,18 @@ class SqlEditorPanel(QWidget):
         finally:
             self._loading_text = False
 
+        self.set_external_modification_detected(False)
+        if was_dirty:
+            self.dirty_changed.emit(False)
         self._update_header()
-        if hasattr(self, "dry_run_btn"):
-            self.dry_run_btn.setEnabled(bool(query_name and (sql_text or "").strip()))
+        self._update_action_buttons()
         self.run_syntax_check()
 
     def clear_query(self) -> None:
         """Reset the panel to an empty read-only state when no single query or table node is selected."""
         self._stack.setCurrentWidget(self._sql_page)
         self._validation_timer.stop()
+        self.stop_auto_save_timer()
         self._loading_text = True
         try:
             was_dirty = self._is_dirty
@@ -470,11 +626,11 @@ class SqlEditorPanel(QWidget):
         finally:
             self._loading_text = False
 
+        self.set_external_modification_detected(False)
         if was_dirty:
             self.dirty_changed.emit(False)
         self._update_header()
-        if hasattr(self, "dry_run_btn"):
-            self.dry_run_btn.setEnabled(False)
+        self._update_action_buttons()
         self.syntax_status_label.setText("")
         self.syntax_status_label.setToolTip("")
         self.syntax_status_label.setStyleSheet("font-size: 11px; color: #9ca3af; padding: 2px 4px;")
@@ -482,6 +638,7 @@ class SqlEditorPanel(QWidget):
     def show_table_box_preview(self, spec: TableBoxPreviewSpec) -> None:
         """Switch panel to Results Preview mode for the selected TableBoxNode."""
         self._validation_timer.stop()
+        self.stop_auto_save_timer()
         self._loading_text = True
         try:
             was_dirty = self._is_dirty
@@ -495,11 +652,11 @@ class SqlEditorPanel(QWidget):
         finally:
             self._loading_text = False
 
+        self.set_external_modification_detected(False)
         if was_dirty:
             self.dirty_changed.emit(False)
         self._update_header()
-        if hasattr(self, "dry_run_btn"):
-            self.dry_run_btn.setEnabled(False)
+        self._update_action_buttons()
         self.syntax_status_label.setText("")
         self.syntax_status_label.setToolTip("")
 
@@ -520,9 +677,10 @@ class SqlEditorPanel(QWidget):
             self.results_preview.set_cache(cache, row_limit_getter=row_limit_getter)
 
     def shutdown(self) -> None:
-        """Stop validation timer and any background preview fetch workers cleanly."""
+        """Stop validation/auto-save timers and any background preview fetch workers cleanly."""
         if self._validation_timer.isActive():
             self._validation_timer.stop()
+        self.stop_auto_save_timer()
         if hasattr(self, "results_preview"):
             self.results_preview.shutdown()
 
@@ -534,22 +692,29 @@ class SqlEditorPanel(QWidget):
 
     def mark_saved(self, new_saved_text: Optional[str] = None) -> None:
         """Mark the current editor contents as saved on disk."""
+        self.stop_auto_save_timer()
         if new_saved_text is not None:
             if new_saved_text != self.editor.toPlainText():
+                old_pos = self.editor.textCursor().position()
                 self._loading_text = True
                 try:
                     self.editor.setPlainText(new_saved_text)
+                    new_cursor = self.editor.textCursor()
+                    new_cursor.setPosition(min(old_pos, len(new_saved_text)))
+                    self.editor.setTextCursor(new_cursor)
                 finally:
                     self._loading_text = False
             self._saved_sql_text = new_saved_text
         else:
             self._saved_sql_text = self.editor.toPlainText()
 
+        self.set_external_modification_detected(False)
         was_dirty = self._is_dirty
         self._is_dirty = False
         if was_dirty:
             self.dirty_changed.emit(False)
         self._update_header()
+        self._update_action_buttons()
         self.run_syntax_check()
 
     def run_syntax_check(self) -> List[SqlSyntaxErrorInfo]:
@@ -609,21 +774,31 @@ class SqlEditorPanel(QWidget):
 
     def request_save(self) -> None:
         if self._current_query_name:
+            self.stop_auto_save_timer()
             self.save_requested.emit(self._current_query_name, self.editor.toPlainText())
 
     def request_dry_run(self) -> None:
         if self._current_query_name and self.editor.toPlainText().strip():
             self.dry_run_requested.emit(self._current_query_name, self.editor.toPlainText())
 
+    def request_run(self) -> None:
+        if self._current_query_name and not self._run_in_progress:
+            self.run_requested.emit(self._current_query_name)
+
     def set_dry_run_in_progress(self, in_progress: bool) -> None:
+        self._dry_run_in_progress = bool(in_progress)
         if hasattr(self, "dry_run_btn"):
-            self.dry_run_btn.setEnabled(
-                (not in_progress) and bool(self._current_query_name and self.editor.toPlainText().strip())
-            )
-            self.dry_run_btn.setText("⏳ Validating..." if in_progress else "Validate")
-        if in_progress:
+            self.dry_run_btn.setText("⏳ Validating..." if self._dry_run_in_progress else "Validate")
+        self._update_action_buttons()
+        if self._dry_run_in_progress:
             self.syntax_status_label.setText("Validating with BigQuery...")
             self.syntax_status_label.setStyleSheet("font-size: 11px; color: #93c5fd; padding: 2px 4px;")
+
+    def set_run_in_progress(self, in_progress: bool) -> None:
+        self._run_in_progress = bool(in_progress)
+        if hasattr(self, "run_btn"):
+            self.run_btn.setText("⏳ Running..." if self._run_in_progress else "Run")
+        self._update_action_buttons()
 
     def show_dry_run_result(self, result: dict) -> None:
         """Display BigQuery native dry-run result and highlight reported error line if any."""

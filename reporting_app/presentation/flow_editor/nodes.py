@@ -1187,8 +1187,10 @@ class TableBoxNode(BaseNode):
             or getattr(getattr(self, "view", None), "table_box_type", "") == "Output CSV"
         )
         for t in self.raw_tables:
-            if is_csv or t.lower().endswith(".csv") or t.lower().endswith(".xlsx"):
-                name = t if self.show_full_path else Path(t).name
+            norm_t = str(t).replace("\\", "/")
+            suffix = Path(norm_t).suffix.lower()
+            if is_csv or suffix in {".csv", ".xlsx", ".xlsm", ".xls"}:
+                name = t if self.show_full_path else (Path(norm_t).name or t)
             else:
                 name = t if self.show_full_path else t.split(".")[-1]
             lines.append(f"• {name}")

@@ -191,6 +191,9 @@ class ProcessFlowEditorWindow(QMainWindow):
                 self._last_sql_panel_width = SqlEditorPanel.DEFAULT_WIDTH
         self._sql_panel_query_name: Optional[str] = None
         self._sql_panel_table_box_id: Optional[str] = None
+        self._sql_panel_file_path: Optional[Path] = None
+        self._sql_panel_disk_text: str = ""
+        self._sql_panel_disk_mtime_ns: Optional[int] = None
         self.result_preview_cache = ResultPreviewCache()
         self._restoring_node_selection: bool = False
         self._prompting_sql_save: bool = False
@@ -248,6 +251,8 @@ class ProcessFlowEditorWindow(QMainWindow):
             self.app_controller.process_flows_updated.connect(self._on_controller_flows_updated)
             self.app_controller.queries_updated.connect(self._on_controller_queries_updated)
             self.app_controller.status_changed.connect(self._on_controller_status_changed)
+            if hasattr(self.app_controller, "watcher") and self.app_controller.watcher is not None:
+                self.app_controller.watcher.file_changed.connect(self._on_watched_file_changed)
             QTimer.singleShot(100, self._check_workbench_dataset)
 
     def _init_graph(self) -> None:
@@ -1109,14 +1114,18 @@ class ProcessFlowEditorWindow(QMainWindow):
 
         self.auto_save_cb = QCheckBox("Auto-Save", self)
         self.auto_save_cb.setChecked(self.auto_save_enabled)
-        self.auto_save_cb.setToolTip("Automatically save process flow when changes are made")
+        self.auto_save_cb.setToolTip("Automatically save process flow and SQL files when changes are made")
         self.auto_save_cb.toggled.connect(self._on_auto_save_toggled)
         self.auto_save_act = toolbar.addWidget(self.auto_save_cb)
 
         self.sep_run_act = toolbar.addSeparator()
 
         self.run_flow_btn = QPushButton("▶ Run Flow")
-        self.run_flow_btn.setStyleSheet("font-weight: bold; background-color: #2b78e4; color: white;")
+        self.run_flow_btn.setStyleSheet(
+            "QPushButton { font-weight: bold; padding: 3px 10px; border-radius: 3px; }"
+            "QPushButton:enabled { background-color: #16a34a; color: white; }"
+            "QPushButton:enabled:hover { background-color: #15803d; }"
+        )
         self.run_flow_btn.setToolTip("Execute process flow queries in dependency order (F5)")
         self.run_flow_btn.clicked.connect(self._on_run_flow_button_clicked)
         self.run_flow_act = toolbar.addWidget(self.run_flow_btn)
@@ -1309,9 +1318,15 @@ class ProcessFlowEditorWindow(QMainWindow):
         self.canvas_panel.installEventFilter(self)
 
         self.sql_editor_panel = SqlEditorPanel(self)
+        self.sql_editor_panel.set_auto_save_enabled(self.auto_save_enabled)
         self.sql_editor_panel.set_preview_cache(self.result_preview_cache, self._get_preview_row_limit)
         self.sql_editor_panel.save_requested.connect(self._on_sql_panel_save_requested)
+        self.sql_editor_panel.auto_save_requested.connect(self._on_sql_panel_auto_save_requested)
         self.sql_editor_panel.dry_run_requested.connect(self._on_sql_panel_dry_run_requested)
+        self.sql_editor_panel.run_requested.connect(self._on_sql_panel_run_requested)
+        self.sql_editor_panel.external_reload_requested.connect(self._on_sql_panel_external_reload)
+        self.sql_editor_panel.external_ignore_requested.connect(self._on_sql_panel_external_ignore)
+        self.sql_editor_panel.external_overwrite_requested.connect(self._on_sql_panel_external_overwrite)
         self.sql_editor_panel.close_requested.connect(lambda: self._on_toggle_sql_panel(False))
         self.sql_editor_panel.setVisible(self._sql_panel_open)
 
@@ -1787,18 +1802,10 @@ class ProcessFlowEditorWindow(QMainWindow):
                             n_qname = node.get_property("query_name") or node.name()
                             if n_qname == q.name:
                                 node.set_parameters(q.parameter_names)
-                    if (
-                        hasattr(self, "sql_editor_panel")
-                        and self._sql_panel_query_name == q.name
-                        and not self.sql_editor_panel.is_dirty()
-                    ):
-                        try:
-                            disk_sql = q.file_path.read_text(encoding="utf-8", errors="replace")
-                            self.sql_editor_panel.load_query(q.name, disk_sql)
-                        except Exception:
-                            pass
             except Exception as e:
                 logger.debug(f"Error syncing query file {q.file_path}: {e}")
+
+        self._check_active_sql_file_external_changes()
 
         if has_csv_changes:
             for node in self.graph.all_nodes():
@@ -2597,6 +2604,7 @@ class ProcessFlowEditorWindow(QMainWindow):
             self._load_initial_graph()
             self._sql_panel_query_name = None
             self._sql_panel_table_box_id = None
+            self._record_sql_panel_disk_state(None, "")
             if hasattr(self, "sql_editor_panel"):
                 self.sql_editor_panel.clear_query()
             self._refresh_right_queries()
@@ -2969,6 +2977,9 @@ class ProcessFlowEditorWindow(QMainWindow):
     def _on_run_standalone_query(self, query_name: str) -> None:
         """Open Run Query dialog and execute an individual query outside the canvas flow."""
         if not query_name or not self.app_controller or not getattr(self, "_has_active_report", True):
+            return
+
+        if not self._prompt_unsaved_sql_before_run():
             return
 
         qinfo = self.app_controller.get_query_info(query_name, ensure_parsed=True)
@@ -3860,7 +3871,14 @@ class ProcessFlowEditorWindow(QMainWindow):
         elif not checked:
             self._auto_save_timer.stop()
 
-        status_txt = "Auto-Save enabled." if checked else "Auto-Save disabled. Unsaved changes will be prompted on close."
+        if hasattr(self, "sql_editor_panel"):
+            self.sql_editor_panel.set_auto_save_enabled(checked)
+
+        status_txt = (
+            "Auto-Save enabled (process flow & SQL files)."
+            if checked
+            else "Auto-Save disabled. Unsaved changes will be prompted on close."
+        )
         self.status_bar.showMessage(status_txt, 3000)
 
     def _on_auto_save_timeout(self) -> None:
@@ -3957,13 +3975,18 @@ class ProcessFlowEditorWindow(QMainWindow):
 
         # Disconnect controller signals
         if self.app_controller:
-            for sig, slot in (
+            signals_to_disconnect = [
                 (self.app_controller.active_report_changed, self._on_report_updated_from_controller),
                 (self.app_controller.reports_updated, self._on_controller_reports_updated),
                 (self.app_controller.process_flows_updated, self._on_controller_flows_updated),
                 (self.app_controller.queries_updated, self._on_controller_queries_updated),
                 (self.app_controller.status_changed, self._on_controller_status_changed),
-            ):
+            ]
+            if hasattr(self.app_controller, "watcher") and self.app_controller.watcher is not None:
+                signals_to_disconnect.append(
+                    (self.app_controller.watcher.file_changed, self._on_watched_file_changed)
+                )
+            for sig, slot in signals_to_disconnect:
                 try:
                     sig.disconnect(slot)
                 except Exception:
@@ -4070,19 +4093,178 @@ class ProcessFlowEditorWindow(QMainWindow):
             self._restore_query_node_selection(self._sql_panel_query_name)
         self._reset_canvas_drag_state()
 
-    def _prompt_unsaved_sql_panel_changes(self) -> bool:
-        """Prompt user to Save, Discard, or Cancel if the SQL editor has unsaved edits."""
+    def _record_sql_panel_disk_state(self, file_path: Optional[Path], disk_text: str) -> None:
+        """Record the baseline disk contents and mtime for the open SQL editor file."""
+        if file_path is None:
+            self._sql_panel_file_path = None
+            self._sql_panel_disk_text = ""
+            self._sql_panel_disk_mtime_ns = None
+            return
+        try:
+            resolved = Path(file_path).resolve()
+        except Exception:
+            resolved = Path(file_path)
+        self._sql_panel_file_path = resolved
+        self._sql_panel_disk_text = disk_text
+        try:
+            self._sql_panel_disk_mtime_ns = resolved.stat().st_mtime_ns if resolved.exists() else None
+        except Exception:
+            self._sql_panel_disk_mtime_ns = None
+
+    def _on_watched_file_changed(self, file_path: Path) -> None:
+        """React immediately when FileWatcherService sees a disk change on the open SQL file."""
+        if getattr(self, "_is_closing", False) or getattr(self, "_switching_flow", False):
+            return
+        active_path = getattr(self, "_sql_panel_file_path", None)
+        if not active_path:
+            return
+        try:
+            if Path(file_path).resolve() == active_path.resolve():
+                self._check_active_sql_file_external_changes()
+        except Exception:
+            pass
+
+    def _check_active_sql_file_external_changes(self) -> bool:
+        """Detect external disk changes for the SQL file open in SqlEditorPanel.
+
+        Returns True when an active conflict exists (editor dirty and disk modified).
+        If the editor is clean and disk changed, reloads cleanly without a banner.
+        """
+        if not hasattr(self, "sql_editor_panel") or not self._sql_panel_query_name:
+            return False
+        file_path = getattr(self, "_sql_panel_file_path", None)
+        if not file_path or not file_path.exists():
+            return self.sql_editor_panel.has_external_conflict()
+
+        try:
+            cur_mtime_ns = file_path.stat().st_mtime_ns
+            disk_text = file_path.read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            logger.debug(f"Failed reading SQL file {file_path} during external change check: {e}")
+            return self.sql_editor_panel.has_external_conflict()
+
+        if disk_text == self._sql_panel_disk_text:
+            self._sql_panel_disk_mtime_ns = cur_mtime_ns
+            return self.sql_editor_panel.has_external_conflict()
+
+        if not self.sql_editor_panel.is_dirty():
+            had_focus = self.sql_editor_panel.editor.hasFocus()
+            old_pos = self.sql_editor_panel.editor.textCursor().position()
+            self.sql_editor_panel.load_query(self._sql_panel_query_name, disk_text)
+            self._record_sql_panel_disk_state(file_path, disk_text)
+            if had_focus:
+                cur = self.sql_editor_panel.editor.textCursor()
+                cur.setPosition(min(old_pos, len(disk_text)))
+                self.sql_editor_panel.editor.setTextCursor(cur)
+                self.sql_editor_panel.editor.setFocus()
+            return False
+
+        # In-app editor has unsaved edits AND disk changed externally: show #1F384E conflict banner
+        self.sql_editor_panel.set_external_modification_detected(True)
+        return True
+
+    def _on_sql_panel_external_reload(self, query_name: str) -> None:
+        """Handle 'Reload' from the external-change banner: discard local edits and load disk SQL."""
+        qinfo = self._get_working_query(query_name)
+        if not qinfo or not qinfo.file_path or not qinfo.file_path.exists():
+            QMessageBox.warning(self, "Reload Error", f"Could not locate SQL file for '{query_name}'.")
+            return
+
+        file_path = Path(qinfo.file_path)
+        try:
+            disk_sql = file_path.read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            QMessageBox.critical(self, "Reload Error", f"Failed to read SQL file:\n{e}")
+            return
+
+        old_tables = (list(qinfo.input_tables), list(qinfo.output_tables))
+        old_csvs = list(qinfo.output_csv_tables)
+        old_params = [p.name for p in qinfo.parameters]
+        qinfo.ensure_parsed(force=True)
+        try:
+            disk_sql = file_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+        if hasattr(self, "sql_editor_panel"):
+            self.sql_editor_panel.load_query(query_name, disk_sql)
+        self._record_sql_panel_disk_state(file_path, disk_sql)
+
+        if qinfo.output_csv_tables:
+            self.flow_controller.set_csv_filename(qinfo.name, ", ".join(qinfo.output_csv_tables))
+        else:
+            self.flow_controller.get_csv_filenames().pop(qinfo.name, None)
+
+        new_tables = (list(qinfo.input_tables), list(qinfo.output_tables))
+        new_csvs = list(qinfo.output_csv_tables)
+        new_params = [p.name for p in qinfo.parameters]
+        if new_params != old_params or new_tables != old_tables or new_csvs != old_csvs:
+            self._syncing_sql_topology = True
+            try:
+                for node in self.graph.all_nodes():
+                    if isinstance(node, QueryNode) or getattr(node, "type_", "") == "reporting.nodes.QueryNode":
+                        if (node.get_property("query_name") or node.name()) == query_name:
+                            node.set_parameters(qinfo.parameter_names)
+                if new_tables != old_tables or new_csvs != old_csvs:
+                    self._sync_graph_topology()
+                    self._restore_query_node_selection(query_name)
+                else:
+                    self._refresh_parameter_overlay()
+            finally:
+                self._syncing_sql_topology = False
+
+        if hasattr(self, "status_bar"):
+            self.status_bar.showMessage(f"Reloaded '{query_name}' from disk.", 3000)
+
+    def _on_sql_panel_external_ignore(self, query_name: str) -> None:
+        """Handle 'Ignore' when Auto-Save is off: acknowledge disk revision and keep unsaved edits."""
+        qinfo = self._get_working_query(query_name)
+        file_path = Path(qinfo.file_path) if (qinfo and qinfo.file_path) else getattr(self, "_sql_panel_file_path", None)
+        if file_path and file_path.exists():
+            try:
+                disk_sql = file_path.read_text(encoding="utf-8", errors="replace")
+                self._record_sql_panel_disk_state(file_path, disk_sql)
+            except Exception:
+                pass
+        if hasattr(self, "sql_editor_panel"):
+            self.sql_editor_panel.set_external_modification_detected(False)
+        if hasattr(self, "status_bar"):
+            self.status_bar.showMessage(f"Ignored external change to '{query_name}'. Keeping local edits.", 3000)
+
+    def _on_sql_panel_external_overwrite(self, query_name: str, sql_text: str) -> None:
+        """Handle 'Overwrite' when Auto-Save is on: write local edits over external disk changes."""
+        self._on_sql_panel_save_requested(query_name, sql_text, is_auto_save=False)
+
+    def _prompt_unsaved_sql_panel_changes(
+        self,
+        allow_auto_save: bool = True,
+        action_text: str = "continuing",
+    ) -> bool:
+        """Handle unsaved SQL editor changes via auto-save (when allowed) or Save/Discard/Cancel prompt."""
         if not hasattr(self, "sql_editor_panel") or not self.sql_editor_panel.is_dirty():
             return True
 
-        self._reset_canvas_drag_state()
+        self.sql_editor_panel.stop_auto_save_timer()
+        has_conflict = self._check_active_sql_file_external_changes()
         qname = self.sql_editor_panel.current_query_name() or "query"
+
+        if allow_auto_save and getattr(self, "auto_save_enabled", False) and not has_conflict:
+            return self._on_sql_panel_save_requested(
+                qname,
+                self.sql_editor_panel.current_sql_text(),
+                is_auto_save=True,
+            )
+
+        self._reset_canvas_drag_state()
         self._prompting_sql_save = True
         try:
             msg_box = QMessageBox(self)
             msg_box.setWindowTitle("Unsaved SQL Changes")
             msg_box.setText(f"Query '{qname}' has unsaved SQL changes in the SQL editor.")
-            msg_box.setInformativeText("Do you want to save your SQL changes before continuing?")
+            info = f"Do you want to save your SQL changes before {action_text}?"
+            if has_conflict:
+                info += "\n\nNote: This file was also modified externally on disk."
+            msg_box.setInformativeText(info)
             msg_box.setStandardButtons(QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel)
             msg_box.setDefaultButton(QMessageBox.Save)
             reply = msg_box.exec()
@@ -4092,18 +4274,31 @@ class ProcessFlowEditorWindow(QMainWindow):
         self._reset_canvas_drag_state()
 
         if reply == QMessageBox.Save:
-            return self._on_sql_panel_save_requested(qname, self.sql_editor_panel.current_sql_text())
+            return self._on_sql_panel_save_requested(
+                qname,
+                self.sql_editor_panel.current_sql_text(),
+                is_auto_save=False,
+            )
         if reply == QMessageBox.Discard:
             qinfo = self._get_working_query(qname)
+            file_path = Path(qinfo.file_path) if (qinfo and qinfo.file_path) else getattr(self, "_sql_panel_file_path", None)
             disk_sql = ""
-            if qinfo and qinfo.file_path and qinfo.file_path.exists():
+            if file_path and file_path.exists():
                 try:
-                    disk_sql = qinfo.file_path.read_text(encoding="utf-8", errors="replace")
+                    disk_sql = file_path.read_text(encoding="utf-8", errors="replace")
                 except Exception:
                     disk_sql = ""
+            self._record_sql_panel_disk_state(file_path, disk_sql)
             self.sql_editor_panel.mark_saved(disk_sql)
             return True
         return False
+
+    def _prompt_unsaved_sql_before_run(self) -> bool:
+        """Always prompt Save, Discard, or Cancel before running if any SQL file is unsaved."""
+        return self._prompt_unsaved_sql_panel_changes(
+            allow_auto_save=False,
+            action_text="running",
+        )
 
     def _get_preview_row_limit(self) -> int:
         """Return configured maximum number of rows for query Results Preview."""
@@ -4298,7 +4493,7 @@ class ProcessFlowEditorWindow(QMainWindow):
                     if fb_key != primary_key:
                         fb_keys.append(fb_key)
 
-                    disp_label = Path(resolved_f_path).name or resolved_f_path
+                    disp_label = Path(resolved_f_path.replace("\\", "/")).name or resolved_f_path
                     if sheet_name:
                         disp_label = f"{disp_label} ({sheet_name})"
 
@@ -4432,23 +4627,27 @@ class ProcessFlowEditorWindow(QMainWindow):
             self._sql_panel_table_box_id = None
             qinfo = self._get_working_query(target_qname)
             sql_text = ""
-            if qinfo and qinfo.file_path and qinfo.file_path.exists():
+            file_path = Path(qinfo.file_path) if (qinfo and qinfo.file_path) else None
+            if file_path and file_path.exists():
                 try:
-                    sql_text = qinfo.file_path.read_text(encoding="utf-8", errors="replace")
+                    sql_text = file_path.read_text(encoding="utf-8", errors="replace")
                 except Exception as e:
                     logger.warning(f"Failed to read SQL file for '{target_qname}': {e}")
+            self._record_sql_panel_disk_state(file_path, sql_text)
             self.sql_editor_panel.load_query(target_qname, sql_text)
             return
 
         if target_tbox is not None:
             self._sql_panel_query_name = None
             self._sql_panel_table_box_id = str(target_tbox.id)
+            self._record_sql_panel_disk_state(None, "")
             spec = self._build_table_box_preview_spec(target_tbox)
             self.sql_editor_panel.show_table_box_preview(spec)
             return
 
         self._sql_panel_query_name = None
         self._sql_panel_table_box_id = None
+        self._record_sql_panel_disk_state(None, "")
         self.sql_editor_panel.clear_query()
 
     def _on_sql_panel_dry_run_requested(self, query_name: str, sql_text: str) -> dict:
@@ -4475,30 +4674,64 @@ class ProcessFlowEditorWindow(QMainWindow):
         self.sql_editor_panel.show_dry_run_result(res)
         return res
 
-    def _on_sql_panel_save_requested(self, query_name: str, sql_text: str) -> bool:
-        """Manually save SQL editor changes to disk and synchronize canvas topology & parameters."""
+    def _on_sql_panel_auto_save_requested(self, query_name: str, sql_text: str) -> bool:
+        """Debounced auto-save handler for SqlEditorPanel when Auto-Save is enabled."""
+        if not getattr(self, "auto_save_enabled", False) or not hasattr(self, "sql_editor_panel"):
+            return False
+        if not self.sql_editor_panel.is_dirty() or self.sql_editor_panel.has_external_conflict():
+            return False
+        if self._check_active_sql_file_external_changes():
+            return False
+        return self._on_sql_panel_save_requested(query_name, sql_text, is_auto_save=True)
+
+    def _on_sql_panel_save_requested(
+        self, query_name: str, sql_text: str, is_auto_save: bool = False
+    ) -> bool:
+        """Save SQL editor changes to disk and synchronize canvas topology & parameters."""
         if not query_name or not getattr(self, "_has_active_report", True):
             return False
 
+        if hasattr(self, "sql_editor_panel"):
+            self.sql_editor_panel.stop_auto_save_timer()
+
         qinfo = self._get_working_query(query_name)
         if not qinfo or not qinfo.file_path:
-            QMessageBox.warning(self, "Save Error", f"Could not locate SQL file for '{query_name}'.")
+            if not is_auto_save:
+                QMessageBox.warning(self, "Save Error", f"Could not locate SQL file for '{query_name}'.")
             return False
 
         file_path = Path(qinfo.file_path)
+        editor_had_focus = bool(
+            hasattr(self, "sql_editor_panel")
+            and self.sql_editor_panel.editor.hasFocus()
+        )
+        selected_exec_names = [
+            str(n.get_property("query_name") or n.name())
+            for n in self._get_selected_query_nodes()
+        ]
+        was_selected_qname = self._get_single_selected_query_node_name()
+        was_parsed = bool(getattr(qinfo, "is_parsed", False))
+        old_tables = (list(qinfo.input_tables), list(qinfo.output_tables))
+        old_csvs = list(qinfo.output_csv_tables)
+        old_params = [p.name for p in qinfo.parameters]
+
         if self.app_controller and hasattr(self.app_controller, "watcher"):
             try:
-                self.app_controller.watcher.suppress(file_path)
+                self.app_controller.watcher.suppress(file_path, duration_seconds=1.5)
             except Exception:
                 pass
 
         try:
             file_path.write_text(sql_text, encoding="utf-8")
         except Exception as e:
-            QMessageBox.critical(self, "Save SQL Error", f"Failed to write SQL file:\n{e}")
+            if is_auto_save:
+                logger.warning(f"Auto-save SQL for '{query_name}' failed: {e}")
+                if hasattr(self, "status_bar"):
+                    self.status_bar.showMessage(f"Auto-save SQL failed: {e}", 4000)
+            else:
+                QMessageBox.critical(self, "Save SQL Error", f"Failed to write SQL file:\n{e}")
             return False
 
-        was_selected_qname = self._get_single_selected_query_node_name()
         qinfo.ensure_parsed(force=True)
         if qinfo.output_csv_tables:
             self.flow_controller.set_csv_filename(qinfo.name, ", ".join(qinfo.output_csv_tables))
@@ -4513,30 +4746,68 @@ class ProcessFlowEditorWindow(QMainWindow):
             pass
 
         if hasattr(self, "sql_editor_panel") and self._sql_panel_query_name == query_name:
+            self._record_sql_panel_disk_state(file_path, final_sql)
             self.sql_editor_panel.mark_saved(final_sql)
 
-        self._syncing_sql_topology = True
-        try:
-            for node in self.graph.all_nodes():
-                if isinstance(node, QueryNode) or getattr(node, "type_", "") == "reporting.nodes.QueryNode":
-                    n_qname = node.get_property("query_name") or node.name()
-                    if n_qname == query_name:
-                        node.set_parameters(qinfo.parameter_names)
-            self._sync_graph_topology()
-            if was_selected_qname:
-                self._restore_query_node_selection(was_selected_qname)
-        finally:
-            self._syncing_sql_topology = False
+        new_tables = (list(qinfo.input_tables), list(qinfo.output_tables))
+        new_csvs = list(qinfo.output_csv_tables)
+        new_params = [p.name for p in qinfo.parameters]
+        tables_changed = (not was_parsed) or (new_tables != old_tables) or (new_csvs != old_csvs)
+        params_changed = new_params != old_params
+
+        if params_changed or tables_changed:
+            self._syncing_sql_topology = True
+            try:
+                if params_changed:
+                    for node in self.graph.all_nodes():
+                        if isinstance(node, QueryNode) or getattr(node, "type_", "") == "reporting.nodes.QueryNode":
+                            n_qname = node.get_property("query_name") or node.name()
+                            if n_qname == query_name:
+                                node.set_parameters(qinfo.parameter_names)
+                if tables_changed:
+                    self._sync_graph_topology()
+                    if len(selected_exec_names) > 1:
+                        self._restoring_node_selection = True
+                        try:
+                            self.graph.clear_selection()
+                            for node in self.graph.all_nodes():
+                                if isinstance(node, (QueryNode, ImportCsvNode)) or getattr(node, "type_", "") in (
+                                    "reporting.nodes.QueryNode",
+                                    "reporting.nodes.ImportCsvNode",
+                                ):
+                                    nq = str(node.get_property("query_name") or node.name())
+                                    if nq in selected_exec_names:
+                                        node.set_selected(True)
+                        finally:
+                            self._restoring_node_selection = False
+                    elif was_selected_qname:
+                        self._restore_query_node_selection(was_selected_qname)
+                elif params_changed:
+                    self._refresh_parameter_overlay()
+            finally:
+                self._syncing_sql_topology = False
+
+        if editor_had_focus and hasattr(self, "sql_editor_panel"):
+            self.sql_editor_panel.editor.setFocus()
 
         if hasattr(self, "status_bar"):
-            self.status_bar.showMessage(f"Saved SQL for '{query_name}'.", 3000)
+            if is_auto_save:
+                from datetime import datetime
+                now_str = datetime.now().strftime("%H:%M:%S")
+                self.status_bar.showMessage(f"Auto-saved SQL for '{query_name}' at {now_str}.", 3000)
+            else:
+                self.status_bar.showMessage(f"Saved SQL for '{query_name}'.", 3000)
         return True
 
     def _update_run_button_state(self) -> None:
         """Update Run Flow button label and SQL editor panel when canvas selection changes."""
+        is_running = bool(hasattr(self, "execution_tab") and self.execution_tab.is_running())
+        if hasattr(self, "sql_editor_panel"):
+            self.sql_editor_panel.set_run_in_progress(is_running)
+
         if not hasattr(self, "run_flow_btn"):
             return
-        if hasattr(self, "execution_tab") and self.execution_tab.is_running():
+        if is_running:
             self.run_flow_btn.setEnabled(False)
             self.run_flow_btn.setText("⏳ Running...")
             return
@@ -4550,6 +4821,22 @@ class ProcessFlowEditorWindow(QMainWindow):
             self.run_flow_btn.setToolTip("Execute process flow queries in dependency order (F5)")
         self._update_toolbar_overflow()
         self._sync_sql_panel_with_selection()
+
+    def _on_sql_panel_run_requested(self, query_name: str) -> None:
+        """Run the currently selected query node from the SQL editor panel's Run button."""
+        if hasattr(self, "execution_tab") and self.execution_tab.is_running():
+            self.status_bar.showMessage("A process flow is already running.", 3000)
+            return
+        if not self._prompt_unsaved_sql_before_run():
+            return
+        selected_nodes = self._get_selected_query_nodes()
+        if not selected_nodes and query_name:
+            self._restore_query_node_selection(query_name)
+            selected_nodes = self._get_selected_query_nodes()
+        if not selected_nodes:
+            self.status_bar.showMessage("Please select a query node to run.", 4000)
+            return
+        self.run_selected_queries()
 
     def _on_run_flow_button_clicked(self) -> None:
         """Handler for toolbar Run button: runs selected if any are selected, else runs full flow."""
@@ -4576,7 +4863,23 @@ class ProcessFlowEditorWindow(QMainWindow):
         if not group_node or not hasattr(group_node, "view") or not group_node.view:
             return
 
-        contained_views = group_node.view.get_nodes(inc_intersects=False)
+        group_id = getattr(group_node, "id", None)
+        group_name = group_node.name()
+        if not self._prompt_unsaved_sql_before_run():
+            return
+
+        live_group = next(
+            (
+                n for n in self.graph.all_nodes()
+                if (isinstance(n, GroupBoxNode) or getattr(n, "type_", "") == "reporting.nodes.GroupBoxNode")
+                and (n.id == group_id or n.name() == group_name)
+            ),
+            group_node,
+        )
+        if not live_group or not hasattr(live_group, "view") or not live_group.view:
+            return
+
+        contained_views = live_group.view.get_nodes(inc_intersects=False)
         contained_view_ids = {getattr(v, "id", None) for v in contained_views}
         exec_nodes_in_group = [
             n for n in self.graph.all_nodes()
@@ -4588,7 +4891,7 @@ class ProcessFlowEditorWindow(QMainWindow):
         ]
 
         if not exec_nodes_in_group:
-            self.status_bar.showMessage(f"No executable nodes inside group '{group_node.name()}'.", 4000)
+            self.status_bar.showMessage(f"No executable nodes inside group '{live_group.name()}'.", 4000)
             return
 
         session_data = self.graph.serialize_session()
@@ -4600,10 +4903,13 @@ class ProcessFlowEditorWindow(QMainWindow):
             group_exec_names = {n.name() for n in exec_nodes_in_group}
             filtered_order = [item for item in node_order if item["name"] in group_exec_names]
 
-        self._execute_ordered_nodes(filtered_order, context_title=f"Group '{group_node.name()}'")
+        self._execute_ordered_nodes(filtered_order, context_title=f"Group '{live_group.name()}'")
 
     def run_selected_queries(self) -> None:
         """Run only the currently selected query and import CSV nodes in topological dependency order."""
+        if not self._prompt_unsaved_sql_before_run():
+            return
+
         selected_nodes = self._get_selected_query_nodes()
         if not selected_nodes:
             self.status_bar.showMessage("Please select at least one query or import node to run.", 4000)
@@ -4624,25 +4930,32 @@ class ProcessFlowEditorWindow(QMainWindow):
 
     def run_from_query(self, start_node: BaseNode) -> None:
         """Run the flow onwards from start_node (inclusive), skipping prior nodes in topological order."""
+        start_id = getattr(start_node, "id", None)
+        start_name = start_node.name()
+        if not self._prompt_unsaved_sql_before_run():
+            return
+
         session_data = self.graph.serialize_session()
         node_order = self.flow_controller.get_node_execution_order(session_data)
 
         # Find start index in topological order
         start_idx = -1
         for idx, item in enumerate(node_order):
-            if item["id"] == start_node.id or item["name"] == start_node.name():
+            if item["id"] == start_id or item["name"] == start_name:
                 start_idx = idx
                 break
 
         if start_idx == -1:
-            self.status_bar.showMessage(f"Could not determine execution order for '{start_node.name()}'.", 4000)
+            self.status_bar.showMessage(f"Could not determine execution order for '{start_name}'.", 4000)
             return
 
         downstream_order = node_order[start_idx:]
-        self._execute_ordered_nodes(downstream_order, context_title=f"Flow From '{start_node.name()}'")
+        self._execute_ordered_nodes(downstream_order, context_title=f"Flow From '{start_name}'")
 
     def _on_run_flow(self) -> None:
         """Execute all CSV imports and queries in the process flow."""
+        if not self._prompt_unsaved_sql_before_run():
+            return
         session_data = self.graph.serialize_session()
         node_order = self.flow_controller.get_node_execution_order(session_data)
         self._execute_ordered_nodes(node_order, context_title=f"Process flow '{self.flow_controller.flow_name}'")
@@ -4655,6 +4968,9 @@ class ProcessFlowEditorWindow(QMainWindow):
 
         if not ordered_items:
             self.status_bar.showMessage("There are no queries or file imports to run.", 4000)
+            return
+
+        if not self._prompt_unsaved_sql_before_run():
             return
 
         # If auto-save is enabled and there are pending modifications, save before running
@@ -5048,7 +5364,13 @@ class ProcessFlowEditorWindow(QMainWindow):
                     return True
 
         elif watched is self:
-            if event.type() in (QEvent.WindowDeactivate, QEvent.FocusOut):
+            if event.type() == QEvent.WindowActivate:
+                if (
+                    not getattr(self, "_is_closing", False)
+                    and not getattr(self, "_prompting_sql_save", False)
+                ):
+                    self._check_active_sql_file_external_changes()
+            elif event.type() in (QEvent.WindowDeactivate, QEvent.FocusOut):
                 if hasattr(viewer, "clear_key_state"):
                     viewer.clear_key_state()
                 else:

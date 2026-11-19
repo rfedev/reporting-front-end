@@ -71,6 +71,9 @@ try:
         CircularInfoButtonItem,
         CustomNodeTextItem,
         DEFAULT_GROUP_COLOR,
+        EXEC_NODE_BASE_FONT_PT,
+        EXEC_NODE_MIN_FONT_PT,
+        ExecutableNodeItem,
         FloatingPillItem,
         GROUP_DARK_COLORS,
         GroupBoxNode,
@@ -89,6 +92,9 @@ except ImportError:
         CircularInfoButtonItem,
         CustomNodeTextItem,
         DEFAULT_GROUP_COLOR,
+        EXEC_NODE_BASE_FONT_PT,
+        EXEC_NODE_MIN_FONT_PT,
+        ExecutableNodeItem,
         FloatingPillItem,
         GROUP_DARK_COLORS,
         GroupBoxNode,
@@ -386,13 +392,47 @@ class ProcessFlowEditorWindow(QMainWindow):
     def _setup_canvas_pan_and_select(self) -> None:
         """Configure left-click empty space panning, smooth resize, and Ctrl+drag multi-select on NodeViewer."""
         viewer = self.graph.viewer()
+        # SmartViewportUpdate updates only actual dirty rects instead of merging full bounding boxes.
+        viewer.setViewportUpdateMode(QtWidgets.QGraphicsView.SmartViewportUpdate)
+
         orig_mouse_press = viewer.mousePressEvent
         orig_mouse_move = viewer.mouseMoveEvent
         orig_mouse_release = viewer.mouseReleaseEvent
         orig_items_near = viewer._items_near
+        orig_update_scene = viewer._update_scene
+
+        viewer._last_zoomed_out_lod = None
+
+        def _sync_zoom_lod_pills() -> None:
+            """Update FloatingPillItem visibility only when zoom crosses the LOD threshold."""
+            scale = float(viewer.transform().m11())
+            is_zoomed_out = (EXEC_NODE_BASE_FONT_PT * scale) < EXEC_NODE_MIN_FONT_PT
+            if viewer._last_zoomed_out_lod == is_zoomed_out:
+                return
+            viewer._last_zoomed_out_lod = is_zoomed_out
+            scene = viewer.scene() if hasattr(viewer, "scene") else None
+            if scene is None:
+                return
+            for scene_item in scene.items():
+                if isinstance(scene_item, ExecutableNodeItem):
+                    scene_item.sync_pill_visibility(zoomed_out=is_zoomed_out)
+
+        def custom_update_scene() -> None:
+            orig_update_scene()
+            _sync_zoom_lod_pills()
+
+        viewer._sync_zoom_lod_pills = _sync_zoom_lod_pills
+        viewer._update_scene = custom_update_scene
 
         def custom_items_near(pos, item_type=None, width=20, height=20):
-            raw_items = orig_items_near(pos, None, width, height)
+            raw_items = list(orig_items_near(pos, None, width, height))
+            try:
+                vp_pt = viewer.mapFromScene(pos)
+                for vp_itm in viewer.items(vp_pt):
+                    if isinstance(vp_itm, FloatingPillItem) and vp_itm not in raw_items:
+                        raw_items.insert(0, vp_itm)
+            except Exception:
+                pass
             resolved = []
             for itm in raw_items:
                 target = getattr(itm, "_node_item", None) if isinstance(itm, FloatingPillItem) else itm
@@ -509,6 +549,10 @@ class ProcessFlowEditorWindow(QMainWindow):
                 # Check if click lands on or near a pipe item: select only the pipe
                 map_pos = viewer.mapToScene(event.pos())
                 items_exact = scene.items(map_pos) if scene else []
+                vp_items = viewer.items(event.pos())
+                pill_clicked = next((it for it in vp_items if isinstance(it, FloatingPillItem)), None)
+                if pill_clicked is not None and pill_clicked not in items_exact:
+                    items_exact.insert(0, pill_clicked)
                 # Check if user clicked directly on a port or UI control button (which have priority over pipes)
                 control_clicked = next(
                     (
@@ -556,9 +600,9 @@ class ProcessFlowEditorWindow(QMainWindow):
                         event.accept()
                         return
 
-                # Check if click lands on empty canvas (no node / pipe)
+                # Check if click lands on empty canvas (no node / pipe / zoomed-out pill)
                 items_near = viewer._items_near(map_pos, None, 15, 15)
-                if not items_near:
+                if not items_near and pill_clicked is None:
                     # Defer deselect until mouse release so panning never triggers unsaved-SQL prompt
                     self._empty_canvas_press_pos = QPoint(event.pos())
                     self._did_pan_canvas = False

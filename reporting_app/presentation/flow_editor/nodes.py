@@ -371,9 +371,11 @@ class NodeExecutionOverlayItem(QtWidgets.QGraphicsItem):
         self.update()
 
     def boundingRect(self) -> QtCore.QRectF:
+        if not (self.exec_halo_visible and self.exec_status != "IDLE"):
+            return QtCore.QRectF()
         w = getattr(self._node_item, "_width", 160.0)
         h = getattr(self._node_item, "_height", 70.0)
-        return QtCore.QRectF(-120.0, -90.0, w + 240.0, h + 120.0)
+        return QtCore.QRectF(-10.0, -32.0, w + 20.0, h + 42.0)
 
     @staticmethod
     def format_mm_ss(seconds: float) -> str:
@@ -548,11 +550,22 @@ class NodeExecutionOverlayItem(QtWidgets.QGraphicsItem):
 
 
 class FloatingPillItem(QtWidgets.QGraphicsItem):
-    """Top-level scene graphics item displaying execution node names at high Z-order above all nodes and pipes.
+    """Top-level scene graphics item displaying execution node names at fixed screen size above nodes.
 
-    When zoomed out, clicking or dragging this pill selects and drags its associated node (and any other
-    currently selected nodes).
+    Uses Qt's ItemIgnoresTransformations flag so screen pixel sizing is handled natively
+    by Qt without calling update() or mutating geometry inside paint().
     """
+
+    _PILL_FONT: Optional[QtGui.QFont] = None
+
+    @classmethod
+    def _pill_font(cls) -> QtGui.QFont:
+        if cls._PILL_FONT is None:
+            font = QtGui.QFont("sans-serif")
+            font.setPointSizeF(8.0)
+            font.setBold(True)
+            cls._PILL_FONT = font
+        return cls._PILL_FONT
 
     def __init__(self, node_item: "ExecutableNodeItem"):
         super().__init__()
@@ -563,11 +576,18 @@ class FloatingPillItem(QtWidgets.QGraphicsItem):
         self._was_multi_press: bool = False
         self._drag_initial_positions: dict = {}
 
+        self._metrics_key: Optional[tuple] = None
+        self._cached_display_name: str = ""
+        self._cached_pill_rect: QtCore.QRectF = QtCore.QRectF()
+        self._cached_bounding_rect: QtCore.QRectF = QtCore.QRectF()
+
+        self.setFlag(QtWidgets.QGraphicsItem.ItemIgnoresTransformations, True)
         self.setAcceptedMouseButtons(QtCore.Qt.LeftButton | QtCore.Qt.RightButton)
         self.setAcceptHoverEvents(True)
         self.setCursor(QtCore.Qt.PointingHandCursor)
         self.setCacheMode(QtWidgets.QGraphicsItem.NoCache)
         self.setZValue(1000.0)
+        self.setVisible(False)
 
     @property
     def node(self):
@@ -577,22 +597,16 @@ class FloatingPillItem(QtWidgets.QGraphicsItem):
     def id(self):
         return getattr(self._node_item, "id", None)
 
-    def get_pill_local_rect(self, painter: Optional[QtGui.QPainter] = None) -> QtCore.QRectF:
-        """Compute the pill box rectangle in FloatingPillItem local/scene coordinates."""
+    def _current_metrics_key(self) -> tuple:
         node = self._node_item
-        if not node or not node.viewer():
-            return QtCore.QRectF()
+        node_name = (getattr(node, "name", "") or "").strip() or "Node" if node else "Node"
+        overlay = getattr(node, "_exec_overlay", None) if node else None
+        has_halo = bool(overlay and overlay.exec_halo_visible and overlay.exec_status != "IDLE")
+        return (node_name, has_halo)
 
-        lod = get_node_lod(node, painter)
-        inv_scale = 1.0 / max(lod, 0.001)
-        w = getattr(node, "_width", 160.0)
-
-        font = QtGui.QFont("sans-serif")
-        font.setPointSizeF(8.0)
-        font.setBold(True)
-        fm = QtGui.QFontMetricsF(font)
-
-        node_name = (getattr(node, "name", "") or "").strip() or "Node"
+    def _compute_metrics(self, key: tuple) -> Tuple[str, QtCore.QRectF, QtCore.QRectF]:
+        node_name, has_halo = key
+        fm = QtGui.QFontMetricsF(self._pill_font())
         display_name = fm.elidedText(node_name, QtCore.Qt.ElideRight, 260.0)
         text_w = fm.horizontalAdvance(display_name)
         text_h = fm.height()
@@ -601,17 +615,41 @@ class FloatingPillItem(QtWidgets.QGraphicsItem):
         pad_y = 3.5
         pill_w = text_w + pad_x * 2.0
         pill_h = text_h + pad_y * 2.0
-
-        overlay = getattr(node, "_exec_overlay", None)
-        has_halo = bool(overlay and overlay.exec_halo_visible and overlay.exec_status != "IDLE")
         gap_y = 12.0 if has_halo else 6.0
         y_top = -gap_y - pill_h
+        pill_rect = QtCore.QRectF(-pill_w / 2.0, y_top, pill_w, pill_h)
+        bounding_rect = pill_rect.adjusted(-2.0, -2.0, 2.0, 4.0)
+        return display_name, pill_rect, bounding_rect
 
-        scene_w = pill_w * inv_scale
-        scene_h = pill_h * inv_scale
-        scene_x = (w / 2.0) - (scene_w / 2.0)
-        scene_y = y_top * inv_scale
-        return QtCore.QRectF(scene_x, scene_y, scene_w, scene_h)
+    def _ensure_metrics(self) -> None:
+        key = self._current_metrics_key()
+        if self._metrics_key != key:
+            display_name, pill_rect, bounding_rect = self._compute_metrics(key)
+            self._metrics_key = key
+            self._cached_display_name = display_name
+            self._cached_pill_rect = pill_rect
+            self._cached_bounding_rect = bounding_rect
+
+    def refresh_geometry(self) -> None:
+        """Recompute cached pixel rect when node name or execution halo changes (call outside paint)."""
+        key = self._current_metrics_key()
+        if self._metrics_key == key:
+            return
+        display_name, pill_rect, new_brect = self._compute_metrics(key)
+        if new_brect != self._cached_bounding_rect:
+            self.prepareGeometryChange()
+        self._metrics_key = key
+        self._cached_display_name = display_name
+        self._cached_pill_rect = pill_rect
+        self._cached_bounding_rect = new_brect
+
+    def get_pill_local_rect(self, painter: Optional[QtGui.QPainter] = None) -> QtCore.QRectF:
+        """Return the cached pill rectangle in local pixel coordinates."""
+        node = self._node_item
+        if not node or not node.viewer():
+            return QtCore.QRectF()
+        self._ensure_metrics()
+        return QtCore.QRectF(self._cached_pill_rect)
 
     def shape(self) -> QtGui.QPainterPath:
         path = QtGui.QPainterPath()
@@ -624,14 +662,10 @@ class FloatingPillItem(QtWidgets.QGraphicsItem):
         return path
 
     def boundingRect(self) -> QtCore.QRectF:
-        node = self._node_item
-        w = getattr(node, "_width", 160.0)
-        base_rect = QtCore.QRectF(-800.0, -500.0, w + 1600.0, 500.0)
-        if node and node.viewer() and node.is_zoomed_out_mode():
-            pill_rect = self.get_pill_local_rect()
-            if not pill_rect.isNull() and not pill_rect.isEmpty():
-                return base_rect.united(pill_rect.adjusted(-10.0, -10.0, 10.0, 10.0))
-        return base_rect
+        if not self._node_item:
+            return QtCore.QRectF()
+        self._ensure_metrics()
+        return QtCore.QRectF(self._cached_bounding_rect)
 
     def _get_selected_node_items(self) -> List[AbstractNodeItem]:
         scene = self.scene()
@@ -790,45 +824,22 @@ class FloatingPillItem(QtWidgets.QGraphicsItem):
         node = self._node_item
         if not node or not node.viewer():
             return
-        if not node.is_zoomed_out_mode(painter):
+        # Read zoom from viewer transform (do NOT pass ItemIgnoresTransformations painter).
+        if not node.is_zoomed_out_mode():
+            return
+
+        self._ensure_metrics()
+        pill_rect = self._cached_pill_rect
+        display_name = self._cached_display_name
+        if pill_rect.isEmpty():
             return
 
         painter.save()
         painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
         painter.setRenderHint(QtGui.QPainter.TextAntialiasing, True)
+        painter.setFont(self._pill_font())
 
-        lod = get_node_lod(node, painter)
-        inv_scale = 1.0 / max(lod, 0.001)
-
-        w = getattr(node, "_width", 160.0)
-        # Center horizontally at w / 2.0, anchored at top edge of the node y = 0.0
-        painter.translate(w / 2.0, 0.0)
-        painter.scale(inv_scale, inv_scale)
-
-        font = QtGui.QFont("sans-serif")
-        font.setPointSizeF(8.0)
-        font.setBold(True)
-        painter.setFont(font)
-        fm = QtGui.QFontMetricsF(font)
-
-        node_name = (getattr(node, "name", "") or "").strip() or "Node"
-        display_name = fm.elidedText(node_name, QtCore.Qt.ElideRight, 260.0)
-
-        text_w = fm.horizontalAdvance(display_name)
-        text_h = fm.height()
-
-        pad_x = 8.5
-        pad_y = 3.5
-        pill_w = text_w + pad_x * 2.0
-        pill_h = text_h + pad_y * 2.0
         radius = 5.0
-
-        # Position above the top of the node card
-        overlay = getattr(node, "_exec_overlay", None)
-        has_halo = bool(overlay and overlay.exec_halo_visible and overlay.exec_status != "IDLE")
-        gap_y = 12.0 if has_halo else 6.0
-        y_top = -gap_y - pill_h
-        pill_rect = QtCore.QRectF(-pill_w / 2.0, y_top, pill_w, pill_h)
 
         # Subtle drop shadow
         painter.setPen(QtCore.Qt.NoPen)
@@ -875,6 +886,28 @@ class ExecutableNodeItem(NodeItem):
         self._pill_item = FloatingPillItem(self)
         self._active_painter: Optional[QtGui.QPainter] = None
 
+    def _pill_anchor_pos(self) -> QtCore.QPointF:
+        """Return top-center scene position of this node card for anchoring FloatingPillItem."""
+        pos = self.scenePos()
+        w = float(getattr(self, "_width", 160.0))
+        return QtCore.QPointF(pos.x() + (w / 2.0), pos.y())
+
+    def sync_pill_visibility(self, zoomed_out: Optional[bool] = None) -> None:
+        """Synchronize floating pill scene attachment, anchor pos, and LOD visibility outside paint()."""
+        pill = getattr(self, "_pill_item", None)
+        if pill is None:
+            return
+        scene = self.scene()
+        if scene is not None and pill.scene() != scene:
+            scene.addItem(pill)
+        anchor = self._pill_anchor_pos()
+        if pill.pos() != anchor:
+            pill.setPos(anchor)
+        is_zoomed_out = self.is_zoomed_out_mode() if zoomed_out is None else bool(zoomed_out)
+        target_vis = bool(self.isVisible() and is_zoomed_out)
+        if pill.isVisible() != target_vis:
+            pill.setVisible(target_vis)
+
     def itemChange(self, change, value):
         res = super().itemChange(change, value)
         pill = getattr(self, "_pill_item", None)
@@ -889,14 +922,19 @@ class ExecutableNodeItem(NodeItem):
                 new_scene = self.scene()
                 if new_scene and pill.scene() != new_scene:
                     new_scene.addItem(pill)
-                    pill.setPos(self.scenePos())
-            elif change in (QtWidgets.QGraphicsItem.ItemPositionHasChanged, QtWidgets.QGraphicsItem.ItemScenePositionHasChanged):
-                pill.setPos(self.scenePos())
+                pill.refresh_geometry()
+                self.sync_pill_visibility()
+            elif change in (
+                QtWidgets.QGraphicsItem.ItemPositionHasChanged,
+                QtWidgets.QGraphicsItem.ItemScenePositionHasChanged,
+            ):
+                pill.setPos(self._pill_anchor_pos())
             elif change == QtWidgets.QGraphicsItem.ItemSelectedChange:
                 pill.setZValue(1001.0 if value else 1000.0)
-                pill.update()
+                if pill.isVisible():
+                    pill.update()
             elif change == QtWidgets.QGraphicsItem.ItemVisibleHasChanged:
-                pill.setVisible(bool(value))
+                self.sync_pill_visibility()
         return res
 
     def is_zoomed_out_mode(self, painter: Optional[QtGui.QPainter] = None) -> bool:
@@ -906,24 +944,20 @@ class ExecutableNodeItem(NodeItem):
         return (EXEC_NODE_BASE_FONT_PT * lod) < EXEC_NODE_MIN_FONT_PT
 
     def auto_switch_mode(self) -> None:
-        """Keep normal node information visible at all zoom levels; sync floating pill state."""
-        pill = getattr(self, "_pill_item", None)
-        if pill and self.scene():
-            if pill.scene() != self.scene():
-                self.scene().addItem(pill)
-            pill.setPos(self.scenePos())
-            pill.setVisible(self.isVisible())
-            pill.update()
+        """Disable NodeGraphQt proxy mode while keeping paint() completely side-effect free."""
+        return
 
     def draw_node(self) -> None:
         super().draw_node()
         if hasattr(self, "_exec_overlay") and self._exec_overlay:
             self._exec_overlay.prepareGeometryChange()
             self._exec_overlay.update()
-        if hasattr(self, "_pill_item") and self._pill_item:
-            self._pill_item.prepareGeometryChange()
-            self._pill_item.setPos(self.scenePos())
-            self._pill_item.update()
+        pill = getattr(self, "_pill_item", None)
+        if pill is not None:
+            pill.refresh_geometry()
+            self.sync_pill_visibility()
+            if pill.isVisible():
+                pill.update()
 
     def set_execution_state(
         self,
@@ -932,8 +966,11 @@ class ExecutableNodeItem(NodeItem):
         visible: Optional[bool] = None,
     ) -> None:
         self._exec_overlay.set_state(status=status, elapsed_sec=elapsed_sec, visible=visible)
-        if hasattr(self, "_pill_item") and self._pill_item:
-            self._pill_item.update()
+        pill = getattr(self, "_pill_item", None)
+        if pill is not None:
+            pill.refresh_geometry()
+            if pill.isVisible():
+                pill.update()
         self.update()
 
     def advance_execution_animation(self, delta_offset: float = 1.2, elapsed_sec: Optional[float] = None) -> None:
@@ -945,14 +982,6 @@ class ExecutableNodeItem(NodeItem):
         self._active_painter = painter
         try:
             super().paint(painter, option, widget)
-            pill = getattr(self, "_pill_item", None)
-            if pill:
-                if self.scene() and pill.scene() != self.scene():
-                    self.scene().addItem(pill)
-                pill.setPos(self.scenePos())
-                pill.setVisible(self.isVisible())
-                if self.is_zoomed_out_mode(painter):
-                    pill.update()
         finally:
             self._active_painter = None
 
@@ -2557,6 +2586,9 @@ __all__ = [
     "CircularInfoButtonItem",
     "CustomNodeTextItem",
     "DEFAULT_GROUP_COLOR",
+    "EXEC_NODE_BASE_FONT_PT",
+    "EXEC_NODE_MIN_FONT_PT",
+    "EXEC_NODE_ZOOM_THRESHOLD",
     "ExecutableNodeItem",
     "FloatingPillItem",
     "GROUP_DARK_COLORS",

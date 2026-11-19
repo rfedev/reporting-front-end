@@ -1,6 +1,6 @@
-"""Built-in SQL code editor panel with line numbers, syntax highlighting, and live sqlglot validation."""
+"""Built-in SQL code editor and Results Preview panel."""
 
-from typing import Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from PySide6.QtCore import QRect, QSize, QTimer, Qt, Signal
 from PySide6.QtGui import (
@@ -21,11 +21,16 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QSizePolicy,
+    QStackedWidget,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
+from reporting_app.presentation.flow_editor.results_preview_widget import (
+    ResultsPreviewWidget,
+    TableBoxPreviewSpec,
+)
 from reporting_app.presentation.flow_editor.sql_highlighter import (
     SqlSyntaxErrorInfo,
     SqlSyntaxHighlighter,
@@ -59,7 +64,7 @@ class SqlCodeEditor(QPlainTextEdit):
         self.setFont(font)
         self.setTabStopDistance(QFontMetrics(font).horizontalAdvance(" ") * 4)
         self.setLineWrapMode(QPlainTextEdit.NoWrap)
-        self.setPlaceholderText("Select a single query node on the canvas to view and edit its SQL.")
+        self.setPlaceholderText("Select a query node to edit SQL, or a table box to preview results.")
         self.setStyleSheet(
             "QPlainTextEdit { "
             "background-color: #16181d; color: #e5e7eb; "
@@ -318,21 +323,30 @@ class SqlEditorPanel(QWidget):
         self.clear_query()
 
     def _build_ui(self) -> None:
-        layout = QVBoxLayout(self)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+
+        self._stack = QStackedWidget(self)
+        outer_layout.addWidget(self._stack)
+
+        # Page 0: SQL Code Editor
+        self._sql_page = QWidget(self)
+        layout = QVBoxLayout(self._sql_page)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(4)
 
-        # Header Row: Query title (left) + Save button (right)
+        # Header Row: Query title (left) + Save button + Close button (right)
         header_row = QHBoxLayout()
         header_row.setContentsMargins(2, 0, 0, 2)
         header_row.setSpacing(6)
 
-        self.title_label = QLabel("No Query Selected", self)
+        self.title_label = QLabel("No Query Selected", self._sql_page)
         self.title_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.title_label.setStyleSheet("font-size: 13px; font-weight: bold; color: #f3f4f6;")
         header_row.addWidget(self.title_label, 1)
 
-        self.save_btn = QPushButton("💾 Save", self)
+        self.save_btn = QPushButton("💾 Save", self._sql_page)
         self.save_btn.setFixedHeight(24)
         self.save_btn.setToolTip("Save SQL File (Ctrl+S)")
         self.save_btn.setStyleSheet(
@@ -343,38 +357,38 @@ class SqlEditorPanel(QWidget):
         self.save_btn.clicked.connect(self.request_save)
         header_row.addWidget(self.save_btn)
 
-        self.close_btn = QPushButton("☰", self)
+        self.close_btn = QPushButton("☰", self._sql_page)
         self.close_btn.setFixedSize(26, 24)
-        self.close_btn.setToolTip("Close SQL Editor Panel")
+        self.close_btn.setToolTip("SQL Editor / Results Preview")
         self.close_btn.setStyleSheet("QPushButton { font-size: 14px; padding: 0px; }")
         self.close_btn.clicked.connect(self.close_requested.emit)
         header_row.addWidget(self.close_btn)
 
         layout.addLayout(header_row)
 
-        sep = QFrame(self)
+        sep = QFrame(self._sql_page)
         sep.setFrameShape(QFrame.HLine)
         sep.setFrameShadow(QFrame.Sunken)
         sep.setStyleSheet("color: #374151;")
         layout.addWidget(sep)
 
         # SQL Code Editor + Syntax Highlighter
-        self.editor = SqlCodeEditor(self)
+        self.editor = SqlCodeEditor(self._sql_page)
         self.highlighter = SqlSyntaxHighlighter(self.editor.document())
         self.editor.textChanged.connect(self._on_editor_text_changed)
         layout.addWidget(self.editor, 1)
 
-        # Syntax Status Footer + BigQuery Dry-Run Button
+        # Syntax Status Footer + BigQuery Validate (Dry-Run) Button
         footer_row = QHBoxLayout()
         footer_row.setContentsMargins(0, 0, 0, 0)
         footer_row.setSpacing(6)
 
-        self.syntax_status_label = QLabel("No query selected", self)
+        self.syntax_status_label = QLabel("", self._sql_page)
         self.syntax_status_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.syntax_status_label.setStyleSheet("font-size: 11px; color: #9ca3af; padding: 2px 4px;")
         footer_row.addWidget(self.syntax_status_label, 1)
 
-        self.dry_run_btn = QPushButton("☁ Dry Run", self)
+        self.dry_run_btn = QPushButton("Validate", self._sql_page)
         self.dry_run_btn.setFixedHeight(22)
         self.dry_run_btn.setToolTip("Validate query with BigQuery Native Dry-Run")
         self.dry_run_btn.setStyleSheet(
@@ -386,6 +400,13 @@ class SqlEditorPanel(QWidget):
         footer_row.addWidget(self.dry_run_btn)
 
         layout.addLayout(footer_row)
+        self._stack.addWidget(self._sql_page)
+
+        # Page 1: Results Preview
+        self.results_preview = ResultsPreviewWidget(parent=self)
+        self.results_preview.close_requested.connect(self.close_requested.emit)
+        self._stack.addWidget(self.results_preview)
+        self._stack.setCurrentWidget(self._sql_page)
 
     def _update_header(self) -> None:
         if not self._current_query_name:
@@ -415,6 +436,7 @@ class SqlEditorPanel(QWidget):
 
     def load_query(self, query_name: str, sql_text: str) -> None:
         """Load SQL text for the selected QueryNode into the editor."""
+        self._stack.setCurrentWidget(self._sql_page)
         self._validation_timer.stop()
         self._loading_text = True
         try:
@@ -432,7 +454,8 @@ class SqlEditorPanel(QWidget):
         self.run_syntax_check()
 
     def clear_query(self) -> None:
-        """Reset the panel to an empty read-only state when no single query node is selected."""
+        """Reset the panel to an empty read-only state when no single query or table node is selected."""
+        self._stack.setCurrentWidget(self._sql_page)
         self._validation_timer.stop()
         self._loading_text = True
         try:
@@ -452,9 +475,56 @@ class SqlEditorPanel(QWidget):
         self._update_header()
         if hasattr(self, "dry_run_btn"):
             self.dry_run_btn.setEnabled(False)
-        self.syntax_status_label.setText("No query selected")
+        self.syntax_status_label.setText("")
         self.syntax_status_label.setToolTip("")
         self.syntax_status_label.setStyleSheet("font-size: 11px; color: #9ca3af; padding: 2px 4px;")
+
+    def show_table_box_preview(self, spec: TableBoxPreviewSpec) -> None:
+        """Switch panel to Results Preview mode for the selected TableBoxNode."""
+        self._validation_timer.stop()
+        self._loading_text = True
+        try:
+            was_dirty = self._is_dirty
+            self._current_query_name = None
+            self._saved_sql_text = ""
+            self._is_dirty = False
+            self._syntax_errors = []
+            self.editor.clear()
+            self.editor.setReadOnly(True)
+            self.editor.set_error_lines({})
+        finally:
+            self._loading_text = False
+
+        if was_dirty:
+            self.dirty_changed.emit(False)
+        self._update_header()
+        if hasattr(self, "dry_run_btn"):
+            self.dry_run_btn.setEnabled(False)
+        self.syntax_status_label.setText("")
+        self.syntax_status_label.setToolTip("")
+
+        self.results_preview.show_table_box(spec)
+        self._stack.setCurrentWidget(self.results_preview)
+
+    def is_showing_results_preview(self) -> bool:
+        return hasattr(self, "_stack") and hasattr(self, "results_preview") and (
+            self._stack.currentWidget() is self.results_preview
+        )
+
+    def set_preview_cache(
+        self,
+        cache: Any,
+        row_limit_getter: Optional[Callable[[], int]] = None,
+    ) -> None:
+        if hasattr(self, "results_preview"):
+            self.results_preview.set_cache(cache, row_limit_getter=row_limit_getter)
+
+    def shutdown(self) -> None:
+        """Stop validation timer and any background preview fetch workers cleanly."""
+        if self._validation_timer.isActive():
+            self._validation_timer.stop()
+        if hasattr(self, "results_preview"):
+            self.results_preview.shutdown()
 
     def rename_current_query(self, new_query_name: str) -> None:
         """Update the displayed query title after the active query is renamed."""
@@ -495,7 +565,7 @@ class SqlEditorPanel(QWidget):
 
         if not sql_text.strip():
             self.editor.set_error_lines({})
-            self.syntax_status_label.setText("Empty SQL file")
+            self.syntax_status_label.setText("")
             self.syntax_status_label.setToolTip("")
             self.syntax_status_label.setStyleSheet("font-size: 11px; color: #9ca3af; padding: 2px 4px;")
             return []
@@ -517,10 +587,11 @@ class SqlEditorPanel(QWidget):
             self.syntax_status_label.setToolTip("\n".join(f"Line {e.line}, Col {e.col}: {e.message}" for e in errors))
             self.syntax_status_label.setStyleSheet("font-size: 11px; color: #f87171; padding: 2px 4px;")
         else:
+            # Only show sqlglot validation text when validation fails
             self.editor.set_error_lines({})
-            self.syntax_status_label.setText("✓ Valid BigQuery SQL")
-            self.syntax_status_label.setToolTip("Parsed successfully with sqlglot (BigQuery dialect)")
-            self.syntax_status_label.setStyleSheet("font-size: 11px; color: #34d399; padding: 2px 4px;")
+            self.syntax_status_label.setText("")
+            self.syntax_status_label.setToolTip("")
+            self.syntax_status_label.setStyleSheet("font-size: 11px; color: #9ca3af; padding: 2px 4px;")
 
         return list(errors)
 
@@ -549,9 +620,9 @@ class SqlEditorPanel(QWidget):
             self.dry_run_btn.setEnabled(
                 (not in_progress) and bool(self._current_query_name and self.editor.toPlainText().strip())
             )
-            self.dry_run_btn.setText("⏳ Checking..." if in_progress else "☁ Dry Run")
+            self.dry_run_btn.setText("⏳ Validating..." if in_progress else "Validate")
         if in_progress:
-            self.syntax_status_label.setText("Running BigQuery dry-run...")
+            self.syntax_status_label.setText("Validating with BigQuery...")
             self.syntax_status_label.setStyleSheet("font-size: 11px; color: #93c5fd; padding: 2px 4px;")
 
     def show_dry_run_result(self, result: dict) -> None:
@@ -560,17 +631,17 @@ class SqlEditorPanel(QWidget):
             return
         if result.get("valid"):
             self.editor.set_error_lines({})
-            msg = result.get("message") or "✓ BQ Dry-Run OK"
+            msg = result.get("message") or "✓ Valid"
             proj = result.get("project_id") or ""
             bytes_str = result.get("formatted_bytes") or "0 B"
             self.syntax_status_label.setText(msg)
             self.syntax_status_label.setToolTip(
-                f"BigQuery Dry-Run succeeded (Project: {proj}, Estimated bytes processed: {bytes_str})"
+                f"BigQuery validation succeeded (Project: {proj}, Estimated bytes processed: {bytes_str})"
             )
             self.syntax_status_label.setStyleSheet("font-size: 11px; color: #34d399; padding: 2px 4px;")
             return
 
-        err_msg = (result.get("error_message") or "BigQuery Dry-Run failed").strip()
+        err_msg = (result.get("error_message") or "BigQuery validation failed").strip()
         full_err = (result.get("full_error") or err_msg).strip()
         line = result.get("line")
         col = result.get("col") or 1
@@ -578,6 +649,6 @@ class SqlEditorPanel(QWidget):
             self.editor.set_error_lines({int(line): err_msg})
             self.syntax_status_label.setText(f"⚠ BQ Line {line}, Col {col}: {err_msg}")
         else:
-            self.syntax_status_label.setText(f"⚠ BQ Dry-Run: {err_msg}")
+            self.syntax_status_label.setText(f"⚠ BQ Error: {err_msg}")
         self.syntax_status_label.setToolTip(full_err)
         self.syntax_status_label.setStyleSheet("font-size: 11px; color: #f87171; padding: 2px 4px;")

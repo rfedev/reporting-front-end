@@ -16,6 +16,7 @@ class Repository:
     """Provides high-level data access methods using SQLAlchemy."""
 
     DEFAULT_LOG_DB_PATH = ".log.db"
+    DEFAULT_PREVIEW_ROW_LIMIT = 100
 
     def __init__(self, db_manager: DatabaseManager, log_db_manager: Optional[DatabaseManager] = None):
         self.db_manager = db_manager
@@ -99,6 +100,20 @@ class Repository:
 
     def set_auto_scan(self, enabled: bool) -> None:
         self.set_setting("auto_scan", "true" if enabled else "false")
+
+    def get_preview_row_limit(self) -> int:
+        """Return configured maximum rows for query Results Preview (clamped 1..10,000)."""
+        raw = self.get_setting("preview_row_limit", str(self.DEFAULT_PREVIEW_ROW_LIMIT))
+        try:
+            val = int(str(raw).strip())
+            return max(1, min(10000, val))
+        except Exception:
+            return self.DEFAULT_PREVIEW_ROW_LIMIT
+
+    def set_preview_row_limit(self, limit: int) -> None:
+        """Store maximum rows for query Results Preview (clamped 1..10,000)."""
+        clamped = max(1, min(10000, int(limit)))
+        self.set_setting("preview_row_limit", str(clamped))
 
     # --- Workbench Dataset (Requirement 4) ---
 

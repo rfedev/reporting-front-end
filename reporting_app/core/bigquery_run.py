@@ -189,7 +189,7 @@ def dry_run_bigquery_sql(
             "total_bytes_processed": total_bytes,
             "formatted_bytes": human_bytes,
             "project_id": active_project,
-            "message": f"✓ BQ Dry-Run OK ({human_bytes} est.)",
+            "message": f"✓ Valid ({human_bytes} est.)",
         }
     except Exception as exc:
         raw_msg = str(exc)
@@ -225,6 +225,7 @@ def run_bigquery_script(
     client: Optional[Any] = None,
     output_filename: Optional[str] = None,
     on_job_created: Optional[Any] = None,
+    preview_row_limit: int = 0,
 ) -> Dict[str, Any]:
     """Execute a single query script and conditionally export results to CSV.
 
@@ -367,6 +368,8 @@ def run_bigquery_script(
     total_row_count = 0
     exported_paths: List[str] = []
     export_details: List[Dict[str, Any]] = []
+    preview_entries: List[Dict[str, Any]] = []
+    eff_preview_limit = max(0, int(preview_row_limit or 0))
 
     def export_row_iterator_to_file(row_iter: Any, out_file: Path) -> int:
         t_export_start = datetime.now(timezone.utc)
@@ -374,12 +377,39 @@ def run_bigquery_script(
         total_rows_meta = getattr(row_iter, "total_rows", None)
         auto_stream = (isinstance(total_rows_meta, (int, float)) and total_rows_meta > 500_000)
         use_stream = stream_to_csv or auto_stream
+        row_schema = getattr(row_iter, "schema", None) if eff_preview_limit > 0 else None
+        stream_preview_rows: List[List[Any]] = []
+        stream_preview_cols: List[str] = []
+        stream_preview_types: List[str] = []
+        stream_preview_modes: List[str] = []
+
+        if eff_preview_limit > 0 and row_schema is not None:
+            try:
+                from reporting_app.core.result_preview_cache import extract_schema_metadata
+
+                stream_preview_cols, stream_preview_types, stream_preview_modes = extract_schema_metadata(row_schema)
+            except Exception:
+                pass
 
         if auto_stream and not stream_to_csv:
             logger.info(
                 f"Auto-enabling stream_to_csv for {out_file.name}: "
                 f"result set has {int(total_rows_meta):,} rows (> 500,000 threshold)."
             )
+
+        captured_preview: Optional[Dict[str, Any]] = None
+
+        def _record_stream_row(row_obj: Any) -> None:
+            if eff_preview_limit <= 0 or len(stream_preview_rows) >= eff_preview_limit:
+                return
+            try:
+                from reporting_app.core.result_preview_cache import serialize_preview_value
+
+                if not stream_preview_cols and hasattr(row_obj, "keys"):
+                    stream_preview_cols.extend(str(k) for k in row_obj.keys())
+                stream_preview_rows.append([serialize_preview_value(v) for v in row_obj.values()])
+            except Exception:
+                pass
 
         if use_stream:
             logger.info(f"[{query_name}] Streaming rows page-by-page to {out_file.name}...")
@@ -392,6 +422,7 @@ def run_bigquery_script(
                             writer.writerow(row.keys())
                             header_written = True
                         writer.writerow(list(row.values()))
+                        _record_stream_row(row)
                         written_count += 1
         else:
             logger.info(f"[{query_name}] Downloading result set to DataFrame for {out_file.name}...")
@@ -399,6 +430,25 @@ def run_bigquery_script(
                 df = row_iter.to_dataframe(create_bqstorage_client=False)
                 df.to_csv(out_file, index=False)
                 written_count = len(df)
+                if eff_preview_limit > 0:
+                    try:
+                        from reporting_app.core.result_preview_cache import (
+                            build_preview_from_dataframe,
+                            make_csv_cache_key,
+                        )
+
+                        captured_preview = build_preview_from_dataframe(
+                            df=df,
+                            limit=eff_preview_limit,
+                            key=make_csv_cache_key(out_file),
+                            display_name=out_file.name,
+                            schema=row_schema,
+                            total_rows=written_count,
+                            source="bigquery",
+                            source_detail="BigQuery Query",
+                        ).to_dict()
+                    except Exception as prev_err:
+                        logger.debug(f"Preview extraction from DataFrame skipped for {out_file.name}: {prev_err}")
             except Exception as df_err:
                 logger.debug(f"Dataframe conversion fallback to manual CSV writing: {df_err}")
                 with open(out_file, "w", newline="", encoding="utf-8") as csvfile:
@@ -410,7 +460,32 @@ def run_bigquery_script(
                                 writer.writerow(row.keys())
                                 header_written = True
                             writer.writerow(list(row.values()))
+                            _record_stream_row(row)
                             written_count += 1
+
+        if eff_preview_limit > 0 and captured_preview is None and (stream_preview_cols or stream_preview_rows):
+            try:
+                from reporting_app.core.result_preview_cache import ResultPreviewData, make_csv_cache_key
+
+                captured_preview = ResultPreviewData(
+                    key=make_csv_cache_key(out_file),
+                    display_name=out_file.name,
+                    columns=stream_preview_cols,
+                    column_types=stream_preview_types if len(stream_preview_types) == len(stream_preview_cols) else [],
+                    column_modes=stream_preview_modes if len(stream_preview_modes) == len(stream_preview_cols) else [],
+                    rows=stream_preview_rows,
+                    total_rows=written_count,
+                    row_limit=eff_preview_limit,
+                    truncated=written_count > len(stream_preview_rows),
+                    source="bigquery",
+                    source_detail="BigQuery Query",
+                ).to_dict()
+            except Exception as prev_err:
+                logger.debug(f"Stream preview assembly skipped for {out_file.name}: {prev_err}")
+
+        if captured_preview is not None:
+            preview_entries.append(captured_preview)
+
         t_export_end = datetime.now(timezone.utc)
         export_dur = (t_export_end - t_export_start).total_seconds()
         logger.info(f"[{query_name}] CSV export completed: {written_count:,} rows written to {out_file.name} in {export_dur:.2f}s")
@@ -486,6 +561,24 @@ def run_bigquery_script(
                         logger.debug(f"Failed to fetch num_rows from table {tbl}: {e}")
 
         logger.info(f"Query {query_name} completed table creation/update in BigQuery ({total_row_count} rows).")
+
+    if eff_preview_limit > 0 and has_output_tables:
+        try:
+            from reporting_app.core.result_preview_cache import fetch_bigquery_table_preview
+
+            for tbl in output_tables:
+                try:
+                    pdata = fetch_bigquery_table_preview(
+                        tbl,
+                        limit=eff_preview_limit,
+                        project_id=active_project,
+                        client=client,
+                    )
+                    preview_entries.append(pdata.to_dict())
+                except Exception as prev_err:
+                    logger.debug(f"Preview capture skipped for output table {tbl}: {prev_err}")
+        except Exception as prev_imp_err:
+            logger.debug(f"Preview capture unavailable for output tables: {prev_imp_err}")
 
     exported_path_str = ", ".join(exported_paths) if exported_paths else None
     t_end = datetime.now(timezone.utc)
@@ -591,6 +684,7 @@ def run_bigquery_script(
         "total_bytes_billed": total_bytes_billed,
         "slot_millis": slot_millis,
         "cache_hit": cache_hit,
+        "preview_entries": preview_entries,
     }
 
 

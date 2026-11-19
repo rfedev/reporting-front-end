@@ -94,6 +94,13 @@ class AppController(QObject):
         """Update configured log database path."""
         self.repo.set_log_database_path(path_str)
 
+    def get_preview_row_limit(self) -> int:
+        return self.repo.get_preview_row_limit()
+
+    def set_preview_row_limit(self, limit: int) -> None:
+        """Update maximum number of rows returned and cached for results preview."""
+        self.repo.set_preview_row_limit(limit)
+
     def _create_default_process_flow(self, report: Report) -> ProcessFlowInfo:
         """Create a default 'Process Flow 01' if none exists for the report (Requirement 2)."""
         from reporting_app.persistence.flow_storage import FlowStorage

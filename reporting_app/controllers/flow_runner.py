@@ -149,6 +149,7 @@ class FlowWorker(QThread):
     lan_transfer_progress = Signal(int, int, str, float)  # file_idx, total_files, filename, pct
     lan_transfer_completed = Signal(int, int, str, bool, str)  # file_idx, total_files, filename, success, error_msg
     lan_transfer_finished = Signal(bool, int, int, str)  # all_success, total_copied, total_files, summary
+    previews_cached = Signal(list)  # list of cached preview keys
 
     def __init__(
         self,
@@ -162,6 +163,8 @@ class FlowWorker(QThread):
         outputs_dir: Optional[Path] = None,
         repo: Optional[Repository] = None,
         lan_output_folder: Optional[str] = None,
+        preview_cache: Optional[Any] = None,
+        preview_row_limit: int = 0,
         parent: Optional[QObject] = None,
     ):
         super().__init__(parent)
@@ -175,6 +178,8 @@ class FlowWorker(QThread):
         self.outputs_dir = Path(outputs_dir) if outputs_dir else (self.report_folder / "outputs")
         self.repo = repo
         self.lan_output_folder = Path(lan_output_folder.strip()) if (lan_output_folder and lan_output_folder.strip()) else None
+        self.preview_cache = preview_cache
+        self.preview_row_limit = max(0, int(preview_row_limit or 0))
         self._is_cancelled: bool = False
         self._active_bq_job: Optional[Any] = None
         self._job_lock = threading.Lock()
@@ -345,6 +350,20 @@ class FlowWorker(QThread):
                             log_line = f"[{idx}/{total_steps}] Imported '{f_path}' into '{d_table}' ({cnt_str})"
                             results_log.append(log_line)
                             self.log_message.emit(log_line)
+                            if self.preview_cache is not None and self.preview_row_limit > 0:
+                                try:
+                                    from reporting_app.core.result_preview_cache import fetch_bigquery_table_preview
+
+                                    wb_ds = self.repo.get_workbench_dataset() if self.repo else ""
+                                    pdata = fetch_bigquery_table_preview(
+                                        d_table,
+                                        limit=self.preview_row_limit,
+                                        workbench_dataset=wb_ds,
+                                    )
+                                    self.preview_cache.put(pdata)
+                                    self.previews_cached.emit([pdata.key])
+                                except Exception as prev_err:
+                                    logger.debug(f"Import preview capture skipped for {d_table}: {prev_err}")
                             imp_records.append({
                                 "file_path": str(f_path),
                                 "destination_table": d_table,
@@ -488,15 +507,32 @@ class FlowWorker(QThread):
                         if custom_csv and self.filename_date:
                             custom_csv = format_filename_with_date(custom_csv, self.filename_date)
     
-                        res = run_bigquery_script(
-                            sql_script_path=Path(qpath),
-                            report_name=self.report_name,
-                            outputs_dir=self.outputs_dir,
-                            parameters=self.param_values,
-                            output_filename=custom_csv,
-                            on_job_created=self._on_job_created,
-                        )
+                        run_kwargs: Dict[str, Any] = {
+                            "sql_script_path": Path(qpath),
+                            "report_name": self.report_name,
+                            "outputs_dir": self.outputs_dir,
+                            "parameters": self.param_values,
+                            "output_filename": custom_csv,
+                            "on_job_created": self._on_job_created,
+                        }
+                        if self.preview_row_limit > 0:
+                            run_kwargs["preview_row_limit"] = self.preview_row_limit
+                        res = run_bigquery_script(**run_kwargs)
                         self._clear_active_job()
+
+                        if self.preview_cache is not None and (res.get("preview_entries") or []):
+                            try:
+                                from reporting_app.core.result_preview_cache import ResultPreviewData
+
+                                cached_keys: List[str] = []
+                                for entry_dict in res.get("preview_entries") or []:
+                                    pdata = ResultPreviewData.from_dict(entry_dict)
+                                    self.preview_cache.put(pdata)
+                                    cached_keys.append(pdata.key)
+                                if cached_keys:
+                                    self.previews_cached.emit(cached_keys)
+                            except Exception as prev_err:
+                                logger.debug(f"Failed to persist query preview entries: {prev_err}")
     
                         t1 = datetime.now(timezone.utc)
                         wall_node_dur = (t1 - t0).total_seconds()
@@ -724,6 +760,8 @@ class FlowRunner(QObject):
         csv_map: Optional[Dict[str, str]] = None,
         outputs_dir: Optional[Path] = None,
         lan_output_folder: Optional[str] = None,
+        preview_cache: Optional[Any] = None,
+        preview_row_limit: int = 0,
     ) -> FlowWorker:
         """Create and return a configured FlowWorker for non-blocking execution."""
         return FlowWorker(
@@ -736,6 +774,8 @@ class FlowRunner(QObject):
             csv_map=csv_map,
             outputs_dir=outputs_dir,
             lan_output_folder=lan_output_folder,
+            preview_cache=preview_cache,
+            preview_row_limit=preview_row_limit,
             repo=self.repo,
             parent=self,
         )

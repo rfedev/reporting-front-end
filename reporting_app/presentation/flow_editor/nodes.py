@@ -1782,13 +1782,18 @@ class _ColorSwatchButton(QtWidgets.QWidget):
 class GroupColorPalettePopup(QtWidgets.QFrame):
     """Frameless dark horizontal popup bar displaying the 10 group box color swatches."""
 
-    def __init__(self, current_rgb: Tuple[int, int, int], on_select, parent=None):
+    _active_instance: Optional["GroupColorPalettePopup"] = None
+
+    def __init__(self, current_rgb: Tuple[int, int, int], on_select, cleanup_callback=None, parent=None):
         super().__init__(
             parent,
             QtCore.Qt.Popup | QtCore.Qt.FramelessWindowHint | QtCore.Qt.NoDropShadowWindowHint,
         )
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
         self._on_select = on_select
+        self._cleanup_callback = cleanup_callback
+        self._picked = False
+        self._cleaned_up = False
         cur = (int(current_rgb[0]), int(current_rgb[1]), int(current_rgb[2]))
 
         layout = QtWidgets.QHBoxLayout(self)
@@ -1800,10 +1805,30 @@ class GroupColorPalettePopup(QtWidgets.QFrame):
             btn.clicked.connect(self._handle_swatch_clicked)
             layout.addWidget(btn)
 
+    def _run_cleanup(self) -> None:
+        if GroupColorPalettePopup._active_instance is self:
+            GroupColorPalettePopup._active_instance = None
+        if not self._cleaned_up:
+            self._cleaned_up = True
+            if callable(self._cleanup_callback):
+                self._cleanup_callback()
+
     def _handle_swatch_clicked(self, rgb: Tuple[int, int, int]) -> None:
-        if callable(self._on_select):
-            self._on_select(rgb)
+        if self._picked:
+            return
+        self._picked = True
+        on_select = self._on_select
         self.close()
+        if callable(on_select):
+            on_select(rgb)
+
+    def hideEvent(self, event) -> None:
+        super().hideEvent(event)
+        self._run_cleanup()
+
+    def closeEvent(self, event) -> None:
+        self._run_cleanup()
+        super().closeEvent(event)
 
     def paintEvent(self, event) -> None:
         painter = QtGui.QPainter(self)
@@ -1880,9 +1905,19 @@ class GroupColorButtonItem(QtWidgets.QGraphicsItem):
 
     def mousePressEvent(self, event) -> None:
         if event.button() == QtCore.Qt.LeftButton:
+            self._hovered = False
+            self.update()
+            try:
+                self.ungrabMouse()
+            except Exception:
+                pass
+            if hasattr(self._group_item, "_clear_scene_mouse_grab"):
+                self._group_item._clear_scene_mouse_grab()
+            event.accept()
             if callable(self.callback):
                 self.callback(event.screenPos())
-            event.accept()
+            if hasattr(self._group_item, "_clear_scene_mouse_grab"):
+                QtCore.QTimer.singleShot(0, self._group_item._clear_scene_mouse_grab)
             return
         super().mousePressEvent(event)
 
@@ -1944,6 +1979,15 @@ class GroupPlayButtonItem(QtWidgets.QGraphicsItem):
 
     def mousePressEvent(self, event) -> None:
         if event.button() == QtCore.Qt.LeftButton:
+            self._hovered = False
+            self.update()
+            try:
+                self.ungrabMouse()
+            except Exception:
+                pass
+            parent_grp = self.parentItem()
+            if parent_grp is not None and hasattr(parent_grp, "_clear_scene_mouse_grab"):
+                parent_grp._clear_scene_mouse_grab()
             if callable(self.callback):
                 self.callback()
             event.accept()
@@ -2039,14 +2083,48 @@ class GroupBoxItem(BackdropNodeItem):
         if viewer and hasattr(viewer, "group_play_clicked"):
             viewer.group_play_clicked.emit(self.id)
 
+    def _clear_scene_mouse_grab(self) -> None:
+        """Ensure QGraphicsScene never retains a stale mouse grabber or LMB state after popup/button clicks."""
+        try:
+            scene = self.scene()
+            if scene is not None:
+                grabber = scene.mouseGrabberItem()
+                if grabber is not None:
+                    grabber.ungrabMouse()
+        except Exception:
+            pass
+        try:
+            viewer = self.viewer()
+            if viewer is not None:
+                viewer.LMB_state = False
+        except Exception:
+            pass
+        if hasattr(self, "_color_btn") and self._color_btn is not None:
+            self._color_btn._hovered = False
+            self._color_btn.update()
+
     def _on_color_btn_clicked(self, screen_pos: Optional[QtCore.QPoint] = None) -> None:
+        self._clear_scene_mouse_grab()
+        prior_popup = GroupColorPalettePopup._active_instance
+        if prior_popup is not None:
+            try:
+                prior_popup.close()
+            except Exception:
+                pass
+
         c = self.color or (*DEFAULT_GROUP_COLOR, 255)
         cur_rgb = (int(c[0]), int(c[1]), int(c[2]))
+        target_item = self
 
         def on_picked(rgb: Tuple[int, int, int]) -> None:
-            self.apply_group_color(rgb[0], rgb[1], rgb[2])
+            target_item.apply_group_color(rgb[0], rgb[1], rgb[2])
 
-        popup = GroupColorPalettePopup(cur_rgb, on_select=on_picked)
+        popup = GroupColorPalettePopup(
+            cur_rgb,
+            on_select=on_picked,
+            cleanup_callback=self._clear_scene_mouse_grab,
+        )
+        GroupColorPalettePopup._active_instance = popup
         self._active_color_popup = popup
         popup.adjustSize()
         if screen_pos is not None:
@@ -2054,9 +2132,12 @@ class GroupBoxItem(BackdropNodeItem):
             popup_y = screen_pos.y() - popup.height() - 10
             popup.move(popup_x, popup_y)
         popup.show()
+        QtCore.QTimer.singleShot(0, self._clear_scene_mouse_grab)
 
     def apply_group_color(self, r: int, g: int, b: int) -> None:
         """Apply a new RGB color to this group box and notify the viewer."""
+        if not self.id and getattr(self, "node", None) is not None:
+            self.id = getattr(self.node, "id", self.id)
         self.color = (int(r), int(g), int(b), 255)
         viewer = self.viewer()
         if viewer and hasattr(viewer, "group_color_changed"):
@@ -2291,6 +2372,8 @@ class GroupBoxNode(BackdropNode):
         self.set_color(*DEFAULT_GROUP_COLOR)
         self.create_property("backdrop_text", "", widget_type=NodePropWidgetEnum.QTEXT_EDIT.value, tab="Backdrop")
         self.create_property("member_node_names", [], widget_type=NodePropWidgetEnum.HIDDEN.value, tab="Backdrop")
+        if hasattr(self, "view") and self.view is not None:
+            self.view.node = self
 
     def wrap_nodes(self, nodes):
         """Set the backdrop size to fit around specified nodes and record their names."""

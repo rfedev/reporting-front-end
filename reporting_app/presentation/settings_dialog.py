@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSizePolicy,
+    QSpinBox,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -38,6 +39,7 @@ class SettingsDialog(QDialog):
 
     DEFAULT_WORKBENCH_DATASET = "iw-gid-prd-01-c683.gid_art_yourworkbenchID"
     DEFAULT_LOG_DB_PATH = ".log.db"
+    DEFAULT_PREVIEW_ROW_LIMIT = 100
 
     def __init__(
         self,
@@ -45,6 +47,7 @@ class SettingsDialog(QDialog):
         auto_scan: bool,
         workbench_dataset: str = "",
         log_database_path: str = "",
+        preview_row_limit: int = DEFAULT_PREVIEW_ROW_LIMIT,
         parent=None,
     ):
         super().__init__(parent)
@@ -56,6 +59,10 @@ class SettingsDialog(QDialog):
         self._auto_scan = auto_scan
         self._workbench_dataset = workbench_dataset
         self._log_database_path = log_database_path
+        try:
+            self._preview_row_limit = max(1, min(10000, int(preview_row_limit or self.DEFAULT_PREVIEW_ROW_LIMIT)))
+        except Exception:
+            self._preview_row_limit = self.DEFAULT_PREVIEW_ROW_LIMIT
 
         self._build_ui()
         self._populate_table()
@@ -114,6 +121,16 @@ class SettingsDialog(QDialog):
         self.log_db_browse_btn.clicked.connect(self._on_browse_log_db)
         log_db_layout.addWidget(self.log_db_browse_btn)
         form_layout.addRow("Log Database File:", log_db_layout)
+
+        self.preview_row_limit_spin = QSpinBox(self)
+        self.preview_row_limit_spin.setRange(1, 10000)
+        self.preview_row_limit_spin.setSingleStep(50)
+        self.preview_row_limit_spin.setSuffix(" rows")
+        self.preview_row_limit_spin.setValue(self._preview_row_limit)
+        self.preview_row_limit_spin.setToolTip(
+            "Maximum number of rows returned and cached for Results Preview."
+        )
+        form_layout.addRow("Results Preview Rows:", self.preview_row_limit_spin)
 
         self.auto_scan_checkbox = QCheckBox("Enable auto-scanning for reports, flows, and queries")
         self.auto_scan_checkbox.setChecked(self._auto_scan)
@@ -281,6 +298,9 @@ class SettingsDialog(QDialog):
 
     def get_log_database_path(self) -> str:
         return self.log_db_edit.text().strip()
+
+    def get_preview_row_limit(self) -> int:
+        return int(self.preview_row_limit_spin.value())
 
 
 

@@ -201,6 +201,7 @@ class FlowExecutionTab(QWidget):
     cancel_requested = Signal()
     error_dialog_requested = Signal(str)
     run_state_changed = Signal()
+    previews_cached = Signal(list)
 
     COLLAPSED_WIDTH = 340
     COLLAPSED_HEIGHT = 42
@@ -534,6 +535,8 @@ class FlowExecutionTab(QWidget):
         csv_map: Optional[Dict[str, str]] = None,
         outputs_dir: Optional[Path] = None,
         lan_output_folder: Optional[str] = None,
+        preview_cache: Optional[Any] = None,
+        preview_row_limit: int = 0,
         repo: Optional[Any] = None,
         context_title: str = "Process Flow",
     ) -> None:
@@ -586,7 +589,10 @@ class FlowExecutionTab(QWidget):
             csv_map=csv_map,
             outputs_dir=outputs_dir,
             lan_output_folder=lan_output_folder,
+            preview_cache=preview_cache,
+            preview_row_limit=preview_row_limit,
         )
+        self._active_worker.previews_cached.connect(self.previews_cached.emit)
         self._active_worker.step_started.connect(self._on_worker_step_started)
         self._active_worker.step_completed.connect(self._on_worker_step_completed)
         self._active_worker.flow_finished.connect(self._on_worker_flow_finished)

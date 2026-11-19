@@ -52,8 +52,16 @@ from reporting_app.core.bigquery_run import (
     run_bigquery_import_csv,
     run_bigquery_import_file,
     run_bigquery_script,
+    substitute_parameters,
 )
 from reporting_app.core.models import ProcessFlowInfo, QueryInfo, QueryParameter, Report
+from reporting_app.core.result_preview_cache import (
+    ResultPreviewCache,
+    ResultPreviewData,
+    make_bq_cache_key,
+    make_csv_cache_key,
+    normalize_bq_table_ref,
+)
 from reporting_app.core.sql_parser import sync_query_csv_comments, update_query_csv_comment
 from reporting_app.presentation.flow_editor.graph_builder import ProcessFlowGraphBuilder
 from reporting_app.utils.date_calc import format_filename_with_date
@@ -106,6 +114,10 @@ from reporting_app.presentation.flow_editor.report_tree_widget import (
     AddReportDialog,
     NewProcessFlowDialog,
     ReportFlowTreePanel,
+)
+from reporting_app.presentation.flow_editor.results_preview_widget import (
+    TableBoxPreviewSpec,
+    TablePreviewItemSpec,
 )
 from reporting_app.presentation.flow_editor.sql_editor_panel import SqlEditorPanel
 from reporting_app.presentation.query_dialog import QueryRunDialog
@@ -177,6 +189,8 @@ class ProcessFlowEditorWindow(QMainWindow):
             except Exception:
                 self._last_sql_panel_width = SqlEditorPanel.DEFAULT_WIDTH
         self._sql_panel_query_name: Optional[str] = None
+        self._sql_panel_table_box_id: Optional[str] = None
+        self.result_preview_cache = ResultPreviewCache()
         self._restoring_node_selection: bool = False
         self._prompting_sql_save: bool = False
         self._cancelled_sql_switch_in_event: bool = False
@@ -422,9 +436,19 @@ class ProcessFlowEditorWindow(QMainWindow):
                     viewer.CTRL_state = False
                     return orig_mouse_press(event)
 
+                # Clear any stale mouse grabber left by header control buttons before hit-testing
+                scene = viewer.scene()
+                if scene is not None:
+                    grabber = scene.mouseGrabberItem()
+                    if isinstance(grabber, (GroupColorButtonItem, GroupPlayButtonItem)):
+                        try:
+                            grabber.ungrabMouse()
+                        except Exception:
+                            pass
+
                 # Check if click lands on or near a pipe item: select only the pipe
                 map_pos = viewer.mapToScene(event.pos())
-                items_exact = viewer.scene().items(map_pos) if viewer.scene() else []
+                items_exact = scene.items(map_pos) if scene else []
                 # Check if user clicked directly on a port or UI control button (which have priority over pipes)
                 control_clicked = next(
                     (
@@ -444,6 +468,19 @@ class ProcessFlowEditorWindow(QMainWindow):
                     ),
                     None,
                 )
+                if isinstance(control_clicked, GroupColorButtonItem):
+                    target_group_item = getattr(control_clicked, "_group_item", None) or control_clicked.parentItem()
+                    viewer.LMB_state = False
+                    if hasattr(event, "globalPosition"):
+                        global_pt = event.globalPosition().toPoint()
+                    elif hasattr(viewer, "viewport") and viewer.viewport():
+                        global_pt = viewer.viewport().mapToGlobal(event.pos())
+                    else:
+                        global_pt = viewer.mapToGlobal(event.pos())
+                    if target_group_item is not None and hasattr(target_group_item, "_on_color_btn_clicked"):
+                        target_group_item._on_color_btn_clicked(global_pt)
+                    event.accept()
+                    return
                 if not control_clicked:
                     # Check if click is on or close to a pipe
                     items_near_pipe = viewer._items_near(map_pos, PipeItem, 8, 8)
@@ -674,8 +711,14 @@ class ProcessFlowEditorWindow(QMainWindow):
         return None
 
     def _find_group_node_near(self, scene_pos: QtCore.QPointF) -> Optional[GroupBoxNode]:
-        """Find the most specific GroupBoxNode under the given scene point (header hits first, then smallest area)."""
-        candidates: List[Tuple[int, float, GroupBoxNode]] = []
+        """Find the most specific GroupBoxNode under the given scene point (header hits, smallest area, frontmost)."""
+        viewer = self.graph.viewer()
+        scene = viewer.scene() if viewer else None
+        scene_items = scene.items(scene_pos) if scene else []
+        stack_ranks = {item: idx for idx, item in enumerate(scene_items)}
+        default_rank = len(scene_items)
+
+        candidates: List[Tuple[int, float, int, GroupBoxNode]] = []
         for node in self.graph.all_nodes():
             if not (isinstance(node, GroupBoxNode) or getattr(node, "type_", "") == "reporting.nodes.GroupBoxNode"):
                 continue
@@ -689,12 +732,13 @@ class ProcessFlowEditorWindow(QMainWindow):
             header_h = float(getattr(view, "HEADER_HEIGHT", 32.0))
             in_header = local_pos.y() <= (rect.top() + header_h + 4.0)
             area = max(1.0, float(rect.width()) * float(rect.height()))
-            candidates.append((0 if in_header else 1, area, node))
+            rank = stack_ranks.get(view, default_rank)
+            candidates.append((0 if in_header else 1, area, rank, node))
 
         if not candidates:
             return None
-        candidates.sort(key=lambda entry: (entry[0], entry[1]))
-        return candidates[0][2]
+        candidates.sort(key=lambda entry: (entry[0], entry[1], entry[2]))
+        return candidates[0][3]
 
     def _find_note_node_near(self, scene_pos: QtCore.QPointF) -> Optional[NoteNode]:
         """Find a NoteNode directly under the given scene point."""
@@ -973,10 +1017,9 @@ class ProcessFlowEditorWindow(QMainWindow):
         self._update_run_button_state()
 
     def _on_select_all(self) -> None:
-        """Select all nodes on the canvas."""
-        # Do not select all nodes if user is currently typing in an input field
+        """Select all nodes on the canvas (or select all inside focused widget/preview table)."""
         focus_w = QtWidgets.QApplication.focusWidget()
-        if isinstance(focus_w, (QLineEdit, QTextEdit, QPlainTextEdit)):
+        if isinstance(focus_w, (QLineEdit, QTextEdit, QPlainTextEdit, QtWidgets.QAbstractItemView)):
             if hasattr(focus_w, "selectAll"):
                 focus_w.selectAll()
             return
@@ -1132,12 +1175,12 @@ class ProcessFlowEditorWindow(QMainWindow):
         self.appearance_btn.setMenu(appearance_menu)
         toolbar.addWidget(self.appearance_btn)
 
-        # Built-in SQL Editor panel toggle button ('☰')
+        # Built-in SQL Editor / Results Preview panel toggle button ('☰')
         self.sql_panel_btn = QPushButton("☰", self)
         self.sql_panel_btn.setFixedSize(28, 28)
         self.sql_panel_btn.setCheckable(True)
         self.sql_panel_btn.setChecked(self._sql_panel_open)
-        self.sql_panel_btn.setToolTip("Toggle SQL Editor Panel")
+        self.sql_panel_btn.setToolTip("SQL Editor / Results Preview")
         self.sql_panel_btn.setStyleSheet(
             "QPushButton { font-size: 15px; padding: 0px; }"
             "QPushButton:checked { background-color: #2b78e4; color: white; border: 1px solid #3b82f6; }"
@@ -1196,6 +1239,7 @@ class ProcessFlowEditorWindow(QMainWindow):
         self.execution_tab = FlowExecutionTab(self.graph_widget, editor_window=self)
         self.execution_tab.hide()
         self.execution_tab.run_state_changed.connect(self._update_run_button_state)
+        self.execution_tab.previews_cached.connect(self._on_previews_cached)
 
         # Center Area: [Middle Canvas Panel (Toolbar + Graph)] + [Built-in SQL Editor Panel]
         self.canvas_panel = QWidget(self)
@@ -1208,6 +1252,7 @@ class ProcessFlowEditorWindow(QMainWindow):
         self.canvas_panel.installEventFilter(self)
 
         self.sql_editor_panel = SqlEditorPanel(self)
+        self.sql_editor_panel.set_preview_cache(self.result_preview_cache, self._get_preview_row_limit)
         self.sql_editor_panel.save_requested.connect(self._on_sql_panel_save_requested)
         self.sql_editor_panel.dry_run_requested.connect(self._on_sql_panel_dry_run_requested)
         self.sql_editor_panel.close_requested.connect(lambda: self._on_toggle_sql_panel(False))
@@ -1519,6 +1564,8 @@ class ProcessFlowEditorWindow(QMainWindow):
         for node in self.graph.all_nodes():
             if isinstance(node, TableBoxNode) or node.type_ == "reporting.nodes.TableBoxNode":
                 node.set_display_mode(self.show_full_table_names)
+        if hasattr(self, "sql_editor_panel") and self.sql_editor_panel.is_showing_results_preview():
+            self._sync_sql_panel_with_selection(force_reload=True)
 
     def _fit_graph_to_canvas(self) -> None:
         """Fit nodes into the available canvas.
@@ -2488,6 +2535,7 @@ class ProcessFlowEditorWindow(QMainWindow):
 
             self._load_initial_graph()
             self._sql_panel_query_name = None
+            self._sql_panel_table_box_id = None
             if hasattr(self, "sql_editor_panel"):
                 self.sql_editor_panel.clear_query()
             self._refresh_right_queries()
@@ -2818,6 +2866,7 @@ class ProcessFlowEditorWindow(QMainWindow):
             auto_scan=self.app_controller.get_auto_scan(),
             workbench_dataset=self.app_controller.repo.get_workbench_dataset(),
             log_database_path=self.app_controller.get_log_database_path(),
+            preview_row_limit=self.app_controller.get_preview_row_limit(),
             parent=self,
         )
         if dialog.exec() == SettingsDialog.Accepted:
@@ -2825,9 +2874,11 @@ class ProcessFlowEditorWindow(QMainWindow):
             new_auto_scan = dialog.get_auto_scan()
             new_wb = dialog.get_workbench_dataset()
             new_log_db = dialog.get_log_database_path()
+            new_preview_limit = dialog.get_preview_row_limit()
 
             self.app_controller.set_auto_scan(new_auto_scan)
             self.app_controller.repo.set_workbench_dataset(new_wb)
+            self.app_controller.set_preview_row_limit(new_preview_limit)
             if new_log_db and new_log_db != self.app_controller.get_log_database_path():
                 self.app_controller.set_log_database_path(new_log_db)
             if hasattr(self, "left_panel"):
@@ -2892,12 +2943,27 @@ class ProcessFlowEditorWindow(QMainWindow):
             repo = self.app_controller.repo
 
             try:
-                res = run_bigquery_script(
-                    sql_script_path=qinfo.file_path,
-                    report_name=active_report.name,
-                    outputs_dir=outputs_dir,
-                    parameters=values,
-                )
+                preview_limit = self._get_preview_row_limit()
+                standalone_kwargs: Dict[str, Any] = {
+                    "sql_script_path": qinfo.file_path,
+                    "report_name": active_report.name,
+                    "outputs_dir": outputs_dir,
+                    "parameters": values,
+                }
+                if preview_limit > 0:
+                    standalone_kwargs["preview_row_limit"] = preview_limit
+                res = run_bigquery_script(**standalone_kwargs)
+                if hasattr(self, "result_preview_cache") and (res.get("preview_entries") or []):
+                    cached_keys: List[str] = []
+                    for entry_dict in res.get("preview_entries") or []:
+                        try:
+                            pdata = ResultPreviewData.from_dict(entry_dict)
+                            self.result_preview_cache.put(pdata)
+                            cached_keys.append(pdata.key)
+                        except Exception as prev_err:
+                            logger.debug(f"Failed to cache standalone query preview: {prev_err}")
+                    if cached_keys:
+                        self._on_previews_cached(cached_keys)
                 msgs = []
                 if res.get("has_output_tables"):
                     tbls = ", ".join(res.get("output_tables", []))
@@ -3158,7 +3224,18 @@ class ProcessFlowEditorWindow(QMainWindow):
                     logger.warning(f"Failed to open with xdg-open: {e}")
 
     def _on_copy_selected(self) -> None:
-        """Copy all selected query, CSV import, and note nodes."""
+        """Copy selected preview table cells / editor text when focused inside panel, else copy selected canvas nodes."""
+        focus_w = QtWidgets.QApplication.focusWidget()
+        if focus_w is not None and hasattr(self, "sql_editor_panel") and (
+            focus_w is self.sql_editor_panel or self.sql_editor_panel.isAncestorOf(focus_w)
+        ):
+            if hasattr(focus_w, "copy_selection_to_clipboard"):
+                focus_w.copy_selection_to_clipboard(include_headers=False)
+                return
+            if hasattr(focus_w, "copy"):
+                focus_w.copy()
+                return
+
         selected_nodes = self.graph.selected_nodes()
         nodes_to_copy = [
             n for n in selected_nodes
@@ -3205,7 +3282,15 @@ class ProcessFlowEditorWindow(QMainWindow):
         self.status_bar.showMessage(f"Copied {count} node(s) to clipboard.", 3000)
 
     def _on_paste(self) -> None:
-        """Paste all copied query, CSV import, and note nodes from clipboard."""
+        """Paste focused text or paste copied query, CSV import, and note nodes from clipboard."""
+        focus_w = QtWidgets.QApplication.focusWidget()
+        if focus_w is not None and hasattr(self, "sql_editor_panel") and (
+            focus_w is self.sql_editor_panel or self.sql_editor_panel.isAncestorOf(focus_w)
+        ):
+            if hasattr(focus_w, "paste"):
+                focus_w.paste()
+            return
+
         if not getattr(self, "_clipboard_nodes", None) or not self.report:
             return
 
@@ -3352,6 +3437,12 @@ class ProcessFlowEditorWindow(QMainWindow):
 
         Tables are automatically managed and cannot be directly deleted.
         """
+        focus_w = QtWidgets.QApplication.focusWidget()
+        if focus_w is not None and hasattr(self, "sql_editor_panel") and (
+            focus_w is self.sql_editor_panel or self.sql_editor_panel.isAncestorOf(focus_w)
+        ):
+            return
+
         selected_nodes = self.graph.selected_nodes()
         deletable_exec_nodes = [
             n for n in selected_nodes
@@ -3780,12 +3871,16 @@ class ProcessFlowEditorWindow(QMainWindow):
         except Exception as e:
             logger.debug(f"Error saving splitter sizes on close: {e}")
 
-        # Stop debounce auto-save timer and shut down execution tab
+        # Stop debounce auto-save timer, shut down execution tab & preview workers, and delete temp preview files
         self._is_closing = True
         if hasattr(self, "_auto_save_timer") and self._auto_save_timer.isActive():
             self._auto_save_timer.stop()
         if hasattr(self, "execution_tab"):
             self.execution_tab.shutdown()
+        if hasattr(self, "sql_editor_panel"):
+            self.sql_editor_panel.shutdown()
+        if hasattr(self, "result_preview_cache"):
+            self.result_preview_cache.cleanup()
 
         # Clear side panel tree/list item references cleanly before C++ teardown
         if hasattr(self, "left_panel") and hasattr(self.left_panel, "clear_items"):
@@ -3949,8 +4044,155 @@ class ProcessFlowEditorWindow(QMainWindow):
             return True
         return False
 
+    def _get_preview_row_limit(self) -> int:
+        """Return configured maximum number of rows for query Results Preview."""
+        if self.app_controller and self.app_controller.repo:
+            return self.app_controller.repo.get_preview_row_limit()
+        return 100
+
+    def _get_active_parameters_and_filename_date(self) -> Tuple[Dict[str, str], str]:
+        """Collect effective flow parameter values and resolved filename_date token."""
+        param_values = dict(self.flow_controller.parameter_defaults) if self.flow_controller else {}
+        filename_date = ""
+        if hasattr(self, "param_overlay"):
+            try:
+                if hasattr(self.param_overlay, "refresh_calculated_dates"):
+                    self.param_overlay.refresh_calculated_dates()
+                param_values.update(self.param_overlay.get_parameter_values())
+                filename_date = self.param_overlay.get_filename_date()
+            except Exception:
+                pass
+        if not filename_date and self.flow_controller:
+            sel_param = self.flow_controller.get_selected_filename_date_param()
+            if sel_param and sel_param in param_values:
+                filename_date = param_values[sel_param]
+            else:
+                for k, v in param_values.items():
+                    if any(token in k.lower() for token in ("date", "dt", "day", "month", "year")):
+                        filename_date = v
+                        break
+        return param_values, filename_date
+
+    def _get_single_selected_table_box_node(self) -> Optional[TableBoxNode]:
+        """Return TableBoxNode when exactly one Output Tables / Output CSV / Input Tables box is selected."""
+        selected = self._safe_selected_nodes()
+        if len(selected) != 1:
+            return None
+        node = selected[0]
+        if isinstance(node, TableBoxNode) or getattr(node, "type_", "") == "reporting.nodes.TableBoxNode":
+            box_type = ""
+            if hasattr(node, "get_property"):
+                box_type = str(node.get_property("box_type") or "")
+            if not box_type:
+                box_type = str(getattr(getattr(node, "view", None), "table_box_type", "") or "")
+            if box_type in ("Output Tables", "Output CSV", "Input Tables"):
+                return node
+        return None
+
+    def _build_table_box_preview_spec(self, node: TableBoxNode) -> TableBoxPreviewSpec:
+        """Build cache keys and refresh metadata for every entry in a TableBoxNode."""
+        box_type = (
+            (node.get_property("box_type") if hasattr(node, "get_property") else "")
+            or getattr(getattr(node, "view", None), "table_box_type", "")
+            or "Output Tables"
+        )
+        query_owner = str((node.get_property("query_owner") if hasattr(node, "get_property") else "") or "").strip()
+
+        raw_list = [str(x).strip() for x in (getattr(node, "raw_tables", []) or []) if str(x).strip()]
+        if not raw_list and hasattr(node, "get_property"):
+            saved_json = node.get_property("raw_tables_json")
+            if saved_json:
+                try:
+                    parsed = json.loads(saved_json)
+                    if isinstance(parsed, list):
+                        raw_list = [str(x).strip() for x in parsed if str(x).strip()]
+                except Exception:
+                    pass
+
+        param_values, filename_date = self._get_active_parameters_and_filename_date()
+        wb_dataset = ""
+        if self.app_controller and self.app_controller.repo:
+            wb_dataset = self.app_controller.repo.get_workbench_dataset().strip()
+        default_project = wb_dataset.split(".")[0].strip() if "." in wb_dataset else ""
+
+        items: List[TablePreviewItemSpec] = []
+        if box_type == "Output CSV":
+            outputs_dir = (self.report.folder_path / "outputs") if self.report else Path("outputs")
+            qinfo = self._get_working_query(query_owner) if query_owner else None
+            sql_file_path = qinfo.file_path if (qinfo and qinfo.file_path) else None
+
+            for raw_entry in raw_list:
+                raw_csv = substitute_parameters(raw_entry, param_values)
+                resolved_name = format_filename_with_date(raw_csv, filename_date) if filename_date else raw_csv
+                if not resolved_name.lower().endswith(".csv"):
+                    resolved_name = f"{resolved_name}.csv"
+                raw_csv_name = raw_csv if raw_csv.lower().endswith(".csv") else f"{raw_csv}.csv"
+
+                csv_path = outputs_dir / resolved_name
+                fallback_csv_path = outputs_dir / raw_csv_name
+                fb_keys: List[str] = []
+                fb_key = make_csv_cache_key(fallback_csv_path)
+                primary_key = make_csv_cache_key(csv_path)
+                if fb_key != primary_key:
+                    fb_keys.append(fb_key)
+
+                items.append(
+                    TablePreviewItemSpec(
+                        cache_key=primary_key,
+                        fallback_keys=fb_keys,
+                        label=resolved_name,
+                        full_name=str(csv_path),
+                        kind="csv",
+                        csv_path=csv_path,
+                        fallback_csv_path=fallback_csv_path,
+                        query_name=query_owner,
+                        sql_file_path=sql_file_path,
+                    )
+                )
+        else:
+            for raw_tbl in raw_list:
+                sub_tbl = substitute_parameters(raw_tbl, param_values)
+                norm_tbl = normalize_bq_table_ref(
+                    sub_tbl,
+                    default_project=default_project,
+                    workbench_dataset=wb_dataset,
+                )
+                primary_key = make_bq_cache_key(norm_tbl)
+                fb_keys = []
+                for cand in (make_bq_cache_key(sub_tbl), make_bq_cache_key(raw_tbl)):
+                    if cand != primary_key and cand not in fb_keys:
+                        fb_keys.append(cand)
+
+                short_lbl = norm_tbl if self.show_full_table_names else norm_tbl.split(".")[-1]
+                items.append(
+                    TablePreviewItemSpec(
+                        cache_key=primary_key,
+                        fallback_keys=fb_keys,
+                        label=short_lbl,
+                        full_name=norm_tbl,
+                        kind="bq_table",
+                        bq_table_ref=norm_tbl,
+                        query_name=query_owner,
+                    )
+                )
+
+        return TableBoxPreviewSpec(
+            node_id=str(node.id),
+            box_type=str(box_type),
+            query_owner=query_owner,
+            items=items,
+            parameters=param_values,
+            project_id=default_project,
+            workbench_dataset=wb_dataset,
+        )
+
+    def _on_previews_cached(self, _keys: list) -> None:
+        """Refresh the open Results Preview panel when query/flow execution caches new results."""
+        if hasattr(self, "sql_editor_panel") and self.sql_editor_panel.is_showing_results_preview():
+            self.sql_editor_panel.results_preview.reload_from_cache()
+
     def _sync_sql_panel_with_selection(self, force_reload: bool = False) -> None:
-        """Load the selected QueryNode's SQL into the built-in SQL editor, or clear if none/multiple selected."""
+        """Load the selected QueryNode's SQL or TableBoxNode's Results Preview into the side panel."""
         if (
             not hasattr(self, "sql_editor_panel")
             or getattr(self, "_restoring_node_selection", False)
@@ -3966,30 +4208,81 @@ class ProcessFlowEditorWindow(QMainWindow):
             return
 
         target_qname = self._get_single_selected_query_node_name()
-        if not force_reload and target_qname == self._sql_panel_query_name:
+        target_tbox = None if target_qname else self._get_single_selected_table_box_node()
+
+        if target_qname:
+            target_state: Tuple[str, Optional[str]] = ("query", target_qname)
+        elif target_tbox is not None:
+            target_state = ("table_box", str(target_tbox.id))
+        else:
+            target_state = ("none", None)
+
+        if self._sql_panel_query_name:
+            current_state: Tuple[str, Optional[str]] = ("query", self._sql_panel_query_name)
+        elif self._sql_panel_table_box_id:
+            current_state = ("table_box", str(self._sql_panel_table_box_id))
+        else:
+            current_state = ("none", None)
+
+        if not force_reload and target_state == current_state:
             return
 
-        if target_qname != self._sql_panel_query_name and self.sql_editor_panel.is_dirty():
+        if target_state != current_state and self.sql_editor_panel.is_dirty():
             prev_qname = self._sql_panel_query_name
+            saved_tbox_meta = None
+            if target_tbox is not None:
+                saved_tbox_meta = (
+                    str(target_tbox.get_property("box_key") or "") if hasattr(target_tbox, "get_property") else "",
+                    str(target_tbox.get_property("box_type") or "") if hasattr(target_tbox, "get_property") else "",
+                    str(target_tbox.get_property("query_owner") or "") if hasattr(target_tbox, "get_property") else "",
+                )
             if not self._prompt_unsaved_sql_panel_changes():
                 self._cancelled_sql_switch_in_event = True
                 self._restore_query_node_selection(prev_qname)
                 QTimer.singleShot(0, self._finish_cancelled_sql_switch)
                 return
+            # Saving may have rebuilt canvas topology (recreating TableBoxNodes)
+            target_qname = self._get_single_selected_query_node_name()
+            target_tbox = None if target_qname else self._get_single_selected_table_box_node()
+            if target_tbox is None and saved_tbox_meta is not None:
+                sb_key, sb_type, sb_owner = saved_tbox_meta
+                for cand in self.graph.all_nodes():
+                    if isinstance(cand, TableBoxNode) or getattr(cand, "type_", "") == "reporting.nodes.TableBoxNode":
+                        ck = str(cand.get_property("box_key") or "") if hasattr(cand, "get_property") else ""
+                        ct = str(cand.get_property("box_type") or "") if hasattr(cand, "get_property") else ""
+                        co = str(cand.get_property("query_owner") or "") if hasattr(cand, "get_property") else ""
+                        if (sb_key and ck == sb_key) or (ct == sb_type and co == sb_owner):
+                            target_tbox = cand
+                            self._restoring_node_selection = True
+                            try:
+                                cand.set_selected(True)
+                            finally:
+                                self._restoring_node_selection = False
+                            break
 
-        self._sql_panel_query_name = target_qname
-        if not target_qname:
-            self.sql_editor_panel.clear_query()
+        if target_qname:
+            self._sql_panel_query_name = target_qname
+            self._sql_panel_table_box_id = None
+            qinfo = self._get_working_query(target_qname)
+            sql_text = ""
+            if qinfo and qinfo.file_path and qinfo.file_path.exists():
+                try:
+                    sql_text = qinfo.file_path.read_text(encoding="utf-8", errors="replace")
+                except Exception as e:
+                    logger.warning(f"Failed to read SQL file for '{target_qname}': {e}")
+            self.sql_editor_panel.load_query(target_qname, sql_text)
             return
 
-        qinfo = self._get_working_query(target_qname)
-        sql_text = ""
-        if qinfo and qinfo.file_path and qinfo.file_path.exists():
-            try:
-                sql_text = qinfo.file_path.read_text(encoding="utf-8", errors="replace")
-            except Exception as e:
-                logger.warning(f"Failed to read SQL file for '{target_qname}': {e}")
-        self.sql_editor_panel.load_query(target_qname, sql_text)
+        if target_tbox is not None:
+            self._sql_panel_query_name = None
+            self._sql_panel_table_box_id = str(target_tbox.id)
+            spec = self._build_table_box_preview_spec(target_tbox)
+            self.sql_editor_panel.show_table_box_preview(spec)
+            return
+
+        self._sql_panel_query_name = None
+        self._sql_panel_table_box_id = None
+        self.sql_editor_panel.clear_query()
 
     def _on_sql_panel_dry_run_requested(self, query_name: str, sql_text: str) -> dict:
         """Run BigQuery Native Dry-Run validation on the active SQL editor contents."""
@@ -4264,6 +4557,8 @@ class ProcessFlowEditorWindow(QMainWindow):
                 context_title=context_title,
                 repo=self.app_controller.repo if self.app_controller else None,
                 lan_output_folder=self.flow_controller.get_lan_output_folder(),
+                preview_cache=getattr(self, "result_preview_cache", None),
+                preview_row_limit=self._get_preview_row_limit(),
             )
 
     def _on_open_logs(self, filter_node: Optional[str] = None) -> None:

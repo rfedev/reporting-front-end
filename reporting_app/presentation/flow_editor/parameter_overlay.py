@@ -328,6 +328,15 @@ class CanvasParameterOverlay(QFrame):
                         self._last_selected_date_options[p] = text
                         if text.lower() == "pick date":
                             dp.setVisible(True)
+                            picked_str = c.get_picked_date() if hasattr(c, "get_picked_date") else ""
+                            picked_qdate = QDate.fromString(picked_str, "yyyy-MM-dd")
+                            if picked_qdate.isValid() and dp.date() != picked_qdate:
+                                was_blocked = dp.signalsBlocked()
+                                dp.blockSignals(True)
+                                try:
+                                    dp.setDate(picked_qdate)
+                                finally:
+                                    dp.blockSignals(was_blocked)
                             val = dp.date().toString("yyyy-MM-dd")
                         else:
                             dp.setVisible(False)
